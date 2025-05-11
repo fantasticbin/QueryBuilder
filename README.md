@@ -104,19 +104,29 @@ func (s *UserService) GetSort() any {
 ### 3. 使用 QueryBuilder 查询
 
 ```go
-package main
+package service
 
-func main() {
-    list := &List[User, UserFilter, UserSort]{}
+func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint32, error) { 
+    // 定义类型别名，简化泛型类型的推断
+    type filter = pb.ListUserFilter
+    type sort = pb.QueryUserListSort
+
+    list := &List[model.User, filter, sort]{}
     result, total, err := list.Query(
         ctx,
         &UserService{},
-        WithData[UserFilter, UserSort](NewDBProxy(&gorm.DB{}, nil)),
-        WithFilter[UserFilter, UserSort](&UserFilter{Name: "Alice"}),
-        WithSort[UserFilter, UserSort](UserSort{Field: "id", Direction: "asc"}),
+        WithData[filter, sort](NewDBProxy(model.db, nil)),
+        WithFilter[filter, sort](req.Filter),
+        WithSort[filter, sort](req.Sort),
+        WithStart[filter, sort](req.Start),
+        WithLimit[filter, sort](req.Limit),
     )
-}
+    if err != nil {
+        return nil, 0, err
+    }
 
+    return result, uint32(total), nil
+}
 ```
 
 ---
@@ -128,17 +138,15 @@ func main() {
 支持在查询链路中插入自定义中间件：
 
 ```go
-package main
+package service
 
-import (
-    "context"
-    "fmt"
-    "time"
-)
+func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint32, error) { 
+    // 定义类型别名，简化泛型类型的推断
+    type filter = pb.ListUserFilter
+    type sort = pb.QueryUserListSort
 
-func main() {
-    list := &List[User, UserFilter, UserSort]{}
-    list.Use(func(
+    list := &List[model.User, filter, sort]{}
+	list.Use(func(
         ctx context.Context,
         builder *builder[TestEntity],
         next func(context.Context,
@@ -157,13 +165,18 @@ func main() {
     result, total, err := list.Query(
         ctx,
         &UserService{},
-        WithData[UserFilter, UserSort](NewDBProxy(&gorm.DB{}, nil)),
-        WithFilter[UserFilter, UserSort](&UserFilter{Name: "Alice"}),
-        WithSort[UserFilter, UserSort](UserSort{Field: "id", Direction: "asc"}),
+        WithData[filter, sort](NewDBProxy(model.db, nil)),
+        WithFilter[filter, sort](req.Filter),
+        WithSort[filter, sort](req.Sort),
+        WithStart[filter, sort](req.Start),
+        WithLimit[filter, sort](req.Limit),
     )
+    if err != nil {
+        return nil, 0, err
+    }
+
+    return result, uint32(total), nil
 }
-
-
 ```
 
 ### Mock 测试
