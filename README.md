@@ -31,64 +31,69 @@ go get github.com/fantasticbin/querybuilder
 syntax = "proto3";
 
 service User {
-	rpc ListUser (ListUserRequest) returns (ListUserReply) {
-		option (google.api.http) = {
-			get: "/users"
-		};
-	};
+  rpc ListUser (ListUserRequest) returns (ListUserReply) {
+    option (google.api.http) = {
+      get: "/users"
+    };
+  };
 }
 
 message ListUserRequest {
-	ListUserFilter filter = 1;
-	QueryUserListSort sort = 2;
-	uint32 start = 3;
-	uint32 limit = 4;
+  ListUserFilter filter = 1;
+  QueryUserListSort sort = 2;
+  uint32 start = 3;
+  uint32 limit = 4;
 }
+
 message ListUserReply {
-	repeated UserInfo users = 1;
-	uint32 total = 2;
+  repeated UserInfo users = 1;
+  uint32 total = 2;
 }
 
 message ListUserFilter {
-	string name = 1;
-	UserStatus status = 2;
-	string created_at = 3;
+  string name = 1;
+  UserStatus status = 2;
+  string created_at = 3;
 }
 
 enum QueryUserListSort {
-	CREATED_AT = 0;
-	AGE = 1;
+  CREATED_AT = 0;
+  AGE = 1;
 }
 
 enum UserGender {
-	UNKNOWN = 0;
-	MALE = 1;
-	FEMALE = 2;
+  UNKNOWN = 0;
+  MALE = 1;
+  FEMALE = 2;
 }
 
 enum UserStatus {
-	NONE = 0;
-	NORMAL = 1;
-	BAN = 2;
+  NONE = 0;
+  NORMAL = 1;
+  BAN = 2;
 }
 
 message UserInfo {
-	uint64 id = 1;
-	string name = 2;
-	uint32 age = 3;
-	UserGender gender = 4;
-	UserStatus status = 5;
-	string created_at = 6;
+  uint64 id = 1;
+  string name = 2;
+  uint32 age = 3;
+  UserGender gender = 4;
+  UserStatus status = 5;
+  string created_at = 6;
 }
 ```
 
 ### 2. 创建 Service
 
 ```go
+package service
+
+import "context"
+
 type UserService struct{}
 
-func (s *UserService) GetFilter(ctx context.Context) (any, error) {
-	// 完善过滤逻辑
+func (s *UserService) GetFilter(ctx context.Context) (any, error) { 
+    // 完善过滤逻辑
 }
 
 func (s *UserService) GetSort() any {
@@ -99,14 +104,19 @@ func (s *UserService) GetSort() any {
 ### 3. 使用 QueryBuilder 查询
 
 ```go
-list := &List[User, UserFilter, UserSort]{}
-result, total, err := list.Query(
-    ctx,
-    &UserService{},
-	WithData[UserFilter, UserSort](NewDBProxy(&gorm.DB{}, nil)),
-    WithFilter[UserFilter, UserSort](&UserFilter{Name: "Alice"}),
-    WithSort[UserFilter, UserSort](UserSort{Field: "id", Direction: "asc"}),
-)
+package main
+
+func main() {
+    list := &List[User, UserFilter, UserSort]{}
+    result, total, err := list.Query(
+        ctx,
+        &UserService{},
+        WithData[UserFilter, UserSort](NewDBProxy(&gorm.DB{}, nil)),
+        WithFilter[UserFilter, UserSort](&UserFilter{Name: "Alice"}),
+        WithSort[UserFilter, UserSort](UserSort{Field: "id", Direction: "asc"}),
+    )
+}
+
 ```
 
 ---
@@ -118,22 +128,42 @@ result, total, err := list.Query(
 支持在查询链路中插入自定义中间件：
 
 ```go
-list.Use(func(
-    ctx context.Context,
-    builder *builder[TestEntity],
-    next func(context.Context,
-    ) ([]*TestEntity, int64, error)) ([]*TestEntity, int64, error) {
-    defer func() func() {
-        pre := time.Now()
-        return func() {
-            elapsed := time.Since(pre)
-            fmt.Println("elapsed:", elapsed)
-        }
-    }()()
-	
-    result, total, err := next(ctx)
-    return result, total, err
-})
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+)
+
+func main() {
+    list := &List[User, UserFilter, UserSort]{}
+    list.Use(func(
+        ctx context.Context,
+        builder *builder[TestEntity],
+        next func(context.Context,
+        ) ([]*TestEntity, int64, error)) ([]*TestEntity, int64, error) {
+        defer func() func() {
+            pre := time.Now()
+            return func() {
+                elapsed := time.Since(pre)
+                fmt.Println("elapsed:", elapsed)
+            }
+        }()()
+        
+        result, total, err := next(ctx)
+        return result, total, err
+    })
+    result, total, err := list.Query(
+        ctx,
+        &UserService{},
+        WithData[UserFilter, UserSort](NewDBProxy(&gorm.DB{}, nil)),
+        WithFilter[UserFilter, UserSort](&UserFilter{Name: "Alice"}),
+        WithSort[UserFilter, UserSort](UserSort{Field: "id", Direction: "asc"}),
+    )
+}
+
+
 ```
 
 ### Mock 测试
@@ -141,12 +171,30 @@ list.Use(func(
 方便地为单元测试注入 Mock 策略：
 
 ```go
-mockStrategy := NewMockQueryListStrategy[User](ctrl)
-mockStrategy.EXPECT().
+package main
+
+import (
+    "context"
+    "testing"
+    
+    "go.uber.org/mock/gomock"
+)
+
+func TestQueryList(t *testing.T) {
+    ctrl := gomock.NewController(t)
+    defer ctrl.Finish()
+    
+    list := &List[User, UserFilter, UserSort]{}
+    ctx := context.Background()
+    
+    // 创建 Mock 策略
+    mockStrategy := NewMockQueryListStrategy[User](ctrl)
+    mockStrategy.EXPECT().
     QueryList(ctx, gomock.Any()).
     Return([]*User{{ID: 1, Name: "Alice"}}, int64(1), nil)
-
-list.SetStrategy(mockStrategy)
+    
+    list.SetStrategy(mockStrategy)
+}
 ```
 
 ---
