@@ -107,9 +107,9 @@ func (s *UserService) GetSort() any {
 package service
 
 import (
-	"context"
-	pb "demo/api/user/v1"
-	"demo/internal/model"
+    "context"
+    pb "demo/api/user/v1"
+    "demo/internal/model"
 )
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) { 
@@ -117,7 +117,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
     type filter = pb.ListUserFilter
     type sort = pb.QueryUserListSort
 
-	list := NewList[model.User, filter, sort](&UserService{})
+    list := NewList[model.User, filter, sort](&UserService{})
     result, total, err := list.Query(
         ctx,
         WithData[filter, sort](NewDBProxy(model.db, nil)),
@@ -146,9 +146,9 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
 package service
 
 import (
-	"context"
-	pb "demo/api/user/v1"
-	"demo/internal/model"
+    "context"
+    pb "demo/api/user/v1"
+    "demo/internal/model"
 )
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) { 
@@ -157,7 +157,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
     type sort = pb.QueryUserListSort
 
     list := NewList[model.User, filter, sort](&UserService{})
-	list.Use(func(
+    list.Use(func(
         ctx context.Context,
         builder *builder[TestEntity],
         next func(context.Context,
@@ -200,8 +200,8 @@ import (
     "context"
     "testing"
 
-	pb "demo/api/user/v1"
-	"demo/internal/model"
+    pb "demo/api/user/v1"
+    "demo/internal/model"
     "go.uber.org/mock/gomock"
 )
 
@@ -213,7 +213,7 @@ func TestQueryList(t *testing.T) {
     type filter = pb.ListUserFilter
     type sort = pb.QueryUserListSort
     
-	list := NewList[model.User, filter, sort](&UserService{})
+    list := NewList[model.User, filter, sort](&UserService{})
     ctx := context.Background()
     
     // 创建 Mock 策略
