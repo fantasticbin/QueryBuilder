@@ -62,7 +62,6 @@ func TestQueryList(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		service        Service
 		mockSetup      func()
 		opts           []QueryOption[TestFilter, TestSort]
 		expectedResult []*TestEntity
@@ -70,8 +69,7 @@ func TestQueryList(t *testing.T) {
 		expectedErr    error
 	}{
 		{
-			name:    "无筛选查询&id升序",
-			service: &TestService{},
+			name: "无筛选查询&id升序",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
 					QueryList(ctx, gomock.Any()).
@@ -93,8 +91,7 @@ func TestQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-			name:    "无筛选查询&age降序",
-			service: &TestService{},
+			name: "无筛选查询&age降序",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
 					QueryList(ctx, gomock.Any()).
@@ -116,8 +113,7 @@ func TestQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-			name:    "有筛选查询",
-			service: &TestService{},
+			name: "有筛选查询",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
 					QueryList(ctx, gomock.Any()).
@@ -137,8 +133,7 @@ func TestQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-			name:    "无数据实例",
-			service: &TestService{},
+			name: "无数据实例",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
 					QueryList(ctx, gomock.Any()).
@@ -154,8 +149,7 @@ func TestQueryList(t *testing.T) {
 			expectedErr:    nil,
 		},
 		{
-			name:    "数据实例错误",
-			service: &TestService{},
+			name: "数据实例错误",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
 					QueryList(ctx, gomock.Any()).
@@ -171,7 +165,7 @@ func TestQueryList(t *testing.T) {
 		},
 	}
 
-	list := &List[TestEntity, TestFilter, TestSort]{}
+	list := NewList[TestEntity, TestFilter, TestSort](&TestService{})
 	// 这里使用 Mock 策略替代真实的策略
 	// 实际使用时会根据数据源自动选择
 	list.SetStrategy(mockStrategy)
@@ -198,7 +192,7 @@ func TestQueryList(t *testing.T) {
 				tt.mockSetup()
 			}
 
-			result, total, err := list.Query(ctx, tt.service, tt.opts...)
+			result, total, err := list.Query(ctx, tt.opts...)
 
 			if tt.expectedErr != nil {
 				if err == nil || err.Error() != tt.expectedErr.Error() {

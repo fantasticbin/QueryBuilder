@@ -41,6 +41,13 @@ func (s *BaseService[R, F, S]) QueryList(ctx context.Context) ([]*R, int64, erro
 type List[R any, F any, S any] struct {
 	strategy    Strategy[R]
 	middlewares []Middleware[R]
+	service     Service
+}
+
+func NewList[R any, F any, S any](service Service) *List[R, F, S] {
+	return &List[R, F, S]{
+		service: service,
+	}
 }
 
 // SetStrategy 设置查询策略
@@ -61,7 +68,6 @@ func (l *List[R, F, S]) Use(middlewares Middleware[R]) *List[R, F, S] {
 // 该方法会根据传入的Service实例和QueryOption选项执行查询
 func (l *List[R, F, S]) Query(
 	ctx context.Context,
-	s Service,
 	opts ...QueryOption[F, S],
 ) ([]*R, int64, error) {
 	options := LoadQueryOptions(opts...)
@@ -76,7 +82,7 @@ func (l *List[R, F, S]) Query(
 		},
 		filter:  options.GetFilter(),
 		sort:    options.GetSort(),
-		service: s,
+		service: l.service,
 	}
 
 	for _, m := range l.middlewares {

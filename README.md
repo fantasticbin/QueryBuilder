@@ -106,15 +106,20 @@ func (s *UserService) GetSort() any {
 ```go
 package service
 
-func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint32, error) { 
+import (
+	"context"
+	pb "demo/api/user/v1"
+	"demo/internal/model"
+)
+
+func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) { 
     // 定义类型别名，简化泛型类型的推断
     type filter = pb.ListUserFilter
     type sort = pb.QueryUserListSort
 
-    list := &List[model.User, filter, sort]{}
+	list := NewList[model.User, filter, sort](&UserService{})
     result, total, err := list.Query(
         ctx,
-        &UserService{},
         WithData[filter, sort](NewDBProxy(model.db, nil)),
         WithFilter[filter, sort](req.Filter),
         WithSort[filter, sort](req.Sort),
@@ -125,7 +130,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint
         return nil, 0, err
     }
 
-    return result, uint32(total), nil
+    return result, total, nil
 }
 ```
 
@@ -140,12 +145,18 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint
 ```go
 package service
 
-func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint32, error) { 
+import (
+	"context"
+	pb "demo/api/user/v1"
+	"demo/internal/model"
+)
+
+func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) { 
     // 定义类型别名，简化泛型类型的推断
     type filter = pb.ListUserFilter
     type sort = pb.QueryUserListSort
 
-    list := &List[model.User, filter, sort]{}
+    list := NewList[model.User, filter, sort](&UserService{})
 	list.Use(func(
         ctx context.Context,
         builder *builder[TestEntity],
@@ -164,7 +175,6 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint
     })
     result, total, err := list.Query(
         ctx,
-        &UserService{},
         WithData[filter, sort](NewDBProxy(model.db, nil)),
         WithFilter[filter, sort](req.Filter),
         WithSort[filter, sort](req.Sort),
@@ -175,7 +185,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, uint
         return nil, 0, err
     }
 
-    return result, uint32(total), nil
+    return result, total, nil
 }
 ```
 
@@ -189,22 +199,28 @@ package main
 import (
     "context"
     "testing"
-    
+
+	pb "demo/api/user/v1"
+	"demo/internal/model"
     "go.uber.org/mock/gomock"
 )
 
 func TestQueryList(t *testing.T) {
     ctrl := gomock.NewController(t)
     defer ctrl.Finish()
+	
+	// 定义类型别名，简化泛型类型的推断
+    type filter = pb.ListUserFilter
+    type sort = pb.QueryUserListSort
     
-    list := &List[User, UserFilter, UserSort]{}
+	list := NewList[model.User, filter, sort](&UserService{})
     ctx := context.Background()
     
     // 创建 Mock 策略
-    mockStrategy := NewMockQueryListStrategy[User](ctrl)
+    mockStrategy := NewMockQueryListStrategy[model.User](ctrl)
     mockStrategy.EXPECT().
     QueryList(ctx, gomock.Any()).
-    Return([]*User{{ID: 1, Name: "Alice"}}, int64(1), nil)
+    Return([]*model.User{{ID: 1, Name: "Alice"}}, int64(1), nil)
     
     list.SetStrategy(mockStrategy)
 }
