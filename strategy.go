@@ -3,7 +3,7 @@ package builder
 import (
 	"context"
 	"errors"
-	"github.com/fantasticbin/QueryBuilder/utils"
+	"github.com/fantasticbin/QueryBuilder/util"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -42,7 +42,7 @@ func (s *QueryGormListStrategy[R]) QueryList(
 	}
 
 	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
-	if err := utils.WaitAndGo(func() error {
+	if err := util.WaitAndGo(func() error {
 		query := builder.data.db.WithContext(ctx).
 			Model(&list).
 			Scopes(filterScope.(func(*gorm.DB) *gorm.DB), sortScope.(func(*gorm.DB) *gorm.DB))
@@ -101,7 +101,7 @@ func (s *QueryMongoListStrategy[R]) QueryList(
 	}
 
 	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
-	if err := utils.WaitAndGo(func() error {
+	if err := util.WaitAndGo(func() error {
 		findOpt := options.Find().SetSort(sortOpt)
 		if builder.needPagination {
 			if builder.limit < 1 {
