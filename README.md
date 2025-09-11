@@ -226,6 +226,39 @@ func TestQueryList(t *testing.T) {
 }
 ```
 
+### 入参辅助工具
+
+可使用内置的辅助工具简化入参设置：
+
+```go
+package service
+
+import (
+    "context"
+    pb "demo/api/user/v1"
+    "demo/internal/model"
+)
+
+func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
+    opts := NewOptionBuilderWithFilterAndSort(req.GetFilter(), req.GetSort()).
+        WithData(NewDBProxy(model.db, nil)).
+        WithStart(req.GetStart()).
+        WithNum(req.GetNum()).
+        LoadOptions()
+
+    list := NewList[model.User, filter, sort](&UserService{})
+    result, total, err := list.Query(
+        ctx,
+        opts...,
+    )
+    if err != nil {
+        return nil, 0, err
+    }
+
+    return result, total, nil
+}
+```
+
 ---
 
 ## 贡献

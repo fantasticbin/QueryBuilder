@@ -135,3 +135,58 @@ func WithNeedPagination[F Filter, S Sort](needPagination bool) QueryOption[F, S]
 		o.needPagination = needPagination
 	}
 }
+
+// OptionBuilder 选项构建器，用于类型推断
+type OptionBuilder[F any, S any] struct {
+	options []QueryOption[F, S]
+}
+
+// NewOptionBuilder 创建选项构建器，用于类型推断
+func NewOptionBuilder[F any, S any]() *OptionBuilder[F, S] {
+	return &OptionBuilder[F, S]{}
+}
+
+// NewOptionBuilderWithFilterAndSort 创建选项构建器，包含筛选器和排序
+func NewOptionBuilderWithFilterAndSort[F any, S any](filter *F, sort S) *OptionBuilder[F, S] {
+	builder := NewOptionBuilder[F, S]()
+	return builder.WithFilter(filter).WithSort(sort)
+}
+
+func (b *OptionBuilder[F, S]) WithData(data *DBProxy) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithData[F, S](data))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithFilter(filter *F) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithFilter[F, S](filter))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithSort(sort S) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithSort[F, S](sort))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithStart(start uint32) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithStart[F, S](start))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithLimit(limit uint32) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithLimit[F, S](limit))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithNeedTotal(needTotal bool) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithNeedTotal[F, S](needTotal))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithNeedPagination(needPagination bool) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithNeedPagination[F, S](needPagination))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) LoadOptions() []QueryOption[F, S] {
+	return b.options
+}

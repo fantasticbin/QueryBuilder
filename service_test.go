@@ -133,6 +133,27 @@ func TestQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
+			name: "有筛选查询&辅助工具",
+			mockSetup: func() {
+				mockStrategy.EXPECT().
+					QueryList(ctx, gomock.Any()).
+					Return([]*TestEntity{
+						{ID: 2, Name: "Bob", Age: 30},
+					}, int64(1), nil)
+			},
+			opts: NewOptionBuilderWithFilterAndSort(
+				&TestFilter{Name: "Bob"},
+				TestSort{Field: "id", Direction: "desc"},
+			).
+				WithData(NewDBProxy(&gorm.DB{}, nil)).
+				LoadOptions(),
+			expectedResult: []*TestEntity{
+				{ID: 2, Name: "Bob", Age: 30},
+			},
+			expectedTotal: 1,
+			expectedErr:   nil,
+		},
+		{
 			name: "无数据实例",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
