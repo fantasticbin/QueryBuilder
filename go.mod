@@ -1,13 +1,18 @@
 module github.com/fantasticbin/QueryBuilder
 
-go 1.18
+go 1.23.0
+
+toolchain go1.24.3
 
 require (
-	go.mongodb.org/mongo-driver v1.17.3
-	go.uber.org/mock v0.5.2
-	golang.org/x/sync v0.14.0
-	gorm.io/gorm v1.26.1
+        github.com/olivere/elastic/v7 v7.0.32
+        go.mongodb.org/mongo-driver v1.17.3
+        go.uber.org/mock v0.5.2
+        golang.org/x/sync v0.14.0
+        gorm.io/gorm v1.26.1
 )
+
+replace github.com/olivere/elastic/v7 => ./third_party/github.com/olivere/elastic/v7
 
 require (
 	github.com/golang/snappy v0.0.4 // indirect

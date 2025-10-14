@@ -3,15 +3,18 @@ package builder
 import (
 	"context"
 	"errors"
+	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gorm.io/gorm"
 )
 
 // DBProxy 数据实例结构
 type DBProxy struct {
-	db      *gorm.DB
-	mongodb *mongo.Collection // 需提前指定.Database("db_name").Collection("collection_name")
-	// redis、elasticsearch...
+	db           *gorm.DB
+	mongodb      *mongo.Collection // 需提前指定.Database("db_name").Collection("collection_name")
+	elastic      *elastic.Client
+	elasticIndex string
+	// redis...
 }
 
 // NewDBProxy 创建数据实例
@@ -20,6 +23,13 @@ func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection) *DBProxy {
 		db:      db,
 		mongodb: mongodb,
 	}
+}
+
+// SetElastic 设置 Elasticsearch 客户端和索引
+func (p *DBProxy) SetElastic(client *elastic.Client, index string) *DBProxy {
+	p.elastic = client
+	p.elasticIndex = index
+	return p
 }
 
 // builder 查询构建器，使用泛型支持多种实体类型
@@ -82,6 +92,11 @@ func (b *builder[R]) getQueryStrategy() (Strategy[R], error) {
 		return NewQueryGormListStrategy[R](), nil
 	case b.data.mongodb != nil:
 		return NewQueryMongoListStrategy[R](), nil
+	case b.data.elastic != nil:
+		if b.data.elasticIndex == "" {
+			return nil, errors.New("elasticsearch index not provided")
+		}
+		return NewQueryElasticListStrategy[R](), nil
 	default:
 		return nil, errors.New("query strategy not set and no valid DB found")
 	}

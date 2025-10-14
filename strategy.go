@@ -2,8 +2,10 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/fantasticbin/QueryBuilder/util"
+	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -132,6 +134,105 @@ func (s *QueryMongoListStrategy[R]) QueryList(
 		return nil
 	}); err != nil {
 		return nil, 0, err
+	}
+
+	return list, total, nil
+}
+
+// QueryElasticListStrategy Elasticsearch 查询策略实现
+type QueryElasticListStrategy[R any] struct{}
+
+// NewQueryElasticListStrategy 创建 Elasticsearch 查询策略实例
+func NewQueryElasticListStrategy[R any]() *QueryElasticListStrategy[R] {
+	return &QueryElasticListStrategy[R]{}
+}
+
+// QueryList 实现 Elasticsearch 查询逻辑
+func (s *QueryElasticListStrategy[R]) QueryList(
+	ctx context.Context,
+	builder *builder[R],
+) (list []*R, total int64, err error) {
+	if builder.data == nil || builder.data.elastic == nil {
+		return nil, 0, errors.New("elasticsearch client not provided")
+	}
+
+	if builder.data.elasticIndex == "" {
+		return nil, 0, errors.New("elasticsearch index not provided")
+	}
+
+	filterOpt, err := builder.filter(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var query elastic.Query
+	switch q := filterOpt.(type) {
+	case nil:
+		query = elastic.NewMatchAllQuery()
+	case elastic.Query:
+		query = q
+	default:
+		return nil, 0, errors.New("invalid elasticsearch query")
+	}
+
+	sortOpt := builder.sort()
+	var sorters []elastic.Sorter
+	switch s := sortOpt.(type) {
+	case nil:
+	case elastic.Sorter:
+		sorters = append(sorters, s)
+	case []elastic.Sorter:
+		sorters = append(sorters, s...)
+	default:
+		return nil, 0, errors.New("invalid elasticsearch sorter")
+	}
+
+	search := builder.data.elastic.Search().
+		Index(builder.data.elasticIndex).
+		Query(query)
+
+	if builder.needPagination {
+		if builder.limit < 1 {
+			builder.limit = defaultLimit
+		}
+		search = search.From(int(builder.start)).Size(int(builder.limit))
+	}
+
+	if len(sorters) > 0 {
+		search = search.SortBy(sorters...)
+	}
+
+	resp, err := search.Do(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if resp == nil || resp.Hits == nil {
+		return nil, 0, nil
+	}
+
+	for _, hit := range resp.Hits.Hits {
+		if hit.Source == nil {
+			continue
+		}
+
+		var entity R
+		if err := json.Unmarshal(hit.Source, &entity); err != nil {
+			return nil, 0, err
+		}
+
+		item := entity
+		list = append(list, &item)
+	}
+
+	if builder.needTotal {
+		if resp.Hits.TotalHits != nil {
+			total = resp.Hits.TotalHits.Value
+		} else {
+			total = int64(len(resp.Hits.Hits))
+		}
+	} else {
+		total = int64(len(list))
 	}
 
 	return list, total, nil
