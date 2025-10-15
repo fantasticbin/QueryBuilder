@@ -8,16 +8,22 @@ import (
 	"gorm.io/gorm"
 )
 
+// ElasticsearchConfig Elasticsearch 配置，包含客户端和索引名
+type ElasticsearchConfig struct {
+	Client *elastic.Client
+	Index  string // 索引名称
+}
+
 // DBProxy 数据实例结构
 type DBProxy struct {
 	db            *gorm.DB
-	mongodb       *mongo.Collection // 需提前指定.Database("db_name").Collection("collection_name")
-	elasticsearch *elastic.Client
+	mongodb       *mongo.Collection       // 需提前指定.Database("db_name").Collection("collection_name")
+	elasticsearch *ElasticsearchConfig    // 需指定 Client 和 Index
 	// redis...
 }
 
 // NewDBProxy 创建数据实例
-func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *DBProxy {
+func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *ElasticsearchConfig) *DBProxy {
 	return &DBProxy{
 		db:            db,
 		mongodb:       mongodb,

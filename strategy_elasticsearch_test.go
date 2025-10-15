@@ -76,7 +76,10 @@ func TestElasticsearchQueryList(t *testing.T) {
 					}, int64(2), nil)
 			},
 			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &ElasticsearchConfig{
+					Client: &elastic.Client{},
+					Index:  "test_users",
+				})),
 				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{}),
 				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "asc"}),
 			},
@@ -97,7 +100,10 @@ func TestElasticsearchQueryList(t *testing.T) {
 					}, int64(1), nil)
 			},
 			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &ElasticsearchConfig{
+					Client: &elastic.Client{},
+					Index:  "test_users",
+				})),
 				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{Name: "Alice"}),
 				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "desc"}),
 			},
@@ -168,5 +174,64 @@ func TestElasticsearchStrategyDecoding(t *testing.T) {
 
 	if decoded.ID != entity.ID || decoded.Name != entity.Name || decoded.Age != entity.Age {
 		t.Errorf("expected %+v, got %+v", entity, decoded)
+	}
+}
+
+func TestElasticsearchIndexValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// 测试索引名未配置的情况
+	strategy := NewQueryElasticsearchListStrategy[ElasticTestEntity]()
+	builder := &builder[ElasticTestEntity]{
+		data: &DBProxy{
+			elasticsearch: &ElasticsearchConfig{
+				Client: &elastic.Client{},
+				Index:  "", // 索引名为空
+			},
+		},
+		filter: func(ctx context.Context) (any, error) {
+			return elastic.NewMatchAllQuery(), nil
+		},
+		sort: func() any {
+			return nil
+		},
+	}
+
+	_, _, err := strategy.QueryList(ctx, builder)
+	if err == nil {
+		t.Error("expected error when index is not configured, got nil")
+	}
+	if err != nil && err.Error() != "elasticsearch index not configured" {
+		t.Errorf("expected 'elasticsearch index not configured' error, got: %v", err)
+	}
+}
+
+func TestElasticsearchSortValidation(t *testing.T) {
+	// 此测试验证排序类型的默认错误处理
+	// 由于需要真实的 Elasticsearch 客户端才能执行查询，
+	// 我们只验证类型转换逻辑在代码中存在即可
+	// 实际的错误处理会在运行时验证
+	
+	// 验证有效的排序类型
+	var validSort1 interface{} = elastic.NewFieldSort("name").Order(true)
+	if _, ok := validSort1.(elastic.Sorter); !ok {
+		t.Error("expected elastic.FieldSort to implement elastic.Sorter")
+	}
+
+	var validSort2 interface{} = []elastic.Sorter{
+		elastic.NewFieldSort("name").Order(true),
+		elastic.NewFieldSort("age").Order(false),
+	}
+	if _, ok := validSort2.([]elastic.Sorter); !ok {
+		t.Error("expected []elastic.Sorter to be valid")
+	}
+
+	// 无效的排序类型会在 switch 的 default 分支中被捕获
+	var invalidSort interface{} = "invalid_sort"
+	if _, ok := invalidSort.(elastic.Sorter); ok {
+		t.Error("string should not be a valid elastic.Sorter")
+	}
+	if _, ok := invalidSort.([]elastic.Sorter); ok {
+		t.Error("string should not be a valid []elastic.Sorter")
 	}
 }

@@ -152,6 +152,11 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 	ctx context.Context,
 	builder *builder[R],
 ) (list []*R, total int64, err error) {
+	// 检查 Elasticsearch 配置
+	if builder.data.elasticsearch.Index == "" {
+		return nil, 0, errors.New("elasticsearch index not configured")
+	}
+
 	queryOpt, err := builder.filter(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -166,7 +171,9 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 
 	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
 	if err := util.WaitAndGo(func() error {
-		searchService := builder.data.elasticsearch.Search().Query(query)
+		searchService := builder.data.elasticsearch.Client.Search().
+			Index(builder.data.elasticsearch.Index).
+			Query(query)
 
 		// 处理排序
 		if sortOpt != nil {
@@ -177,6 +184,8 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 				for _, s := range sort {
 					searchService = searchService.SortBy(s)
 				}
+			default:
+				return errors.New("invalid sort option: must be elastic.Sorter or []elastic.Sorter")
 			}
 		}
 
@@ -207,7 +216,9 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 			return nil
 		}
 
-		countService := builder.data.elasticsearch.Count().Query(query)
+		countService := builder.data.elasticsearch.Client.Count().
+			Index(builder.data.elasticsearch.Index).
+			Query(query)
 		count, err := countService.Do(ctx)
 		if err != nil {
 			return err
