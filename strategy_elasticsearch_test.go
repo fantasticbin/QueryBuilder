@@ -60,7 +60,8 @@ func TestElasticsearchQueryList(t *testing.T) {
 	tests := []struct {
 		name           string
 		mockSetup      func()
-		opts           []QueryOption[ElasticTestFilter, ElasticTestSort]
+		filter         ElasticTestFilter
+		sort           ElasticTestSort
 		expectedResult []*ElasticTestEntity
 		expectedTotal  int64
 		expectedErr    error
@@ -69,18 +70,14 @@ func TestElasticsearchQueryList(t *testing.T) {
 			name: "Elasticsearch无筛选查询&id升序",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
-					QueryList(ctx, gomock.Any()).
+					QueryList(gomock.Any(), gomock.Any()).
 					Return([]*ElasticTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 						{ID: 2, Name: "Bob", Age: 30},
 					}, int64(2), nil)
 			},
-			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
-				WithESIndex[ElasticTestFilter, ElasticTestSort]("test_users"),
-				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{}),
-				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "asc"}),
-			},
+			filter: ElasticTestFilter{},
+			sort:   ElasticTestSort{Field: "id", Direction: "asc"},
 			expectedResult: []*ElasticTestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
 				{ID: 2, Name: "Bob", Age: 30},
@@ -92,17 +89,13 @@ func TestElasticsearchQueryList(t *testing.T) {
 			name: "Elasticsearch有筛选查询",
 			mockSetup: func() {
 				mockStrategy.EXPECT().
-					QueryList(ctx, gomock.Any()).
+					QueryList(gomock.Any(), gomock.Any()).
 					Return([]*ElasticTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 					}, int64(1), nil)
 			},
-			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
-				WithESIndex[ElasticTestFilter, ElasticTestSort]("test_users"),
-				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{Name: "Alice"}),
-				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "desc"}),
-			},
+			filter: ElasticTestFilter{Name: "Alice"},
+			sort:   ElasticTestSort{Field: "id", Direction: "desc"},
 			expectedResult: []*ElasticTestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
 			},
@@ -111,17 +104,30 @@ func TestElasticsearchQueryList(t *testing.T) {
 		},
 	}
 
-	list := NewList[ElasticTestEntity, ElasticTestFilter, ElasticTestSort](&ElasticTestService{})
-	// 使用 Mock 策略替代真实的策略
-	list.SetStrategy(mockStrategy)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.mockSetup != nil {
 				tt.mockSetup()
 			}
 
-			result, total, err := list.Query(ctx, tt.opts...)
+			// 创建测试服务
+			testService := &ElasticTestService{
+				filter: tt.filter,
+				sort:   tt.sort,
+			}
+
+			// 创建 List 实例并设置 Mock 策略
+			list := NewList[ElasticTestEntity, ElasticTestFilter, ElasticTestSort](testService)
+			list.SetStrategy(mockStrategy)
+
+			// 执行查询，只需要提供 Data 选项
+			opts := []QueryOption[ElasticTestFilter, ElasticTestSort]{
+				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+				WithFilter[ElasticTestFilter, ElasticTestSort](&tt.filter),
+				WithSort[ElasticTestFilter, ElasticTestSort](tt.sort),
+			}
+
+			result, total, err := list.Query(ctx, opts...)
 
 			if tt.expectedErr != nil {
 				if err == nil || err.Error() != tt.expectedErr.Error() {
@@ -177,7 +183,7 @@ func TestElasticsearchIndexValidation(t *testing.T) {
 	ctx := context.Background()
 
 	// 测试索引名未配置的情况
-	strategy := NewQueryElasticsearchListStrategy[ElasticTestEntity]()
+	strategy := NewQueryElasticsearchListStrategy[ElasticTestEntity]("")
 	builder := &builder[ElasticTestEntity]{
 		data: &DBProxy{
 			elasticsearch: &elastic.Client{},
