@@ -79,7 +79,7 @@ func TestQueryList(t *testing.T) {
 					}, int64(2), nil)
 			},
 			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil)),
+				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
 				WithFilter[TestFilter, TestSort](&TestFilter{}),
 				WithSort[TestFilter, TestSort](TestSort{Field: "id", Direction: "asc"}),
 			},
@@ -101,7 +101,7 @@ func TestQueryList(t *testing.T) {
 					}, int64(2), nil)
 			},
 			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil)),
+				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
 				WithFilter[TestFilter, TestSort](&TestFilter{}),
 				WithSort[TestFilter, TestSort](TestSort{Field: "age", Direction: "desc"}),
 			},
@@ -122,7 +122,7 @@ func TestQueryList(t *testing.T) {
 					}, int64(1), nil)
 			},
 			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil)),
+				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
 				WithFilter[TestFilter, TestSort](&TestFilter{Name: "Alice"}),
 				WithSort[TestFilter, TestSort](TestSort{Field: "id", Direction: "desc"}),
 			},
@@ -145,7 +145,7 @@ func TestQueryList(t *testing.T) {
 				&TestFilter{Name: "Bob"},
 				TestSort{Field: "id", Direction: "desc"},
 			).
-				WithData(NewDBProxy(&gorm.DB{}, nil)).
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)).
 				LoadOptions(),
 			expectedResult: []*TestEntity{
 				{ID: 2, Name: "Bob", Age: 30},
@@ -161,7 +161,7 @@ func TestQueryList(t *testing.T) {
 					Return(nil, int64(0), nil)
 			},
 			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil)),
+				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
 				WithFilter[TestFilter, TestSort](&TestFilter{Name: "test"}),
 				WithSort[TestFilter, TestSort](TestSort{Field: "id", Direction: "asc"}),
 			},

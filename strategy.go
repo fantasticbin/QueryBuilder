@@ -2,8 +2,11 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+
 	"github.com/fantasticbin/QueryBuilder/util"
+	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -128,6 +131,105 @@ func (s *QueryMongoListStrategy[R]) QueryList(
 		if err != nil {
 			return err
 		}
+
+		return nil
+	}); err != nil {
+		return nil, 0, err
+	}
+
+	return list, total, nil
+}
+
+// QueryElasticsearchListStrategy Elasticsearch 查询策略实现
+type QueryElasticsearchListStrategy[R any] struct {
+	index string
+}
+
+// NewQueryElasticsearchListStrategy 创建 Elasticsearch 查询策略实例
+func NewQueryElasticsearchListStrategy[R any](index string) *QueryElasticsearchListStrategy[R] {
+	return &QueryElasticsearchListStrategy[R]{
+		index: index,
+	}
+}
+
+// QueryList 实现 Elasticsearch 查询逻辑
+func (s *QueryElasticsearchListStrategy[R]) QueryList(
+	ctx context.Context,
+	builder *builder[R],
+) (list []*R, total int64, err error) {
+	// 检查 Elasticsearch 索引配置
+	if s.index == "" {
+		return nil, 0, errors.New("elasticsearch index not configured")
+	}
+
+	queryOpt, err := builder.filter(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	sortOpt := builder.sort()
+	// 验证过滤条件的类型有效性
+	query, ok := queryOpt.(elastic.Query)
+	if !ok {
+		return nil, 0, errors.New("invalid query option")
+	}
+
+	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
+	if err := util.WaitAndGo(func() error {
+		searchService := builder.data.elasticsearch.Search().
+			Index(s.index).
+			Query(query)
+
+		// 处理排序
+		if sortOpt != nil {
+			switch sort := sortOpt.(type) {
+			case elastic.Sorter:
+				searchService = searchService.SortBy(sort)
+			case []elastic.Sorter:
+				for _, s := range sort {
+					searchService = searchService.SortBy(s)
+				}
+			default:
+				return errors.New("invalid sort option: must be elastic.Sorter or []elastic.Sorter")
+			}
+		}
+
+		if builder.needPagination {
+			if builder.limit < 1 {
+				builder.limit = defaultLimit
+			}
+			searchService = searchService.From(int(builder.start)).Size(int(builder.limit))
+		}
+
+		searchResult, err := searchService.Do(ctx)
+		if err != nil {
+			return err
+		}
+
+		// 解析查询结果
+		for _, hit := range searchResult.Hits.Hits {
+			var item R
+			if err := json.Unmarshal(hit.Source, &item); err != nil {
+				return err
+			}
+			list = append(list, &item)
+		}
+
+		return nil
+	}, func() error {
+		if !builder.needTotal {
+			return nil
+		}
+
+		countService := builder.data.elasticsearch.Count().
+			Index(s.index).
+			Query(query)
+		count, err := countService.Do(ctx)
+		if err != nil {
+			return err
+		}
+
+		total = count
 
 		return nil
 	}); err != nil {
