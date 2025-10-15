@@ -1,6 +1,8 @@
 module github.com/fantasticbin/QueryBuilder
 
-go 1.18
+go 1.23.0
+
+toolchain go1.24.7
 
 require (
 	go.mongodb.org/mongo-driver v1.17.3
