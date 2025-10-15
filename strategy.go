@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
 	"github.com/fantasticbin/QueryBuilder/util"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/bson"
@@ -140,11 +141,15 @@ func (s *QueryMongoListStrategy[R]) QueryList(
 }
 
 // QueryElasticsearchListStrategy Elasticsearch 查询策略实现
-type QueryElasticsearchListStrategy[R any] struct{}
+type QueryElasticsearchListStrategy[R any] struct {
+	index string
+}
 
 // NewQueryElasticsearchListStrategy 创建 Elasticsearch 查询策略实例
-func NewQueryElasticsearchListStrategy[R any]() *QueryElasticsearchListStrategy[R] {
-	return &QueryElasticsearchListStrategy[R]{}
+func NewQueryElasticsearchListStrategy[R any](index string) *QueryElasticsearchListStrategy[R] {
+	return &QueryElasticsearchListStrategy[R]{
+		index: index,
+	}
 }
 
 // QueryList 实现 Elasticsearch 查询逻辑
@@ -153,7 +158,7 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 	builder *builder[R],
 ) (list []*R, total int64, err error) {
 	// 检查 Elasticsearch 索引配置
-	if builder.esIndex == "" {
+	if s.index == "" {
 		return nil, 0, errors.New("elasticsearch index not configured")
 	}
 
@@ -172,7 +177,7 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
 	if err := util.WaitAndGo(func() error {
 		searchService := builder.data.elasticsearch.Search().
-			Index(builder.esIndex).
+			Index(s.index).
 			Query(query)
 
 		// 处理排序
@@ -217,7 +222,7 @@ func (s *QueryElasticsearchListStrategy[R]) QueryList(
 		}
 
 		countService := builder.data.elasticsearch.Count().
-			Index(builder.esIndex).
+			Index(s.index).
 			Query(query)
 		count, err := countService.Do(ctx)
 		if err != nil {

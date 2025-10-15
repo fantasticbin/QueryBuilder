@@ -182,7 +182,6 @@ func TestElasticsearchIndexValidation(t *testing.T) {
 		data: &DBProxy{
 			elasticsearch: &elastic.Client{},
 		},
-		esIndex: "", // 索引名为空
 		filter: func(ctx context.Context) (any, error) {
 			return elastic.NewMatchAllQuery(), nil
 		},
@@ -205,7 +204,7 @@ func TestElasticsearchSortValidation(t *testing.T) {
 	// 由于需要真实的 Elasticsearch 客户端才能执行查询，
 	// 我们只验证类型转换逻辑在代码中存在即可
 	// 实际的错误处理会在运行时验证
-	
+
 	// 验证有效的排序类型
 	var validSort1 interface{} = elastic.NewFieldSort("name").Order(true)
 	if _, ok := validSort1.(elastic.Sorter); !ok {

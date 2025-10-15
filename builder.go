@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"errors"
+
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gorm.io/gorm"
@@ -37,7 +38,6 @@ type builder[R any] struct {
 	needPagination bool
 	strategy       Strategy[R]     // 查询策略
 	middlewares    []Middleware[R] // 中间件链
-	esIndex        string          // Elasticsearch 索引名
 
 	filter func(context.Context) (any, error)
 	sort   func() any
@@ -67,8 +67,7 @@ func (b *builder[R]) SetStrategy(strategy Strategy[R]) *builder[R] {
 // SetESIndex 设置 Elasticsearch 索引名
 // 返回支持链式调用的构建器实例
 func (b *builder[R]) SetESIndex(index string) *builder[R] {
-	b.esIndex = index
-	return b
+	return b.SetStrategy(NewQueryElasticsearchListStrategy[R](index))
 }
 
 // Use 添加中间件
@@ -93,8 +92,6 @@ func (b *builder[R]) getQueryStrategy() (Strategy[R], error) {
 		return NewQueryGormListStrategy[R](), nil
 	case b.data.mongodb != nil:
 		return NewQueryMongoListStrategy[R](), nil
-	case b.data.elasticsearch != nil:
-		return NewQueryElasticsearchListStrategy[R](), nil
 	default:
 		return nil, errors.New("query strategy not set and no valid DB found")
 	}
