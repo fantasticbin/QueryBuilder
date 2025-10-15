@@ -8,22 +8,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// ElasticsearchConfig Elasticsearch 配置，包含客户端和索引名
-type ElasticsearchConfig struct {
-	Client *elastic.Client
-	Index  string // 索引名称
-}
-
 // DBProxy 数据实例结构
 type DBProxy struct {
 	db            *gorm.DB
-	mongodb       *mongo.Collection       // 需提前指定.Database("db_name").Collection("collection_name")
-	elasticsearch *ElasticsearchConfig    // 需指定 Client 和 Index
+	mongodb       *mongo.Collection // 需提前指定.Database("db_name").Collection("collection_name")
+	elasticsearch *elastic.Client
 	// redis...
 }
 
 // NewDBProxy 创建数据实例
-func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *ElasticsearchConfig) *DBProxy {
+func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *DBProxy {
 	return &DBProxy{
 		db:            db,
 		mongodb:       mongodb,
@@ -43,6 +37,7 @@ type builder[R any] struct {
 	needPagination bool
 	strategy       Strategy[R]     // 查询策略
 	middlewares    []Middleware[R] // 中间件链
+	esIndex        string          // Elasticsearch 索引名
 
 	filter func(context.Context) (any, error)
 	sort   func() any
@@ -66,6 +61,13 @@ func (b *builder[R]) SetSort(sort func() any) *builder[R] {
 // 返回支持链式调用的构建器实例
 func (b *builder[R]) SetStrategy(strategy Strategy[R]) *builder[R] {
 	b.strategy = strategy
+	return b
+}
+
+// SetESIndex 设置 Elasticsearch 索引名
+// 返回支持链式调用的构建器实例
+func (b *builder[R]) SetESIndex(index string) *builder[R] {
+	b.esIndex = index
 	return b
 }
 

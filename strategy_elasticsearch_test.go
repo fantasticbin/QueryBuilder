@@ -76,10 +76,8 @@ func TestElasticsearchQueryList(t *testing.T) {
 					}, int64(2), nil)
 			},
 			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &ElasticsearchConfig{
-					Client: &elastic.Client{},
-					Index:  "test_users",
-				})),
+				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+				WithESIndex[ElasticTestFilter, ElasticTestSort]("test_users"),
 				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{}),
 				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "asc"}),
 			},
@@ -100,10 +98,8 @@ func TestElasticsearchQueryList(t *testing.T) {
 					}, int64(1), nil)
 			},
 			opts: []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &ElasticsearchConfig{
-					Client: &elastic.Client{},
-					Index:  "test_users",
-				})),
+				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+				WithESIndex[ElasticTestFilter, ElasticTestSort]("test_users"),
 				WithFilter[ElasticTestFilter, ElasticTestSort](&ElasticTestFilter{Name: "Alice"}),
 				WithSort[ElasticTestFilter, ElasticTestSort](ElasticTestSort{Field: "id", Direction: "desc"}),
 			},
@@ -184,11 +180,9 @@ func TestElasticsearchIndexValidation(t *testing.T) {
 	strategy := NewQueryElasticsearchListStrategy[ElasticTestEntity]()
 	builder := &builder[ElasticTestEntity]{
 		data: &DBProxy{
-			elasticsearch: &ElasticsearchConfig{
-				Client: &elastic.Client{},
-				Index:  "", // 索引名为空
-			},
+			elasticsearch: &elastic.Client{},
 		},
+		esIndex: "", // 索引名为空
 		filter: func(ctx context.Context) (any, error) {
 			return elastic.NewMatchAllQuery(), nil
 		},

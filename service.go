@@ -79,6 +79,7 @@ func (l *List[R, F, S]) Query(
 			needTotal:      options.GetNeedTotal(),
 			needPagination: options.GetNeedPagination(),
 			strategy:       l.strategy,
+			esIndex:        options.GetESIndex(),
 		},
 		filter:  options.GetFilter(),
 		sort:    options.GetSort(),

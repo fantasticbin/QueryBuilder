@@ -26,6 +26,7 @@ type QueryListOptions[F Filter, S Sort] interface {
 	GetLimit() uint32
 	GetNeedTotal() bool
 	GetNeedPagination() bool
+	GetESIndex() string
 }
 
 // BaseQueryListOptions 实现了QueryListOptions接口的基础结构体
@@ -38,6 +39,7 @@ type BaseQueryListOptions[F Filter, S Sort] struct {
 	limit          uint32   // 每页数据条数
 	needTotal      bool     // 是否需要查询总数
 	needPagination bool     // 是否需要分页
+	esIndex        string   // Elasticsearch 索引名
 }
 
 func (opts *BaseQueryListOptions[F, S]) GetData() *DBProxy {
@@ -65,6 +67,10 @@ func (opts *BaseQueryListOptions[F, S]) GetNeedTotal() bool {
 }
 
 func (opts *BaseQueryListOptions[F, S]) GetNeedPagination() bool { return opts.needPagination }
+
+func (opts *BaseQueryListOptions[F, S]) GetESIndex() string {
+	return opts.esIndex
+}
 
 // QueryOption 定义用于配置查询选项的函数类型
 type QueryOption[F Filter, S Sort] func(options *BaseQueryListOptions[F, S])
@@ -136,6 +142,12 @@ func WithNeedPagination[F Filter, S Sort](needPagination bool) QueryOption[F, S]
 	}
 }
 
+func WithESIndex[F Filter, S Sort](esIndex string) QueryOption[F, S] {
+	return func(o *BaseQueryListOptions[F, S]) {
+		o.esIndex = esIndex
+	}
+}
+
 // OptionBuilder 选项构建器，用于类型推断
 type OptionBuilder[F any, S any] struct {
 	options []QueryOption[F, S]
@@ -184,6 +196,11 @@ func (b *OptionBuilder[F, S]) WithNeedTotal(needTotal bool) *OptionBuilder[F, S]
 
 func (b *OptionBuilder[F, S]) WithNeedPagination(needPagination bool) *OptionBuilder[F, S] {
 	b.options = append(b.options, WithNeedPagination[F, S](needPagination))
+	return b
+}
+
+func (b *OptionBuilder[F, S]) WithESIndex(esIndex string) *OptionBuilder[F, S] {
+	b.options = append(b.options, WithESIndex[F, S](esIndex))
 	return b
 }
 
