@@ -1,6 +1,6 @@
 # QueryBuilder
 
-简化 Go 项目中的列表查询，支持灵活的过滤、排序、分页和策略扩展，适用于多种数据源（如 GORM、Mongo等）。
+简化 Go 项目中的列表查询，支持灵活的过滤、排序、分页和策略扩展，适用于多种数据源（如 GORM、MongoDB、Elasticsearch等）。
 
 ---
 
@@ -120,7 +120,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
     list := NewList[model.User, filter, sort](&UserService{})
     result, total, err := list.Query(
         ctx,
-        WithData[filter, sort](NewDBProxy(model.db, nil)),
+        WithData[filter, sort](NewDBProxy(model.db, nil, nil)),
         WithFilter[filter, sort](req.Filter),
         WithSort[filter, sort](req.Sort),
         WithStart[filter, sort](req.Start),
@@ -175,7 +175,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
     })
     result, total, err := list.Query(
         ctx,
-        WithData[filter, sort](NewDBProxy(model.db, nil)),
+        WithData[filter, sort](NewDBProxy(model.db, nil, nil)),
         WithFilter[filter, sort](req.Filter),
         WithSort[filter, sort](req.Sort),
         WithStart[filter, sort](req.Start),
@@ -241,7 +241,7 @@ import (
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
     opts := NewOptionBuilderWithFilterAndSort(req.GetFilter(), req.GetSort()).
-        WithData(NewDBProxy(model.db, nil)).
+        WithData(NewDBProxy(model.db, nil, nil)).
         WithStart(req.GetStart()).
         WithNum(req.GetNum()).
         LoadOptions()
