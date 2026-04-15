@@ -20,8 +20,6 @@ type Sort any
 //	S - 排序条件类型参数
 type QueryListOptions[F Filter, S Sort] interface {
 	GetData() *DBProxy
-	GetFilter() *F
-	GetSort() S
 	GetStart() uint32
 	GetLimit() uint32
 	GetNeedTotal() bool
@@ -32,8 +30,6 @@ type QueryListOptions[F Filter, S Sort] interface {
 // 包含查询列表所需的所有基本选项
 type BaseQueryListOptions[F Filter, S Sort] struct {
 	data           *DBProxy // 数据实例
-	filter         *F       // 过滤条件生成函数
-	sort           S        // 排序条件生成函数
 	start          uint32   // 分页起始位置
 	limit          uint32   // 每页数据条数
 	needTotal      bool     // 是否需要查询总数
@@ -42,14 +38,6 @@ type BaseQueryListOptions[F Filter, S Sort] struct {
 
 func (opts *BaseQueryListOptions[F, S]) GetData() *DBProxy {
 	return opts.data
-}
-
-func (opts *BaseQueryListOptions[F, S]) GetFilter() *F {
-	return opts.filter
-}
-
-func (opts *BaseQueryListOptions[F, S]) GetSort() S {
-	return opts.sort
 }
 
 func (opts *BaseQueryListOptions[F, S]) GetStart() uint32 {
@@ -100,18 +88,6 @@ func WithData[F Filter, S Sort](data *DBProxy) QueryOption[F, S] {
 	}
 }
 
-func WithFilter[F Filter, S Sort](filter *F) QueryOption[F, S] {
-	return func(o *BaseQueryListOptions[F, S]) {
-		o.filter = filter
-	}
-}
-
-func WithSort[F Filter, S Sort](sort S) QueryOption[F, S] {
-	return func(o *BaseQueryListOptions[F, S]) {
-		o.sort = sort
-	}
-}
-
 func WithStart[F Filter, S Sort](start uint32) QueryOption[F, S] {
 	return func(o *BaseQueryListOptions[F, S]) {
 		o.start = start
@@ -146,24 +122,8 @@ func NewOptionBuilder[F any, S any]() *OptionBuilder[F, S] {
 	return &OptionBuilder[F, S]{}
 }
 
-// NewOptionBuilderWithFilterAndSort 创建选项构建器，包含筛选器和排序
-func NewOptionBuilderWithFilterAndSort[F any, S any](filter *F, sort S) *OptionBuilder[F, S] {
-	builder := NewOptionBuilder[F, S]()
-	return builder.WithFilter(filter).WithSort(sort)
-}
-
 func (b *OptionBuilder[F, S]) WithData(data *DBProxy) *OptionBuilder[F, S] {
 	b.options = append(b.options, WithData[F, S](data))
-	return b
-}
-
-func (b *OptionBuilder[F, S]) WithFilter(filter *F) *OptionBuilder[F, S] {
-	b.options = append(b.options, WithFilter[F, S](filter))
-	return b
-}
-
-func (b *OptionBuilder[F, S]) WithSort(sort S) *OptionBuilder[F, S] {
-	b.options = append(b.options, WithSort[F, S](sort))
 	return b
 }
 

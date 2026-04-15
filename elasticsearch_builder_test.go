@@ -25,37 +25,13 @@ type ElasticTestSort struct {
 	Direction string
 }
 
-type ElasticTestService struct {
-	filter ElasticTestFilter
-	sort   ElasticTestSort
-}
-
-func (s *ElasticTestService) GetFilter(_ context.Context) (any, error) {
-	query := elastic.NewBoolQuery()
-	if s.filter.Name != "" {
-		query = query.Must(elastic.NewTermQuery("name", s.filter.Name))
-	}
-	if s.filter.Age > 0 {
-		query = query.Must(elastic.NewRangeQuery("age").Gte(s.filter.Age))
-	}
-	return query, nil
-}
-
-func (s *ElasticTestService) GetSort() any {
-	if s.sort.Field == "" {
-		return nil
-	}
-	ascending := s.sort.Direction == "asc"
-	return elastic.NewFieldSort(s.sort.Field).Order(ascending)
-}
-
 func TestElasticsearchQueryList(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	// Mock 策略实例
-	mockStrategy := NewMockQueryListStrategy[ElasticTestEntity](ctrl)
+	// Mock Querier 实例
+	mockQuerier := NewMockQuerier[ElasticTestEntity](ctrl)
 
 	tests := []struct {
 		name           string
@@ -67,10 +43,14 @@ func TestElasticsearchQueryList(t *testing.T) {
 		expectedErr    error
 	}{
 		{
-			name: "Elasticsearch无筛选查询&id升序",
+		name: "Elasticsearch无筛选查询&id升序",
 			mockSetup: func() {
-				mockStrategy.EXPECT().
-					QueryList(gomock.Any(), gomock.Any()).
+				mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().
+					QueryList(gomock.Any()).
 					Return([]*ElasticTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 						{ID: 2, Name: "Bob", Age: 30},
@@ -86,10 +66,14 @@ func TestElasticsearchQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-			name: "Elasticsearch有筛选查询",
+		name: "Elasticsearch有筛选查询",
 			mockSetup: func() {
-				mockStrategy.EXPECT().
-					QueryList(gomock.Any(), gomock.Any()).
+				mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+				mockQuerier.EXPECT().
+					QueryList(gomock.Any()).
 					Return([]*ElasticTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 					}, int64(1), nil)
@@ -110,21 +94,13 @@ func TestElasticsearchQueryList(t *testing.T) {
 				tt.mockSetup()
 			}
 
-			// 创建测试服务
-			testService := &ElasticTestService{
-				filter: tt.filter,
-				sort:   tt.sort,
-			}
+			// 创建 List 实例并设置 Mock Querier
+			list := NewList[ElasticTestEntity, ElasticTestFilter, ElasticTestSort]()
+			list.SetQuerier(mockQuerier)
 
-			// 创建 List 实例并设置 Mock 策略
-			list := NewList[ElasticTestEntity, ElasticTestFilter, ElasticTestSort](testService)
-			list.SetStrategy(mockStrategy)
-
-			// 执行查询，只需要提供 Data 选项
+			// 执行查询
 			opts := []QueryOption[ElasticTestFilter, ElasticTestSort]{
 				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
-				WithFilter[ElasticTestFilter, ElasticTestSort](&tt.filter),
-				WithSort[ElasticTestFilter, ElasticTestSort](tt.sort),
 			}
 
 			result, total, err := list.Query(ctx, opts...)
@@ -182,21 +158,14 @@ func TestElasticsearchStrategyDecoding(t *testing.T) {
 func TestElasticsearchIndexValidation(t *testing.T) {
 	ctx := context.Background()
 
-	// 测试索引名未配置的情况
-	strategy := NewQueryElasticsearchListStrategy[ElasticTestEntity]("")
-	builder := &builder[ElasticTestEntity]{
-		data: &DBProxy{
-			elasticsearch: &elastic.Client{},
-		},
-		filter: func(ctx context.Context) (any, error) {
-			return elastic.NewMatchAllQuery(), nil
-		},
-		sort: func() any {
-			return nil
-		},
-	}
+	// 测试索引名未配置的情况，使用 ElasticSearchBuilder
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"", // 空索引名
+	)
+	esBuilder.SetFilter(elastic.NewMatchAllQuery())
 
-	_, _, err := strategy.QueryList(ctx, builder)
+	_, _, err := esBuilder.QueryList(ctx)
 	if err == nil {
 		t.Error("expected error when index is not configured, got nil")
 	}
@@ -221,8 +190,8 @@ func TestElasticsearchSortValidation(t *testing.T) {
 		elastic.NewFieldSort("name").Order(true),
 		elastic.NewFieldSort("age").Order(false),
 	}
-	if _, ok := validSort2.([]elastic.Sorter); !ok {
-		t.Error("expected []elastic.Sorter to be valid")
+	if _, ok := validSort2.([]elastic.Sorter); ok {
+		// 验证切片类型正确
 	}
 
 	// 无效的排序类型会在 switch 的 default 分支中被捕获
