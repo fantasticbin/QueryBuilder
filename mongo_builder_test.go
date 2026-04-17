@@ -13,16 +13,6 @@ type MongoTestEntity struct {
 	Age  int    `bson:"age"`
 }
 
-type MongoTestFilter struct {
-	Name string
-	Age  uint8
-}
-
-type MongoTestSort struct {
-	Field     string
-	Direction string
-}
-
 func TestMongoDBQueryList(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
@@ -105,7 +95,7 @@ func TestMongoDBQueryList(t *testing.T) {
 			}
 
 			// 创建 List 实例并设置 Mock Querier
-			list := NewList[MongoTestEntity, MongoTestFilter, MongoTestSort]()
+			list := NewList[MongoTestEntity]()
 			list.SetQuerier(mockQuerier)
 
 			// 添加耗时监控中间件
@@ -118,8 +108,8 @@ func TestMongoDBQueryList(t *testing.T) {
 			})
 
 			// 执行查询
-			opts := []QueryOption[MongoTestFilter, MongoTestSort]{
-				WithData[MongoTestFilter, MongoTestSort](NewDBProxy(nil, nil, nil)),
+			opts := []QueryOption{
+				WithData(NewDBProxy(nil, nil, nil)),
 			}
 
 			result, total, err := list.Query(ctx, opts...)

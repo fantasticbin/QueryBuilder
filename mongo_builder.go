@@ -2,11 +2,12 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/fantasticbin/QueryBuilder/util"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // MongoFilter MongoDB 过滤条件类型（bson.D 有序文档）
@@ -34,6 +35,7 @@ func (m *MongoBuilder[R]) self() *MongoBuilder[R] {
 func NewMongoBuilder[R any](data *DBProxy) *MongoBuilder[R] {
 	m := &MongoBuilder[R]{}
 	m.builder.data = data
+	m.builder.dataSource = MongoDB
 	m.builder.setSelf(m, m)
 	return m
 }
@@ -80,6 +82,24 @@ func (m *MongoBuilder[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	return m
 }
 
+// SetFields 设置查询字段投影（实现 Querier 接口）
+func (m *MongoBuilder[R]) SetFields(fields ...string) Querier[R] {
+	m.builder.SetFields(fields...)
+	return m
+}
+
+// SetBeforeQueryHook 设置查询前置钩子（实现 Querier 接口）
+func (m *MongoBuilder[R]) SetBeforeQueryHook(hook BeforeQueryHook) Querier[R] {
+	m.builder.SetBeforeQueryHook(hook)
+	return m
+}
+
+// SetAfterQueryHook 设置查询后置钩子（实现 Querier 接口）
+func (m *MongoBuilder[R]) SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R] {
+	m.builder.SetAfterQueryHook(hook)
+	return m
+}
+
 // QueryList 执行 MongoDB 查询列表操作
 func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	return m.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
@@ -96,6 +116,16 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
 	if err = util.WaitAndGo(func() error {
 		findOpt := options.Find().SetSort(m.sort)
+
+		// 应用字段投影
+		if len(m.builder.fields) > 0 {
+			projection := bson.D{}
+			for _, f := range m.builder.fields {
+				projection = append(projection, bson.E{Key: f, Value: 1})
+			}
+			findOpt.SetProjection(projection)
+		}
+
 		if m.builder.needPagination {
 			if m.builder.limit < 1 {
 				m.builder.limit = defaultLimit
@@ -128,4 +158,43 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 	}
 
 	return list, total, nil
+}
+
+// Explain 返回 MongoDB 构建器最终生成的查询条件（Dry Run 模式）
+// 用于调试场景，不会实际执行查询
+func (m *MongoBuilder[R]) Explain(ctx context.Context) (string, error) {
+	if m.filter == nil {
+		m.filter = bson.D{}
+	}
+
+	result := map[string]any{
+		"filter": m.filter,
+	}
+
+	if m.sort != nil {
+		result["sort"] = m.sort
+	}
+
+	if len(m.builder.fields) > 0 {
+		projection := bson.D{}
+		for _, f := range m.builder.fields {
+			projection = append(projection, bson.E{Key: f, Value: 1})
+		}
+		result["projection"] = projection
+	}
+
+	if m.builder.needPagination {
+		if m.builder.limit < 1 {
+			m.builder.limit = defaultLimit
+		}
+		result["skip"] = m.builder.start
+		result["limit"] = m.builder.limit
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
 }

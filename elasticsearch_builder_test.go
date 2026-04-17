@@ -95,12 +95,12 @@ func TestElasticsearchQueryList(t *testing.T) {
 			}
 
 			// 创建 List 实例并设置 Mock Querier
-			list := NewList[ElasticTestEntity, ElasticTestFilter, ElasticTestSort]()
+			list := NewList[ElasticTestEntity]()
 			list.SetQuerier(mockQuerier)
 
 			// 执行查询
-			opts := []QueryOption[ElasticTestFilter, ElasticTestSort]{
-				WithData[ElasticTestFilter, ElasticTestSort](NewDBProxy(nil, nil, &elastic.Client{})),
+			opts := []QueryOption{
+				WithData(NewDBProxy(nil, nil, &elastic.Client{})),
 			}
 
 			result, total, err := list.Query(ctx, opts...)

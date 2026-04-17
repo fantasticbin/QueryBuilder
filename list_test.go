@@ -16,16 +16,6 @@ type TestEntity struct {
 	Age  int
 }
 
-type TestFilter struct {
-	Name string
-	Age  uint8
-}
-
-type TestSort struct {
-	Field     string
-	Direction string
-}
-
 func TestQueryList(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
@@ -37,7 +27,7 @@ func TestQueryList(t *testing.T) {
 	tests := []struct {
 		name           string
 		mockSetup      func()
-		opts           []QueryOption[TestFilter, TestSort]
+		opts           []QueryOption
 		expectedResult []*TestEntity
 		expectedTotal  int64
 		expectedErr    error
@@ -57,8 +47,8 @@ func TestQueryList(t *testing.T) {
 						{ID: 2, Name: "Bob", Age: 30},
 					}, int64(2), nil)
 			},
-			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+			opts: []QueryOption{
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 			},
 			expectedResult: []*TestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
@@ -82,8 +72,8 @@ func TestQueryList(t *testing.T) {
 						{ID: 1, Name: "Alice", Age: 25},
 					}, int64(2), nil)
 			},
-			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+			opts: []QueryOption{
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 			},
 			expectedResult: []*TestEntity{
 				{ID: 2, Name: "Bob", Age: 30},
@@ -106,8 +96,8 @@ func TestQueryList(t *testing.T) {
 						{ID: 1, Name: "Alice", Age: 25},
 					}, int64(1), nil)
 			},
-			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+			opts: []QueryOption{
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 			},
 			expectedResult: []*TestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
@@ -116,7 +106,7 @@ func TestQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-			name: "有筛选查询&辅助工具",
+			name: "有筛选查询&函数式选项",
 			mockSetup: func() {
 				mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
@@ -129,9 +119,9 @@ func TestQueryList(t *testing.T) {
 						{ID: 2, Name: "Bob", Age: 30},
 					}, int64(1), nil)
 			},
-			opts: NewOptionBuilder[TestFilter, TestSort]().
-				WithData(NewDBProxy(&gorm.DB{}, nil, nil)).
-				LoadOptions(),
+			opts: []QueryOption{
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
+			},
 			expectedResult: []*TestEntity{
 				{ID: 2, Name: "Bob", Age: 30},
 			},
@@ -150,8 +140,8 @@ func TestQueryList(t *testing.T) {
 					QueryList(ctx).
 					Return(nil, int64(0), nil)
 			},
-			opts: []QueryOption[TestFilter, TestSort]{
-				WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+			opts: []QueryOption{
+				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 			},
 			expectedResult: nil,
 			expectedTotal:  0,
@@ -169,14 +159,14 @@ func TestQueryList(t *testing.T) {
 					QueryList(ctx).
 					Return(nil, int64(0), errors.New("no data source provided"))
 			},
-			opts: []QueryOption[TestFilter, TestSort]{},
+			opts: []QueryOption{},
 			expectedResult: nil,
 			expectedTotal:  0,
 			expectedErr:    errors.New("no data source provided"),
 		},
 	}
 
-	list := NewList[TestEntity, TestFilter, TestSort]()
+	list := NewList[TestEntity]()
 	// 使用 Mock Querier 替代真实的查询构建器
 	list.SetQuerier(mockQuerier)
 	// 添加耗时监控
@@ -242,7 +232,7 @@ func TestMiddlewareChainOrder(t *testing.T) {
 	// 记录中间件执行顺序
 	var order []string
 
-	list := NewList[TestEntity, TestFilter, TestSort]()
+	list := NewList[TestEntity]()
 	list.SetQuerier(mockQuerier)
 
 	// 添加第一个中间件
@@ -280,7 +270,7 @@ func TestMiddlewareChainOrder(t *testing.T) {
 		Return([]*TestEntity{{ID: 1, Name: "Test", Age: 20}}, int64(1), nil)
 
 	result, total, err := list.Query(ctx,
-		WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
 	if err != nil {
@@ -298,12 +288,12 @@ func TestMiddlewareChainOrder(t *testing.T) {
 func TestUnsupportedDataSourcePanicRecovery(t *testing.T) {
 	ctx := context.Background()
 
-	list := NewList[TestEntity, TestFilter, TestSort]()
+	list := NewList[TestEntity]()
 	// 设置一个不支持的数据源类型（枚举值 99）
 	list.SetDataSource(DataSource(99))
 
 	result, total, err := list.Query(ctx,
-		WithData[TestFilter, TestSort](NewDBProxy(&gorm.DB{}, nil, nil)),
+		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
 	if err == nil {

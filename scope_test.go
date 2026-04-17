@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/olivere/elastic/v7"
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"gorm.io/gorm"
 )
 
@@ -16,7 +16,7 @@ func TestSetScopeWithGorm(t *testing.T) {
 	t.Run("设置filter和sort", func(t *testing.T) {
 		gormBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(gormBuilder)
 
 		list.SetScope(NewGormScope[TestEntity](
@@ -61,7 +61,7 @@ func TestSetScopeWithGorm(t *testing.T) {
 	t.Run("filter为nil", func(t *testing.T) {
 		gormBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(gormBuilder)
 
 		list.SetScope(NewGormScope[TestEntity](
@@ -96,7 +96,7 @@ func TestSetScopeWithGorm(t *testing.T) {
 	t.Run("sort为nil", func(t *testing.T) {
 		gormBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(gormBuilder)
 
 		list.SetScope(NewGormScope[TestEntity](
@@ -136,7 +136,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	t.Run("设置filter和sort", func(t *testing.T) {
 		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
 
 		list.SetScope(NewMongoScope[TestEntity](
@@ -183,7 +183,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	t.Run("filter为nil", func(t *testing.T) {
 		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
 
 		list.SetScope(NewMongoScope[TestEntity](
@@ -216,7 +216,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	t.Run("sort为nil", func(t *testing.T) {
 		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
 
 		list.SetScope(NewMongoScope[TestEntity](
@@ -254,7 +254,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	t.Run("设置filter和sort", func(t *testing.T) {
 		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
 
 		list.SetScope(NewElasticSearchScope[TestEntity](
@@ -295,7 +295,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	t.Run("filter为nil", func(t *testing.T) {
 		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
 
 		list.SetScope(NewElasticSearchScope[TestEntity](
@@ -328,7 +328,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	t.Run("无sort参数", func(t *testing.T) {
 		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
 
 		list.SetScope(NewElasticSearchScope[TestEntity](
@@ -360,7 +360,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	t.Run("多个sort参数", func(t *testing.T) {
 		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
 
-		list := NewList[TestEntity, TestFilter, TestSort]()
+		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
 
 		list.SetScope(NewElasticSearchScope[TestEntity](
@@ -398,7 +398,7 @@ func TestSetScopeNil(t *testing.T) {
 
 	gormBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
-	list := NewList[TestEntity, TestFilter, TestSort]()
+	list := NewList[TestEntity]()
 	list.SetQuerier(gormBuilder)
 
 	// 不设置 scope
@@ -430,7 +430,7 @@ func TestSetScopeBeforeMiddleware(t *testing.T) {
 
 	gormBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
-	list := NewList[TestEntity, TestFilter, TestSort]()
+	list := NewList[TestEntity]()
 	list.SetQuerier(gormBuilder)
 
 	// 设置 scope

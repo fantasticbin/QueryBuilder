@@ -16,8 +16,13 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Scope Helpers**: Built-in `SetScope` + `NewGormScope` / `NewMongoScope` / `NewElasticSearchScope` — set filter/sort in one line under `List` mode, no manual middleware or type assertions needed.
 - **Unified `Querier` Interface**: A common interface for pagination, middleware, and query execution across all data sources.
 - **Middleware Pipeline**: Insert custom logic (timing, logging, caching, etc.) into the query pipeline.
+- **Built-in Cache Middleware**: Out-of-the-box `CacheMiddleware` with a pluggable `CacheProvider` interface — bring your own cache backend (Redis, in-memory, etc.).
+- **Field Selection**: Use `SetFields` to select only specific fields, reducing bandwidth and memory usage across all data sources.
+- **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
+- **Query Meta Context**: Automatically injects `QueryMeta` into context before query execution — middleware can access data source type, pagination info, and query start time.
+- **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
-- **Options Pattern**: Flexible query configuration via functional options and an `OptionBuilder` helper.
+- **Options Pattern**: Flexible query configuration via functional options.
 - **Easy to Test**: Built-in `MockQuerier` for convenient unit testing.
 
 ---
@@ -35,24 +40,25 @@ go get github.com/fantasticbin/QueryBuilder
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Querier[R]                     │  ← Unified interface
-│  Use / SetStart / SetLimit / SetNeedTotal /     │
-│  SetNeedPagination / QueryList                  │
-└──────────┬──────────┬──────────┬────────────────┘
-           │          │          │
-    ┌──────▼──┐ ┌─────▼────┐ ┌───▼─────────────┐
-    │  Gorm   │ │  Mongo   │ │  ElasticSearch  │   ← Dedicated builders
-    │ Builder │ │ Builder  │ │     Builder     │
-    └──────┬──┘ └─────┬────┘ └──┬──────────────┘
-           │          │         │
-    ┌──────▼──────────▼─────────▼────────────────┐
-    │              builder[B, R]                 │   ← Shared base (generics)
-    │  data / start / limit / middlewares / ...  │
-    └────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                       Querier[R]                         │  ← Unified interface
+│  Use / SetStart / SetLimit / SetNeedTotal /              │
+│  SetNeedPagination / SetFields / SetBeforeQueryHook /    │
+│  SetAfterQueryHook / QueryList                           │
+└──────────┬──────────────┬──────────────┬─────────────────┘
+           │              │              │
+    ┌──────▼──┐     ┌─────▼────┐ ┌───────▼─────────┐
+    │  Gorm   │     │  Mongo   │ │  ElasticSearch  │   ← Dedicated builders
+    │ Builder │     │ Builder  │ │     Builder     │
+    └──────┬──┘     └─────┬────┘ └───────┬─────────┘
+           │              │              │
+    ┌──────▼──────────────▼──────────────▼──────────────────┐
+    │                   builder[B, R]                       │   ← Shared base (generics)
+    │  data / start / limit / fields / hooks / middlewares  │
+    └───────────────────────────────────────────────────────┘
 ```
 
-Each dedicated builder embeds the private `builder` base via Go 1.26 self-referential generics, inheriting common pagination and middleware logic while exposing its own strongly-typed `SetFilter` / `SetSort`.
+Each dedicated builder embeds the private `builder` base via Go 1.26 self-referential generics, inheriting common pagination, field selection, hooks, and middleware logic while exposing its own strongly-typed `SetFilter` / `SetSort` and `Explain`.
 
 ---
 
@@ -122,11 +128,7 @@ import (
 )
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
-    // Define type aliases to simplify generic type inference
-    type filter = pb.ListUserFilter
-    type sort = pb.QueryUserListSort
-
-    list := builder.NewList[model.User, filter, sort]()
+    list := builder.NewList[model.User]()
     list.SetDataSource(builder.MySQL)
 
     // Use SetScope to set filter and sort
@@ -141,9 +143,9 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
 
     result, total, err := list.Query(
         ctx,
-        builder.WithData[filter, sort](builder.NewDBProxy(model.DB, nil, nil)),
-        builder.WithStart[filter, sort](req.Start),
-        builder.WithLimit[filter, sort](req.Limit),
+        builder.WithData(builder.NewDBProxy(model.DB, nil, nil)),
+        builder.WithStart(req.Start),
+        builder.WithLimit(req.Limit),
     )
     if err != nil {
         return nil, 0, err
@@ -162,7 +164,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
 Insert custom middleware into the query pipeline:
 
 ```go
-list := builder.NewList[model.User, filter, sort]()
+list := builder.NewList[model.User]()
 list.SetDataSource(builder.MySQL)
 
 // Add a timing middleware
@@ -180,6 +182,204 @@ list.Use(func(
 result, total, err := list.Query(ctx, opts...)
 ```
 
+### Field Selection
+
+Use `SetFields` to select only specific fields, reducing bandwidth and memory usage:
+
+```go
+// Direct builder usage
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFields("id", "name", "email")
+users, total, err := b.QueryList(ctx)
+
+// Via List options
+result, total, err := list.Query(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithFields("id", "name", "email"),
+)
+```
+
+Field selection works across all data sources:
+
+| Data Source | Implementation |
+|-------------|---------------|
+| MySQL (GORM) | `db.Select(fields...)` |
+| MongoDB | `options.Find().SetProjection(bson.D{...})` |
+| Elasticsearch | `FetchSourceContext(true).Include(fields...)` |
+
+### Query Hooks
+
+Use `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic:
+
+```go
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+
+// Before hook: inject trace ID into context
+b.SetBeforeQueryHook(func(ctx context.Context) context.Context {
+    return context.WithValue(ctx, "trace_id", generateTraceID())
+})
+
+// After hook: log query results
+b.SetAfterQueryHook(func(ctx context.Context, list []*User, total int64, err error) {
+    if err != nil {
+        log.Printf("query failed: %v", err)
+    } else {
+        log.Printf("query returned %d items, total: %d", len(list), total)
+    }
+})
+
+users, total, err := b.QueryList(ctx)
+```
+
+### Timeout Control
+
+QueryBuilder follows Go's standard `context` pattern for timeout control — no extra API needed. Simply wrap your context with `context.WithTimeout` or `context.WithDeadline`:
+
+```go
+// Set a 3-second timeout for the query
+ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+defer cancel()
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+
+users, total, err := b.QueryList(ctx)
+if err != nil {
+    // err may be context.DeadlineExceeded if the query times out
+    log.Printf("query error: %v", err)
+}
+```
+
+This works consistently across all data sources — GORM, MongoDB, and ElasticSearch all respect context cancellation and deadlines natively. You can also combine it with middleware to log slow queries:
+
+```go
+b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Context) ([]*User, int64, error)) ([]*User, int64, error) {
+    start := time.Now()
+    list, total, err := next(ctx)
+    if duration := time.Since(start); duration > 2*time.Second {
+        log.Printf("slow query detected: %v", duration)
+    }
+    return list, total, err
+})
+```
+
+### Cache Middleware
+
+Use the built-in `CacheMiddleware` to cache query results. Implement the `CacheProvider` interface with your preferred cache backend:
+
+```go
+// CacheProvider interface — implement with Redis, in-memory cache, etc.
+type CacheProvider interface {
+    Get(ctx context.Context, key string) ([]byte, bool)
+    Set(ctx context.Context, key string, value []byte, ttl time.Duration)
+}
+```
+
+Here is an example using [gcache](https://github.com/bluele/gcache) (an in-memory cache library supporting LRU, LFU, ARC) as the cache backend:
+
+```go
+import (
+    "context"
+    "time"
+
+    "github.com/bluele/gcache"
+    builder "github.com/fantasticbin/QueryBuilder"
+)
+
+// GCacheProvider implements builder.CacheProvider using gcache
+type GCacheProvider struct {
+    cache gcache.Cache
+}
+
+func NewGCacheProvider(size int) *GCacheProvider {
+    return &GCacheProvider{
+        cache: gcache.New(size).LRU().Build(),
+    }
+}
+
+func (g *GCacheProvider) Get(ctx context.Context, key string) ([]byte, bool) {
+    val, err := g.cache.Get(key)
+    if err != nil {
+        return nil, false
+    }
+    data, ok := val.([]byte)
+    return data, ok
+}
+
+func (g *GCacheProvider) Set(ctx context.Context, key string, value []byte, ttl time.Duration) {
+    _ = g.cache.SetWithExpire(key, value, ttl)
+}
+```
+
+Use it with the cache middleware:
+
+```go
+cache := NewGCacheProvider(1000) // LRU cache with 1000 entries
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context) string {
+    return fmt.Sprintf("users:list:%d:%d", start, limit)
+}))
+
+users, total, err := b.QueryList(ctx)
+```
+
+### Query Meta Context
+
+Query metadata is automatically injected into the context before execution. Middleware can access it via `QueryMetaFromContext`:
+
+```go
+// Inside a middleware
+func MyMiddleware[R any]() builder.Middleware[R] {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+        meta := builder.QueryMetaFromContext(ctx)
+        if meta != nil {
+            log.Printf("DataSource: %v, Start: %d, Limit: %d, Fields: %v",
+                meta.DataSource, meta.Start, meta.Limit, meta.Fields)
+        }
+        return next(ctx)
+    }
+}
+```
+
+`QueryMeta` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `DataSource` | `DataSource` | Data source type (MySQL/MongoDB/ElasticSearch) |
+| `Start` | `uint32` | Pagination offset |
+| `Limit` | `uint32` | Page size |
+| `NeedTotal` | `bool` | Whether total count is requested |
+| `NeedPagination` | `bool` | Whether pagination is enabled |
+| `Fields` | `[]string` | Field projection list |
+| `StartTime` | `time.Time` | Query start timestamp |
+
+### Dry Run / Explain
+
+Each dedicated builder provides an `Explain` method to preview the generated query without executing it:
+
+```go
+// GORM — returns SQL statement
+gormBuilder := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+gormBuilder.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+sql, err := gormBuilder.Explain(ctx)
+// Output: SELECT * FROM `users` WHERE status = ? | args: [1]
+
+// MongoDB — returns JSON filter/sort/projection
+mongoBuilder := builder.NewMongoBuilder[Doc](builder.NewDBProxy(nil, collection, nil))
+mongoBuilder.SetFilter(bson.D{{Key: "status", Value: "active"}})
+jsonStr, err := mongoBuilder.Explain(ctx)
+
+// ElasticSearch — returns Query DSL JSON
+esBuilder := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
+esBuilder.SetFilter(elastic.NewTermQuery("status", "active"))
+dsl, err := esBuilder.Explain(ctx)
+```
+
 ### Mock Testing
 
 Use the built-in `MockQuerier` for unit testing:
@@ -188,9 +388,6 @@ Use the built-in `MockQuerier` for unit testing:
 func TestListUser(t *testing.T) {
     ctrl := gomock.NewController(t)
     defer ctrl.Finish()
-
-    type filter = pb.ListUserFilter
-    type sort = pb.QueryUserListSort
 
     // Create mock
     mockQuerier := builder.NewMockQuerier[model.User](ctrl)
@@ -205,39 +402,12 @@ func TestListUser(t *testing.T) {
         Return([]*model.User{{ID: 1, Name: "Alice"}}, int64(1), nil)
 
     // Inject mock
-    list := builder.NewList[model.User, filter, sort]()
+    list := builder.NewList[model.User]()
     list.SetQuerier(mockQuerier)
 
     result, total, err := list.Query(ctx, opts...)
     // assert result...
 }
-```
-
-### Option Builder Helper
-
-Use the built-in `OptionBuilder` to simplify option setup with type inference:
-
-```go
-opts := builder.NewOptionBuilder[filter, sort]().
-    WithData(builder.NewDBProxy(model.DB, nil, nil)).
-    WithStart(req.GetStart()).
-    WithLimit(req.GetLimit()).
-    LoadOptions()
-
-list := builder.NewList[model.User, filter, sort]()
-list.SetDataSource(builder.MySQL)
-
-// Use SetScope to set filter and sort
-list.SetScope(builder.NewGormScope[model.User](
-    func(db *gorm.DB) *gorm.DB {
-        return db.Where("name = ?", req.GetFilter().GetName())
-    },
-    func(db *gorm.DB) *gorm.DB {
-        return db.Order("created_at DESC")
-    },
-))
-
-result, total, err := list.Query(ctx, opts...)
 ```
 
 ### Elasticsearch Builder
@@ -297,6 +467,33 @@ list.SetScope(builder.NewElasticSearchScope[model.Doc](
 | `NewElasticSearchScope` | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 
 Passing `nil` for filter or sort will be ignored and won't affect the query flow.
+
+---
+
+## API Reference
+
+### Querier Interface
+
+| Method | Description |
+|--------|-------------|
+| `Use(middleware)` | Add middleware to the query pipeline |
+| `SetStart(start)` | Set pagination offset |
+| `SetLimit(limit)` | Set page size |
+| `SetNeedTotal(bool)` | Toggle total count query |
+| `SetNeedPagination(bool)` | Toggle pagination |
+| `SetFields(fields...)` | Set field selection |
+| `SetBeforeQueryHook(hook)` | Set pre-query hook |
+| `SetAfterQueryHook(hook)` | Set post-query hook |
+| `QueryList(ctx)` | Execute the query |
+
+### Builder-Specific Methods
+
+| Method | Available On | Description |
+|--------|-------------|-------------|
+| `SetFilter(...)` | All builders | Set data source specific filter |
+| `SetSort(...)` | All builders | Set data source specific sort |
+| `SetESIndex(index)` | `ElasticSearchBuilder` | Set/change ES index name |
+| `Explain(ctx)` | All builders | Preview generated query (Dry Run) |
 
 ---
 

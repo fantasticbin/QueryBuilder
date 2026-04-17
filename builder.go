@@ -3,9 +3,10 @@ package builder
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/olivere/elastic/v7"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
 
@@ -65,6 +66,12 @@ type Querier[R any] interface {
 	SetNeedTotal(needTotal bool) Querier[R]
 	// SetNeedPagination 设置是否需要分页
 	SetNeedPagination(needPagination bool) Querier[R]
+	// SetFields 设置查询字段投影，指定只返回部分字段
+	SetFields(fields ...string) Querier[R]
+	// SetBeforeQueryHook 设置查询前置钩子
+	SetBeforeQueryHook(hook BeforeQueryHook) Querier[R]
+	// SetAfterQueryHook 设置查询后置钩子
+	SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R]
 	// QueryList 执行查询列表操作
 	QueryList(ctx context.Context) ([]*R, int64, error)
 }
@@ -76,11 +83,15 @@ type Querier[R any] interface {
 //	R: 查询结果的实体类型
 type builder[B queryBuilder[B, R], R any] struct {
 	data           *DBProxy
+	dataSource     DataSource // 数据源类型，用于查询元信息
 	start          uint32
 	limit          uint32
 	needTotal      bool
 	needPagination bool
-	middlewares    []Middleware[R] // 中间件链
+	fields         []string          // 查询字段投影
+	beforeHook     BeforeQueryHook   // 查询前置钩子
+	afterHook      AfterQueryHook[R] // 查询后置钩子
+	middlewares    []Middleware[R]   // 中间件链
 
 	selfRef    B          // 存储具体子类型引用，用于链式调用返回具体子类型
 	querierRef Querier[R] // 存储 Querier 接口引用，避免中间件执行时的类型断言
@@ -124,12 +135,47 @@ func (b *builder[B, R]) SetNeedPagination(needPagination bool) B {
 	return b.selfRef
 }
 
+// SetFields 设置查询字段投影，指定只返回部分字段
+func (b *builder[B, R]) SetFields(fields ...string) B {
+	b.fields = fields
+	return b.selfRef
+}
+
+// SetBeforeQueryHook 设置查询前置钩子
+func (b *builder[B, R]) SetBeforeQueryHook(hook BeforeQueryHook) B {
+	b.beforeHook = hook
+	return b.selfRef
+}
+
+// SetAfterQueryHook 设置查询后置钩子
+func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
+	b.afterHook = hook
+	return b.selfRef
+}
+
 // executeWithMiddlewares 执行中间件链并调用最终查询逻辑
 // 由各专属构建器在 QueryList 中调用，传入最终的查询函数
+// 支持超时控制和前置/后置钩子
 func (b *builder[B, R]) executeWithMiddlewares(
 	ctx context.Context,
 	queryFn func(context.Context) ([]*R, int64, error),
 ) ([]*R, int64, error) {
+	// 注入查询元信息到 context
+	ctx = withQueryMeta(ctx, &QueryMeta{
+		DataSource:     b.dataSource,
+		Start:          b.start,
+		Limit:          b.limit,
+		NeedTotal:      b.needTotal,
+		NeedPagination: b.needPagination,
+		Fields:         b.fields,
+		StartTime:      time.Now(),
+	})
+
+	// 执行前置钩子
+	if b.beforeHook != nil {
+		ctx = b.beforeHook(ctx)
+	}
+
 	next := queryFn
 
 	for i := len(b.middlewares) - 1; i >= 0; i-- {
@@ -140,7 +186,14 @@ func (b *builder[B, R]) executeWithMiddlewares(
 		}(b.middlewares[i], next)
 	}
 
-	return next(ctx)
+	list, total, err := next(ctx)
+
+	// 执行后置钩子
+	if b.afterHook != nil {
+		b.afterHook(ctx, list, total, err)
+	}
+
+	return list, total, err
 }
 
 // NewBuilder 通用工厂函数，根据 DataSource 枚举值创建对应的专属查询构建器

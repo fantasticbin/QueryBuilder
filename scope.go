@@ -2,7 +2,7 @@ package builder
 
 import (
 	"github.com/olivere/elastic/v7"
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"gorm.io/gorm"
 )
 

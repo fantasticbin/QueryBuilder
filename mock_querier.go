@@ -98,6 +98,49 @@ func (mr *MockQuerierMockRecorder[R]) SetNeedPagination(needPagination any) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetNeedPagination", reflect.TypeOf((*MockQuerier[R])(nil).SetNeedPagination), needPagination)
 }
 
+// SetFields Mock 实现
+func (m *MockQuerier[R]) SetFields(fields ...string) Querier[R] {
+	m.ctrl.T.Helper()
+	varargs := []any{}
+	for _, a := range fields {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "SetFields", varargs...)
+	return m
+}
+
+// SetFields 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetFields(fields ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetFields", reflect.TypeOf((*MockQuerier[R])(nil).SetFields), fields...)
+}
+
+// SetBeforeQueryHook Mock 实现
+func (m *MockQuerier[R]) SetBeforeQueryHook(hook BeforeQueryHook) Querier[R] {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetBeforeQueryHook", hook)
+	return m
+}
+
+// SetBeforeQueryHook 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetBeforeQueryHook(hook any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetBeforeQueryHook", reflect.TypeOf((*MockQuerier[R])(nil).SetBeforeQueryHook), hook)
+}
+
+// SetAfterQueryHook Mock 实现
+func (m *MockQuerier[R]) SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R] {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetAfterQueryHook", hook)
+	return m
+}
+
+// SetAfterQueryHook 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetAfterQueryHook(hook any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAfterQueryHook", reflect.TypeOf((*MockQuerier[R])(nil).SetAfterQueryHook), hook)
+}
+
 // QueryList Mock 实现
 func (m *MockQuerier[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	m.ctrl.T.Helper()

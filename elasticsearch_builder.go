@@ -31,6 +31,7 @@ func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchB
 		index: index,
 	}
 	e.builder.data = data
+	e.builder.dataSource = ElasticSearch
 	e.builder.setSelf(e, e)
 	return e
 }
@@ -84,6 +85,24 @@ func (e *ElasticSearchBuilder[R]) SetNeedPagination(needPagination bool) Querier
 	return e
 }
 
+// SetFields 设置查询字段投影（实现 Querier 接口）
+func (e *ElasticSearchBuilder[R]) SetFields(fields ...string) Querier[R] {
+	e.builder.SetFields(fields...)
+	return e
+}
+
+// SetBeforeQueryHook 设置查询前置钩子（实现 Querier 接口）
+func (e *ElasticSearchBuilder[R]) SetBeforeQueryHook(hook BeforeQueryHook) Querier[R] {
+	e.builder.SetBeforeQueryHook(hook)
+	return e
+}
+
+// SetAfterQueryHook 设置查询后置钩子（实现 Querier 接口）
+func (e *ElasticSearchBuilder[R]) SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R] {
+	e.builder.SetAfterQueryHook(hook)
+	return e
+}
+
 // QueryList 执行 ElasticSearch 查询列表操作
 func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	return e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
@@ -107,6 +126,12 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		searchService := e.builder.data.ElasticSearch.Search().
 			Index(e.index).
 			Query(e.filter)
+
+		// 应用字段投影
+		if len(e.builder.fields) > 0 {
+			fsc := elastic.NewFetchSourceContext(true).Include(e.builder.fields...)
+			searchService = searchService.FetchSourceContext(fsc)
+		}
 
 		// 处理排序
 		for _, s := range e.sort {
@@ -156,4 +181,58 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 	}
 
 	return list, total, nil
+}
+
+// Explain 返回 ElasticSearch 构建器最终生成的查询 DSL（Dry Run 模式）
+// 用于调试场景，不会实际执行查询
+func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
+	if e.index == "" {
+		return "", errors.New("elasticsearch index not configured")
+	}
+
+	if e.filter == nil {
+		e.filter = elastic.NewMatchAllQuery()
+	}
+
+	result := map[string]any{
+		"index": e.index,
+	}
+
+	// 序列化查询条件
+	querySource, err := e.filter.Source()
+	if err != nil {
+		return "", err
+	}
+	result["query"] = querySource
+
+	if len(e.builder.fields) > 0 {
+		result["_source"] = e.builder.fields
+	}
+
+	if len(e.sort) > 0 {
+		var sortList []any
+		for _, s := range e.sort {
+			src, err := s.Source()
+			if err != nil {
+				return "", err
+			}
+			sortList = append(sortList, src)
+		}
+		result["sort"] = sortList
+	}
+
+	if e.builder.needPagination {
+		if e.builder.limit < 1 {
+			e.builder.limit = defaultLimit
+		}
+		result["from"] = e.builder.start
+		result["size"] = e.builder.limit
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
 }
