@@ -21,6 +21,7 @@
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
 - **查询元信息上下文**：查询执行前自动将 `QueryMeta` 注入到 context 中——中间件可获取数据源类型、分页信息和查询开始时间。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
+- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 MySQL（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
 - **易于测试**：内置 `MockQuerier`，便于单元测试。
@@ -44,7 +45,8 @@ go get github.com/fantasticbin/QueryBuilder
 │                       Querier[R]                         │  ← 统一接口
 │  Use / SetStart / SetLimit / SetNeedTotal /              │
 │  SetNeedPagination / SetFields / SetBeforeQueryHook /    │
-│  SetAfterQueryHook / QueryList                           │
+│  SetAfterQueryHook / SetCursorField / QueryList /        │
+│  QueryCursor                                             │
 └──────────┬──────────────┬──────────────┬─────────────────┘
            │              │              │
     ┌──────▼──┐     ┌─────▼────┐ ┌───────▼─────────┐
@@ -354,6 +356,8 @@ func MyMiddleware[R any]() builder.Middleware[R] {
 | `NeedTotal` | `bool` | 是否需要查询总数 |
 | `NeedPagination` | `bool` | 是否需要分页 |
 | `Fields` | `[]string` | 指定字段列表 |
+| `IsCursorQuery` | `bool` | 是否为游标查询模式 |
+| `CursorFields` | `[]string` | 游标分页排序字段列表 |
 | `StartTime` | `time.Time` | 查询开始时间 |
 
 ### Dry Run / Explain
@@ -436,6 +440,217 @@ esBuilder.SetNeedPagination(true)
 docs, total, err := esBuilder.QueryList(ctx)
 ```
 
+### 游标分页
+
+使用 `QueryCursor` 对大数据集进行内存高效的流式遍历。它返回 Go 1.23+ `iter.Seq2[*R, error]` 迭代器，内部自动基于游标条件分批获取数据。
+
+**工作原理：**
+- 每批数据通过游标条件（而非 OFFSET）获取，无论数据深度如何都能保持稳定性能。
+- MySQL 使用行值表达式（`WHERE (col1, col2) > (v1, v2)`），MongoDB 使用 `$gt` 复合条件，ElasticSearch 使用 `search_after` API。
+- 游标值从每批最后一条记录中自动提取——无需手动管理游标。
+- 支持单字段和多字段游标。
+
+#### 直接使用构建器
+
+```go
+ctx := context.Background()
+db := &gorm.DB{} // 你的 GORM 实例
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+
+// 设置游标字段——建议使用有索引的列以获得最佳性能
+b.SetCursorField("id")
+// SetLimit 控制每批获取的数据条数（默认：10）
+b.SetLimit(100)
+
+// QueryCursor 返回 iter.Seq2 迭代器
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        log.Printf("游标查询错误: %v", err)
+        break
+    }
+    process(user)
+}
+```
+
+#### 多字段游标
+
+适用于复合排序场景（如 `created_at` + `id`）：
+
+```go
+b := builder.NewGormBuilder[Order](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("created_at", "id") // 多字段游标
+b.SetLimit(50)
+
+for order, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    exportOrder(order)
+}
+```
+
+#### 使用 List 与选项模式
+
+```go
+list := builder.NewList[User]()
+list.SetDataSource(builder.MySQL)
+list.SetScope(builder.NewGormScope[User](
+    func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
+    nil, // 无需自定义排序——游标字段自动处理排序
+))
+
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(100),
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+#### MongoDB 游标分页
+
+```go
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxy(nil, collection, nil))
+b.SetFilter(bson.D{{Key: "status", Value: "active"}})
+b.SetCursorField("created_at", "_id")
+b.SetLimit(100)
+
+for doc, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(doc)
+}
+```
+
+#### ElasticSearch 游标分页
+
+ES 游标分页内部使用 `search_after` API。最后一条文档的 sort values 会自动作为下一批的 `search_after` 参数：
+
+```go
+b := builder.NewElasticSearchBuilder[Doc](
+    builder.NewDBProxy(nil, nil, esClient), "my_index",
+)
+b.SetFilter(elastic.NewTermQuery("status", "active"))
+b.SetCursorField("created_at")
+b.SetSort(elastic.NewFieldSort("_id").Asc()) // 辅助排序
+b.SetLimit(100)
+
+for doc, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(doc)
+}
+```
+
+#### 设置游标初始位置
+
+默认情况下，游标分页从数据集的起始位置开始。你可以指定一个初始游标位置，从特定位置恢复遍历——适用于客户端驱动的分页场景（如移动端的"加载更多"）。
+
+**方案A：复用 `start` 作为初始游标值** —— 适用于单字段数值型游标：
+
+```go
+// 直接使用构建器
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("id")
+b.SetStart(100) // 从 id > 100 开始
+b.SetLimit(10)
+
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(user) // 返回 id > 100 的用户
+}
+
+// 通过 List 选项
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithStart(100), // 从 id > 100 开始
+    builder.WithLimit(10),
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+**方案B：`SetCursorValue` / `WithCursorValue`** —— 适用于多字段游标或非数值型游标值：
+
+```go
+// 直接使用构建器——多字段游标
+b := builder.NewGormBuilder[Order](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("created_at", "id")
+b.SetCursorValue(int64(1700000000), uint32(500)) // 从 (created_at > 1700000000, id > 500) 恢复
+b.SetLimit(10)
+
+for order, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(order)
+}
+
+// 通过 List 选项
+for order, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("created_at", "id"),
+    builder.WithCursorValue(int64(1700000000), uint32(500)),
+    builder.WithLimit(10),
+) {
+    if err != nil {
+        break
+    }
+    process(order)
+}
+```
+
+> **优先级**：当同时设置了 `SetCursorValue` 和 `SetStart` 时，`SetCursorValue` 优先。
+
+#### 提前终止
+
+由于 `QueryCursor` 返回标准的 Go 迭代器，你可以随时使用 `break` 终止遍历：
+
+```go
+count := 0
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    count++
+    if count >= 1000 {
+        break // 取到 1000 条后停止
+    }
+}
+```
+
+#### 游标查询与 Explain
+
+配置了游标字段后，`Explain` 会输出游标查询模式的首批查询语句：
+
+```go
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+b.SetCursorField("id")
+b.SetLimit(100)
+
+sql, err := b.Explain(ctx)
+// 输出: [CursorQuery] SELECT * FROM `users` WHERE status = ? ORDER BY id ASC LIMIT 100 | args: [1] | cursor_fields: [id]
+```
+
 ### Scope 辅助函数
 
 在 `List` 模式下，通过 `List.SetScope` 配合 Scope 辅助函数设置 filter/sort，无需手写中间件签名和类型断言：
@@ -484,7 +699,10 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetFields(fields...)` | 设置指定字段 |
 | `SetBeforeQueryHook(hook)` | 设置查询前置钩子 |
 | `SetAfterQueryHook(hook)` | 设置查询后置钩子 |
+| `SetCursorField(fields...)` | 设置游标分页排序字段 |
+| `SetCursorValue(values...)` | 设置游标初始值（用于从指定位置恢复遍历） |
 | `QueryList(ctx)` | 执行查询 |
+| `QueryCursor(ctx)` | 执行游标分页查询，返回 `iter.Seq2` 迭代器 |
 
 ### 构建器专属方法
 
@@ -499,11 +717,11 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 
 ## 支持的数据源
 
-| 数据源 | 构建器 | Filter 类型 | Sort 类型 |
-|--------|--------|-------------|-----------|
-| MySQL (GORM) | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
-| MongoDB | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
-| Elasticsearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
+| 数据源           | 构建器 | Filter 类型 | Sort 类型 |
+|---------------|--------|-------------|-----------|
+| MySQL (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
+| ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 
 ---
 

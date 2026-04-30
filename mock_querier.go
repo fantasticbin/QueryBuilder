@@ -5,6 +5,7 @@ package builder
 
 import (
 	context "context"
+	"iter"
 	reflect "reflect"
 
 	gomock "go.uber.org/mock/gomock"
@@ -155,4 +156,52 @@ func (m *MockQuerier[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 func (mr *MockQuerierMockRecorder[R]) QueryList(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryList", reflect.TypeOf((*MockQuerier[R])(nil).QueryList), ctx)
+}
+
+// SetCursorField Mock 实现
+func (m *MockQuerier[R]) SetCursorField(fields ...string) Querier[R] {
+	m.ctrl.T.Helper()
+	varargs := []any{}
+	for _, a := range fields {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "SetCursorField", varargs...)
+	return m
+}
+
+// SetCursorField 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetCursorField(fields ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetCursorField", reflect.TypeOf((*MockQuerier[R])(nil).SetCursorField), fields...)
+}
+
+// SetCursorValue Mock 实现
+func (m *MockQuerier[R]) SetCursorValue(values ...any) Querier[R] {
+	m.ctrl.T.Helper()
+	varargs := []any{}
+	for _, a := range values {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "SetCursorValue", varargs...)
+	return m
+}
+
+// SetCursorValue 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetCursorValue(values ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetCursorValue", reflect.TypeOf((*MockQuerier[R])(nil).SetCursorValue), values...)
+}
+
+// QueryCursor Mock 实现
+func (m *MockQuerier[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "QueryCursor", ctx)
+	ret0, _ := ret[0].(iter.Seq2[*R, error])
+	return ret0
+}
+
+// QueryCursor 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) QueryCursor(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryCursor", reflect.TypeOf((*MockQuerier[R])(nil).QueryCursor), ctx)
 }

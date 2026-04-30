@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"fmt"
+	"iter"
 	"time"
 
 	"github.com/olivere/elastic/v7"
@@ -49,6 +50,8 @@ type queryBuilder[B any, R any] interface {
 	self() B
 	// QueryList 执行查询列表操作，由各专属构建器各自实现
 	QueryList(ctx context.Context) ([]*R, int64, error)
+	// QueryCursor 执行游标分页查询，返回迭代器
+	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
 }
 
 // Querier 通用查询接口，作为工厂函数的返回类型
@@ -72,8 +75,15 @@ type Querier[R any] interface {
 	SetBeforeQueryHook(hook BeforeQueryHook) Querier[R]
 	// SetAfterQueryHook 设置查询后置钩子
 	SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R]
+	// SetCursorField 设置游标分页排序字段（支持多字段）
+	SetCursorField(fields ...string) Querier[R]
+	// SetCursorValue 设置游标初始值（支持多字段，与 cursorFields 一一对应）
+	// 用于断点续查或 App 分页场景，指定游标查询的起始位置
+	SetCursorValue(values ...any) Querier[R]
 	// QueryList 执行查询列表操作
 	QueryList(ctx context.Context) ([]*R, int64, error)
+	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
+	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
 }
 
 // builder 查询构建器公共模板基类，使用自引用泛型约束
@@ -89,6 +99,8 @@ type builder[B queryBuilder[B, R], R any] struct {
 	needTotal      bool
 	needPagination bool
 	fields         []string          // 查询字段投影
+	cursorFields   []string          // 游标分页排序字段列表
+	cursorValues   []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
 	beforeHook     BeforeQueryHook   // 查询前置钩子
 	afterHook      AfterQueryHook[R] // 查询后置钩子
 	middlewares    []Middleware[R]   // 中间件链
@@ -153,6 +165,37 @@ func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
 	return b.selfRef
 }
 
+// SetCursorField 设置游标分页排序字段（支持多字段）
+func (b *builder[B, R]) SetCursorField(fields ...string) B {
+	b.cursorFields = fields
+	return b.selfRef
+}
+
+// SetCursorValue 设置游标初始值（支持多字段，与 cursorFields 一一对应）
+// 用于断点续查或 App 分页场景，指定游标查询的起始位置
+// 如果同时设置了 start > 0 且未设置 cursorValues，start 将作为单字段数值游标的初始值
+func (b *builder[B, R]) SetCursorValue(values ...any) B {
+	b.cursorValues = values
+	return b.selfRef
+}
+
+// resolveInitialCursorValues 解析初始游标值
+// 优先级：cursorValues（方案B：显式设置）> start（方案A：复用 start 作为单字段数值游标）
+// 返回 nil 表示从数据集起始位置开始查询
+func (b *builder[B, R]) resolveInitialCursorValues() []any {
+	// 方案B：如果显式设置了 cursorValues，直接使用
+	if len(b.cursorValues) > 0 {
+		return b.cursorValues
+	}
+
+	// 方案A：如果 start > 0，将其作为单字段数值游标的初始值
+	if b.start > 0 {
+		return []any{b.start}
+	}
+
+	return nil
+}
+
 // executeWithMiddlewares 执行中间件链并调用最终查询逻辑
 // 由各专属构建器在 QueryList 中调用，传入最终的查询函数
 // 支持超时控制和前置/后置钩子
@@ -194,6 +237,99 @@ func (b *builder[B, R]) executeWithMiddlewares(
 	}
 
 	return list, total, err
+}
+
+// executeCursorWithMiddlewares 执行游标查询模式下的中间件链和钩子
+// 封装游标查询的完整生命周期：BeforeQueryHook → 分批获取（每批执行中间件链）→ AfterQueryHook
+// 参数:
+//
+//	ctx: 上下文
+//	cursorQueryFn: 游标分批查询函数，接收 cursorValues 返回一批数据
+//
+// 返回:
+//
+//	iter.Seq2[*R, error]: 游标迭代器
+func (b *builder[B, R]) executeCursorWithMiddlewares(
+	ctx context.Context,
+	cursorQueryFn cursorFetchBatch[R],
+) iter.Seq2[*R, error] {
+	// 确定批次大小
+	batchSize := int(b.limit)
+	if batchSize < 1 {
+		batchSize = defaultLimit
+	}
+
+	// 解析初始游标值：优先使用 cursorValues（方案B），其次使用 start（方案A）
+	initialCursorValues := b.resolveInitialCursorValues()
+
+	// 注入查询元信息到 context（标识为游标查询模式）
+	ctx = withQueryMeta(ctx, &QueryMeta{
+		DataSource:     b.dataSource,
+		Start:          b.start,
+		Limit:          uint32(batchSize),
+		NeedTotal:      false,
+		NeedPagination: true,
+		Fields:         b.fields,
+		IsCursorQuery:  true,
+		CursorFields:   b.cursorFields,
+		StartTime:      time.Now(),
+	})
+
+	// 执行前置钩子
+	if b.beforeHook != nil {
+		ctx = b.beforeHook(ctx)
+	}
+
+	// 包装 fetchBatch，使每批次查询经过中间件链
+	wrappedFetch := func(ctx context.Context, cursorValues []any) ([]*R, []any, error) {
+		var nextCursorValues []any
+		queryFn := func(ctx context.Context) ([]*R, int64, error) {
+			batch, nextCV, err := cursorQueryFn(ctx, cursorValues)
+			nextCursorValues = nextCV
+			return batch, int64(len(batch)), err
+		}
+
+		// 构建中间件链
+		next := queryFn
+		for i := len(b.middlewares) - 1; i >= 0; i-- {
+			next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
+				return func(ctx context.Context) ([]*R, int64, error) {
+					return mw(ctx, b.querierRef, fn)
+				}
+			}(b.middlewares[i], next)
+		}
+
+		list, _, err := next(ctx)
+		return list, nextCursorValues, err
+	}
+
+	// 构建迭代器，并在迭代完成后执行后置钩子
+	innerIter := buildCursorIterator[R](ctx, b.cursorFields, batchSize, initialCursorValues, wrappedFetch)
+
+	// 包装迭代器，在遍历结束后执行 AfterQueryHook
+	return func(yield func(*R, error) bool) {
+		var allResults []*R
+		var lastErr error
+
+		for item, err := range innerIter {
+			if err != nil {
+				lastErr = err
+				if !yield(nil, err) {
+					break
+				}
+				break
+			}
+			allResults = append(allResults, item)
+			if !yield(item, nil) {
+				break
+			}
+		}
+
+		// 执行后置钩子
+		if b.afterHook != nil {
+			b.afterHook(ctx, allResults, int64(len(allResults)), lastErr)
+		}
+	}
 }
 
 // NewBuilder 通用工厂函数，根据 DataSource 枚举值创建对应的专属查询构建器

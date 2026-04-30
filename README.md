@@ -21,6 +21,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
 - **Query Meta Context**: Automatically injects `QueryMeta` into context before query execution — middleware can access data source type, pagination info, and query start time.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
+- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports MySQL (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API).
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
 - **Options Pattern**: Flexible query configuration via functional options.
 - **Easy to Test**: Built-in `MockQuerier` for convenient unit testing.
@@ -44,7 +45,8 @@ go get github.com/fantasticbin/QueryBuilder
 │                       Querier[R]                         │  ← Unified interface
 │  Use / SetStart / SetLimit / SetNeedTotal /              │
 │  SetNeedPagination / SetFields / SetBeforeQueryHook /    │
-│  SetAfterQueryHook / QueryList                           │
+│  SetAfterQueryHook / SetCursorField / QueryList /        │
+│  QueryCursor                                             │
 └──────────┬──────────────┬──────────────┬─────────────────┘
            │              │              │
     ┌──────▼──┐     ┌─────▼────┐ ┌───────▼─────────┐
@@ -354,6 +356,8 @@ func MyMiddleware[R any]() builder.Middleware[R] {
 | `NeedTotal` | `bool` | Whether total count is requested |
 | `NeedPagination` | `bool` | Whether pagination is enabled |
 | `Fields` | `[]string` | Field projection list |
+| `IsCursorQuery` | `bool` | Whether this is a cursor query |
+| `CursorFields` | `[]string` | Cursor pagination sort fields |
 | `StartTime` | `time.Time` | Query start timestamp |
 
 ### Dry Run / Explain
@@ -436,6 +440,217 @@ esBuilder.SetNeedPagination(true)
 docs, total, err := esBuilder.QueryList(ctx)
 ```
 
+### Cursor Pagination
+
+Use `QueryCursor` for memory-efficient streaming over large datasets. It returns a Go 1.23+ `iter.Seq2[*R, error]` iterator that fetches data in batches internally using cursor-based pagination.
+
+**How it works:**
+- Each batch is fetched using cursor conditions (not OFFSET), ensuring consistent performance regardless of data depth.
+- MySQL uses row value expressions (`WHERE (col1, col2) > (v1, v2)`), MongoDB uses `$gt` compound conditions, and ElasticSearch uses the `search_after` API.
+- Cursor values are automatically extracted from the last record of each batch — no manual cursor management needed.
+- Supports single-field and multi-field cursors.
+
+#### Direct Builder Usage
+
+```go
+ctx := context.Background()
+db := &gorm.DB{} // your GORM instance
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+
+// Set cursor field(s) — must be indexed columns for best performance
+b.SetCursorField("id")
+// SetLimit controls the batch size (default: 10)
+b.SetLimit(100)
+
+// QueryCursor returns an iter.Seq2 iterator
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        log.Printf("cursor error: %v", err)
+        break
+    }
+    process(user)
+}
+```
+
+#### Multi-Field Cursor
+
+For composite sorting scenarios (e.g., `created_at` + `id`):
+
+```go
+b := builder.NewGormBuilder[Order](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("created_at", "id") // multi-field cursor
+b.SetLimit(50)
+
+for order, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    exportOrder(order)
+}
+```
+
+#### Using List with Options Pattern
+
+```go
+list := builder.NewList[User]()
+list.SetDataSource(builder.MySQL)
+list.SetScope(builder.NewGormScope[User](
+    func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
+    nil, // no custom sort — cursor fields handle ordering
+))
+
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(100),
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+#### MongoDB Cursor Pagination
+
+```go
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxy(nil, collection, nil))
+b.SetFilter(bson.D{{Key: "status", Value: "active"}})
+b.SetCursorField("created_at", "_id")
+b.SetLimit(100)
+
+for doc, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(doc)
+}
+```
+
+#### ElasticSearch Cursor Pagination
+
+ES cursor pagination uses the `search_after` API internally. Sort values from the last hit are automatically used as the next batch's `search_after` parameter:
+
+```go
+b := builder.NewElasticSearchBuilder[Doc](
+    builder.NewDBProxy(nil, nil, esClient), "my_index",
+)
+b.SetFilter(elastic.NewTermQuery("status", "active"))
+b.SetCursorField("created_at")
+b.SetSort(elastic.NewFieldSort("_id").Asc()) // auxiliary sort
+b.SetLimit(100)
+
+for doc, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(doc)
+}
+```
+
+#### Setting Initial Cursor Position
+
+By default, cursor pagination starts from the beginning of the dataset. You can specify an initial cursor position to resume from a specific point — useful for client-driven pagination (e.g., "load more" in mobile apps).
+
+**Option A: Reuse `start` as initial cursor value** — suitable for single-field numeric cursors:
+
+```go
+// Direct builder usage
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("id")
+b.SetStart(100) // Start from id > 100
+b.SetLimit(10)
+
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(user) // Returns users with id > 100
+}
+
+// Via List options
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithStart(100), // Start from id > 100
+    builder.WithLimit(10),
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+**Option B: `SetCursorValue` / `WithCursorValue`** — for multi-field cursors or non-numeric cursor values:
+
+```go
+// Direct builder usage — multi-field cursor
+b := builder.NewGormBuilder[Order](builder.NewDBProxy(db, nil, nil))
+b.SetCursorField("created_at", "id")
+b.SetCursorValue(int64(1700000000), uint32(500)) // Resume from (created_at > 1700000000, id > 500)
+b.SetLimit(10)
+
+for order, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    process(order)
+}
+
+// Via List options
+for order, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("created_at", "id"),
+    builder.WithCursorValue(int64(1700000000), uint32(500)),
+    builder.WithLimit(10),
+) {
+    if err != nil {
+        break
+    }
+    process(order)
+}
+```
+
+> **Priority**: When both `SetCursorValue` and `SetStart` are set, `SetCursorValue` takes precedence.
+
+#### Early Termination
+
+Since `QueryCursor` returns a standard Go iterator, you can use `break` to stop at any time:
+
+```go
+count := 0
+for user, err := range b.QueryCursor(ctx) {
+    if err != nil {
+        break
+    }
+    count++
+    if count >= 1000 {
+        break // stop after 1000 records
+    }
+}
+```
+
+#### Cursor Query with Explain
+
+When cursor fields are configured, `Explain` outputs the cursor query mode's first-batch query:
+
+```go
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+b.SetCursorField("id")
+b.SetLimit(100)
+
+sql, err := b.Explain(ctx)
+// Output: [CursorQuery] SELECT * FROM `users` WHERE status = ? ORDER BY id ASC LIMIT 100 | args: [1] | cursor_fields: [id]
+```
+
 ### Scope Helpers
 
 Under `List` mode, use `List.SetScope` with Scope helpers to set filter/sort — no manual middleware signatures or type assertions:
@@ -484,7 +699,10 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetFields(fields...)` | Set field selection |
 | `SetBeforeQueryHook(hook)` | Set pre-query hook |
 | `SetAfterQueryHook(hook)` | Set post-query hook |
+| `SetCursorField(fields...)` | Set cursor pagination sort fields |
+| `SetCursorValue(values...)` | Set initial cursor values (for resuming from a specific position) |
 | `QueryList(ctx)` | Execute the query |
+| `QueryCursor(ctx)` | Execute cursor pagination query, returns `iter.Seq2` iterator |
 
 ### Builder-Specific Methods
 
@@ -499,11 +717,11 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 
 ## Supported Data Sources
 
-| Data Source | Builder | Filter Type | Sort Type |
-|-------------|---------|-------------|-----------|
-| MySQL (GORM) | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
-| MongoDB | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
-| Elasticsearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
+| Data Source   | Builder | Filter Type | Sort Type |
+|---------------|---------|-------------|-----------|
+| MySQL (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
+| ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 
 ---
 

@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"fmt"
+	"iter"
 )
 
 // List 查询列表功能结构
@@ -100,4 +101,67 @@ func (l *List[R]) Query(
 	}
 
 	return querier.QueryList(ctx)
+}
+
+// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
+// 该方法会根据传入的 QueryOption 选项执行游标分页查询
+// 通过 DataSource 枚举值自动创建对应的专属查询构建器
+func (l *List[R]) QueryCursor(
+	ctx context.Context,
+	opts ...QueryOption,
+) (seq iter.Seq2[*R, error]) {
+	// 捕获 NewBuilder 等可能产生的 panic，转换为返回错误的迭代器
+	defer func() {
+		if r := recover(); r != nil {
+			seq = func(yield func(*R, error) bool) {
+				yield(nil, fmt.Errorf("query cursor panic recovered: %v", r))
+			}
+		}
+	}()
+
+	options := LoadQueryOptions(opts...)
+
+	var querier Querier[R]
+	if l.querier != nil {
+		// 使用注入的自定义 Querier
+		querier = l.querier
+	} else {
+		// 通过工厂函数创建对应的专属查询构建器
+		querier = NewBuilder[R](l.dataSource, options.GetData())
+	}
+
+	// 配置通用参数
+	querier.SetLimit(options.GetLimit())
+
+	// 应用字段投影
+	if fields := options.GetFields(); len(fields) > 0 {
+		querier.SetFields(fields...)
+	}
+
+	// 设置游标字段
+	if cursorFields := options.GetCursorFields(); len(cursorFields) > 0 {
+		querier.SetCursorField(cursorFields...)
+	}
+
+	// 设置游标初始值（方案B：显式传入）
+	if cursorValues := options.GetCursorValues(); len(cursorValues) > 0 {
+		querier.SetCursorValue(cursorValues...)
+	}
+
+	// 设置 start（方案A：复用 start 作为单字段数值游标初始值）
+	if start := options.GetStart(); start > 0 {
+		querier.SetStart(start)
+	}
+
+	// 应用 Scope 配置回调，自动设置 filter/sort
+	if l.scope != nil {
+		l.scope(querier)
+	}
+
+	// 添加中间件
+	for _, m := range l.middlewares {
+		querier.Use(m)
+	}
+
+	return querier.QueryCursor(ctx)
 }

@@ -15,17 +15,21 @@ type QueryListOptions interface {
 	GetNeedTotal() bool
 	GetNeedPagination() bool
 	GetFields() []string
+	GetCursorFields() []string
+	GetCursorValues() []any
 }
 
 // BaseQueryListOptions 实现了QueryListOptions接口的基础结构体
 // 包含查询列表所需的所有基本选项
 type BaseQueryListOptions struct {
-	data           *DBProxy      // 数据实例
-	start          uint32        // 分页起始位置
-	limit          uint32        // 每页数据条数
-	needTotal      bool          // 是否需要查询总数
-	needPagination bool          // 是否需要分页
-	fields         []string      // 查询字段投影
+	data           *DBProxy // 数据实例
+	start          uint32   // 分页起始位置
+	limit          uint32   // 每页数据条数
+	needTotal      bool     // 是否需要查询总数
+	needPagination bool     // 是否需要分页
+	fields         []string // 查询字段投影
+	cursorFields   []string // 游标分页排序字段
+	cursorValues   []any    // 游标初始值（用于断点续查/App分页场景）
 }
 
 func (opts *BaseQueryListOptions) GetData() *DBProxy {
@@ -48,6 +52,14 @@ func (opts *BaseQueryListOptions) GetNeedPagination() bool { return opts.needPag
 
 func (opts *BaseQueryListOptions) GetFields() []string {
 	return opts.fields
+}
+
+func (opts *BaseQueryListOptions) GetCursorFields() []string {
+	return opts.cursorFields
+}
+
+func (opts *BaseQueryListOptions) GetCursorValues() []any {
+	return opts.cursorValues
 }
 
 // QueryOption 定义用于配置查询选项的函数类型
@@ -111,5 +123,17 @@ func WithNeedPagination(needPagination bool) QueryOption {
 func WithFields(fields ...string) QueryOption {
 	return func(o *BaseQueryListOptions) {
 		o.fields = fields
+	}
+}
+
+func WithCursorField(fields ...string) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.cursorFields = fields
+	}
+}
+
+func WithCursorValue(values ...any) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.cursorValues = values
 	}
 }

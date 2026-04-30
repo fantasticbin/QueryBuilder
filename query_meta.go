@@ -17,6 +17,8 @@ type QueryMeta struct {
 	NeedTotal      bool       // 是否需要查询总数
 	NeedPagination bool       // 是否需要分页
 	Fields         []string   // 查询字段投影
+	IsCursorQuery  bool       // 是否为游标查询模式
+	CursorFields   []string   // 游标分页排序字段列表
 	StartTime      time.Time  // 查询开始时间
 }
 
