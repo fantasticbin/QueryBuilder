@@ -58,13 +58,20 @@ type queryBuilder[B any, R any] interface {
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
 }
 
-// Querier 通用查询接口，作为工厂函数的返回类型
+// QuerierMiddleware 中间件能力接口
 // 泛型参数:
 //
 //	R: 查询结果的实体类型
-type Querier[R any] interface {
+type QuerierMiddleware[R any] interface {
 	// Use 添加中间件
 	Use(middleware Middleware[R]) Querier[R]
+}
+
+// QuerierList 查询基础能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type QuerierList[R any] interface {
 	// SetStart 设置分页起始位置
 	SetStart(start uint32) Querier[R]
 	// SetLimit 设置每页数据条数
@@ -75,19 +82,45 @@ type Querier[R any] interface {
 	SetNeedPagination(needPagination bool) Querier[R]
 	// SetFields 设置查询字段投影，指定只返回部分字段
 	SetFields(fields ...string) Querier[R]
+	// QueryList 执行查询列表操作
+	QueryList(ctx context.Context) ([]*R, int64, error)
+}
+
+// QuerierHook 钩子处理能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type QuerierHook[R any] interface {
 	// SetBeforeQueryHook 设置查询前置钩子
 	SetBeforeQueryHook(hook BeforeQueryHook) Querier[R]
 	// SetAfterQueryHook 设置查询后置钩子
 	SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R]
+}
+
+// QuerierCursor 游标模式能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type QuerierCursor[R any] interface {
 	// SetCursorField 设置游标分页排序字段（支持多字段）
 	SetCursorField(fields ...string) Querier[R]
 	// SetCursorValue 设置游标初始值（支持多字段，与 cursorFields 一一对应）
 	// 用于断点续查或 App 分页场景，指定游标查询的起始位置
 	SetCursorValue(values ...any) Querier[R]
-	// QueryList 执行查询列表操作
-	QueryList(ctx context.Context) ([]*R, int64, error)
 	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
+}
+
+// Querier 通用查询接口，作为工厂函数的返回类型
+// 通过嵌入多个小接口组合完整能力
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type Querier[R any] interface {
+	QuerierMiddleware[R]
+	QuerierList[R]
+	QuerierHook[R]
+	QuerierCursor[R]
 }
 
 // builder 查询构建器公共模板基类，使用自引用泛型约束
