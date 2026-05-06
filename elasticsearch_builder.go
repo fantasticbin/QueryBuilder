@@ -118,6 +118,9 @@ func (e *ElasticSearchBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 ElasticSearch 查询列表操作
 func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+	if err := e.builder.validateData(); err != nil {
+		return nil, 0, err
+	}
 	return e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
 		return e.doQuery(ctx)
 	})
@@ -126,6 +129,11 @@ func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, e
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
 // 使用 ES 的 search_after API 进行分批查询
 func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
+	if err := e.builder.validateData(); err != nil {
+		return func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
 	return e.builder.executeCursorWithMiddlewares(ctx, e.doCursorQuery)
 }

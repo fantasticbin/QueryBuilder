@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/fantasticbin/QueryBuilder/util"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // GormScope GORM 查询作用域类型
@@ -111,6 +114,9 @@ func (g *GormBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 GORM 查询列表操作
 func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+	if err := g.builder.validateData(); err != nil {
+		return nil, 0, err
+	}
 	return g.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
 		return g.doQuery(ctx)
 	})
@@ -118,6 +124,11 @@ func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 
 // QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
 func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
+	if err := g.builder.validateData(); err != nil {
+		return func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
 	return g.builder.executeCursorWithMiddlewares(ctx, g.doCursorQuery)
 }
 
@@ -178,6 +189,10 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 // 用于调试场景，不会实际执行查询
 // 若已配置游标字段，将输出游标查询模式的首批查询 SQL
 func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
+	if err := g.builder.validateData(); err != nil {
+		return "", err
+	}
+
 	// 如果配置了游标字段，展示游标查询模式的首批 SQL
 	if len(g.builder.cursorFields) > 0 {
 		return g.explainCursor(ctx)
@@ -297,6 +312,27 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) 
 		return nil, nil, err
 	}
 
-	// 返回 nil 作为 nextCursorValues，由 buildCursorIterator 通过反射提取
-	return list, nil, nil
+	if len(list) == 0 {
+		return list, nil, nil
+	}
+
+	// 通过 schema.Parse 解析结构体元数据，利用 LookUpField 按列名提取游标值
+	s, err := schema.Parse(new(R), &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("schema parse failed: %w", err)
+	}
+
+	lastItem := list[len(list)-1]
+	rv := reflect.ValueOf(lastItem).Elem()
+	nextCursorValues := make([]any, 0, len(g.builder.cursorFields))
+	for _, fieldName := range g.builder.cursorFields {
+		field := s.LookUpField(fieldName)
+		if field == nil {
+			return nil, nil, fmt.Errorf("cursor field %q not found in schema", fieldName)
+		}
+		val := field.ReflectValueOf(ctx, rv)
+		nextCursorValues = append(nextCursorValues, val.Interface())
+	}
+
+	return list, nextCursorValues, nil
 }

@@ -34,7 +34,7 @@ func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 1, Name: "Alice", CreatedAt: 100},
 				{ID: 2, Name: "Bob", CreatedAt: 200},
-			}, nil, nil
+			}, []any{uint32(2)}, nil
 		case 2:
 			// 第二次查询，cursorValues 应为 [2]（上一批最后一条的 ID）
 			if len(cursorValues) != 1 || cursorValues[0] != uint32(2) {
@@ -42,7 +42,7 @@ func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 3, Name: "Charlie", CreatedAt: 300},
-			}, nil, nil // 返回 1 条 < batchSize，终止
+			}, []any{uint32(3)}, nil // 返回 1 条 < batchSize，终止
 		default:
 			t.Error("不应有第三次调用")
 			return nil, nil, nil
@@ -135,7 +135,8 @@ func TestBuildCursorIterator_BreakEarlyTermination(t *testing.T) {
 		for i := range items {
 			items[i] = &CursorTestEntity{ID: uint32(callCount*batchSize + i + 1), Name: "test"}
 		}
-		return items, nil, nil
+		lastID := items[len(items)-1].ID
+		return items, []any{lastID}, nil
 	}
 
 seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
@@ -174,7 +175,7 @@ func TestBuildCursorIterator_ContextCancellation(t *testing.T) {
 		return []*CursorTestEntity{
 			{ID: uint32(callCount*2 - 1), Name: "test1"},
 			{ID: uint32(callCount * 2), Name: "test2"},
-		}, nil, nil
+		}, []any{uint32(callCount * 2)}, nil
 	}
 
 seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
@@ -246,7 +247,7 @@ func TestBuildCursorIterator_MultiFieldCursor(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 1, Name: "Alice", CreatedAt: 100},
 				{ID: 2, Name: "Bob", CreatedAt: 100},
-			}, nil, nil
+			}, []any{int64(100), uint32(2)}, nil
 		case 2:
 			// 应该提取到 [100, 2]（CreatedAt=100, ID=2）
 			if len(cursorValues) != 2 {
@@ -261,7 +262,7 @@ func TestBuildCursorIterator_MultiFieldCursor(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 3, Name: "Charlie", CreatedAt: 200},
-			}, nil, nil
+			}, []any{int64(200), uint32(3)}, nil
 		default:
 			return nil, nil, nil
 		}
@@ -333,72 +334,7 @@ seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, 
 	}
 }
 
-// TestExtractCursorValues_FieldNameMatch 测试字段名匹配
-func TestExtractCursorValues_FieldNameMatch(t *testing.T) {
-	item := &CursorTestEntity{ID: 42, Name: "test", CreatedAt: 1000}
 
-	// 精确字段名匹配
-	values, err := extractCursorValues(item, []string{"ID"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(values) != 1 || values[0] != uint32(42) {
-		t.Errorf("expected [42], got %v", values)
-	}
-
-	// 多字段
-	values, err = extractCursorValues(item, []string{"CreatedAt", "ID"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(values) != 2 || values[0] != int64(1000) || values[1] != uint32(42) {
-		t.Errorf("expected [1000, 42], got %v", values)
-	}
-}
-
-// TestExtractCursorValues_JSONTagMatch 测试 JSON tag 匹配
-func TestExtractCursorValues_JSONTagMatch(t *testing.T) {
-	item := &CursorTestEntity{ID: 10, CreatedAt: 500}
-
-	values, err := extractCursorValues(item, []string{"created_at"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(values) != 1 || values[0] != int64(500) {
-		t.Errorf("expected [500], got %v", values)
-	}
-}
-
-// TestExtractCursorValues_GormColumnMatch 测试 gorm column tag 匹配
-func TestExtractCursorValues_GormColumnMatch(t *testing.T) {
-	item := &CursorTestEntity{ID: 7, Name: "gorm_test"}
-
-	values, err := extractCursorValues(item, []string{"id"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(values) != 1 || values[0] != uint32(7) {
-		t.Errorf("expected [7], got %v", values)
-	}
-}
-
-// TestExtractCursorValues_FieldNotFound 测试字段不存在
-func TestExtractCursorValues_FieldNotFound(t *testing.T) {
-	item := &CursorTestEntity{ID: 1}
-
-	_, err := extractCursorValues(item, []string{"nonexistent_field"})
-	if err == nil {
-		t.Error("expected error for nonexistent field, got nil")
-	}
-}
-
-// TestExtractCursorValues_NilItem 测试 nil 记录
-func TestExtractCursorValues_NilItem(t *testing.T) {
-	_, err := extractCursorValues[CursorTestEntity](nil, []string{"ID"})
-	if err == nil {
-		t.Error("expected error for nil item, got nil")
-	}
-}
 
 // TestListQueryCursor_WithMockQuerier 测试 List.QueryCursor 使用 MockQuerier
 func TestListQueryCursor_WithMockQuerier(t *testing.T) {
@@ -471,7 +407,7 @@ func TestBuildCursorIterator_WithInitialCursorValues(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 101, Name: "Alice"},
 				{ID: 102, Name: "Bob"},
-			}, nil, nil
+			}, []any{uint32(102)}, nil
 		case 2:
 			// 第二次查询，cursorValues 应为上一批最后一条的 ID [102]
 			if len(cursorValues) != 1 || cursorValues[0] != uint32(102) {
@@ -479,7 +415,7 @@ func TestBuildCursorIterator_WithInitialCursorValues(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 103, Name: "Charlie"},
-			}, nil, nil
+			}, []any{uint32(103)}, nil
 		default:
 			return nil, nil, nil
 		}

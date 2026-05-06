@@ -6,6 +6,7 @@ import (
 
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
 
@@ -134,7 +135,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("设置filter和sort", func(t *testing.T) {
-		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
+		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
@@ -181,7 +182,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	})
 
 	t.Run("filter为nil", func(t *testing.T) {
-		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
+		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
@@ -214,7 +215,7 @@ func TestSetScopeWithMongo(t *testing.T) {
 	})
 
 	t.Run("sort为nil", func(t *testing.T) {
-		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, nil, nil))
+		mongoBuilder := NewMongoBuilder[TestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(mongoBuilder)
@@ -252,7 +253,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("设置filter和sort", func(t *testing.T) {
-		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
+		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
@@ -293,7 +294,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	})
 
 	t.Run("filter为nil", func(t *testing.T) {
-		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
+		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
@@ -326,7 +327,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	})
 
 	t.Run("无sort参数", func(t *testing.T) {
-		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
+		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)
@@ -358,7 +359,7 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 	})
 
 	t.Run("多个sort参数", func(t *testing.T) {
-		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, nil), "test_index")
+		esBuilder := NewElasticSearchBuilder[TestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
 
 		list := NewList[TestEntity]()
 		list.SetQuerier(esBuilder)

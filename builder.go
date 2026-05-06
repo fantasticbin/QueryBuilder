@@ -2,6 +2,7 @@ package builder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
@@ -22,6 +23,9 @@ const (
 	// ElasticSearch 数据源
 	ElasticSearch
 )
+
+// ErrDataNotConfigured 数据源未正确配置的统一错误
+var ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
 
 // DBProxy 数据实例结构
 type DBProxy struct {
@@ -114,6 +118,31 @@ type builder[B queryBuilder[B, R], R any] struct {
 func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 	b.selfRef = self
 	b.querierRef = querier
+}
+
+// validateData 校验数据源是否已正确配置
+// 根据 dataSource 类型检查 DBProxy 中对应的字段是否为 nil
+func (b *builder[B, R]) validateData() error {
+	if b.data == nil {
+		return ErrDataNotConfigured
+	}
+
+	switch b.dataSource {
+	case MySQL:
+		if b.data.DB == nil {
+			return ErrDataNotConfigured
+		}
+	case MongoDB:
+		if b.data.Mongodb == nil {
+			return ErrDataNotConfigured
+		}
+	case ElasticSearch:
+		if b.data.ElasticSearch == nil {
+			return ErrDataNotConfigured
+		}
+	}
+
+	return nil
 }
 
 // Use 添加中间件

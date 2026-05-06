@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 
 	"github.com/fantasticbin/QueryBuilder/util"
@@ -115,6 +116,9 @@ func (m *MongoBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 MongoDB 查询列表操作
 func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+	if err := m.builder.validateData(); err != nil {
+		return nil, 0, err
+	}
 	return m.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
 		return m.doQuery(ctx)
 	})
@@ -122,6 +126,11 @@ func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 
 // QueryCursor 执行 MongoDB 游标分页查询，返回迭代器（实现 Querier 接口）
 func (m *MongoBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
+	if err := m.builder.validateData(); err != nil {
+		return func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
 	return m.builder.executeCursorWithMiddlewares(ctx, m.doCursorQuery)
 }
 
@@ -350,11 +359,38 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any)
 		_ = cursor.Close(ctx)
 	}(cursor, ctx)
 
+	// 逐条遍历 cursor，保留最后一条文档的原始 BSON 用于提取游标值
 	var list []*R
-	if err := cursor.All(ctx, &list); err != nil {
+	var lastRaw bson.Raw
+	for cursor.Next(ctx) {
+		var item R
+		if err := cursor.Decode(&item); err != nil {
+			return nil, nil, err
+		}
+		list = append(list, &item)
+		lastRaw = cursor.Current
+	}
+	if err := cursor.Err(); err != nil {
 		return nil, nil, err
 	}
 
-	// 返回 nil 作为 nextCursorValues，由 buildCursorIterator 通过反射提取
-	return list, nil, nil
+	if len(list) == 0 {
+		return list, nil, nil
+	}
+
+	// 从最后一条文档的原始 BSON 中直接按字段名提取游标值（零反射）
+	nextCursorValues := make([]any, 0, len(m.builder.cursorFields))
+	for _, field := range m.builder.cursorFields {
+		rawVal, err := lastRaw.LookupErr(field)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cursor field %q not found in document: %w", field, err)
+		}
+		var val any
+		if err := rawVal.Unmarshal(&val); err != nil {
+			return nil, nil, fmt.Errorf("cursor field %q unmarshal failed: %w", field, err)
+		}
+		nextCursorValues = append(nextCursorValues, val)
+	}
+
+	return list, nextCursorValues, nil
 }
