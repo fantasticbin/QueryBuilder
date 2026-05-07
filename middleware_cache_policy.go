@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-		"time"
 )
 
 // CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。
@@ -108,45 +107,4 @@ func normalizeValue(v any) any {
 		}
 		return v
 	}
-}
-
-// CacheTTLTemplate 预置 TTL 模板。
-// StaleTTL 仅用于 SWR（stale-while-revalidate）场景：
-// 在 ListTTL 过期后、StaleTTL 过期前，可先返回旧数据再异步刷新。
-type CacheTTLTemplate struct {
-	ListTTL  time.Duration
-	TotalTTL time.Duration
-	StaleTTL time.Duration
-}
-
-// CacheTTLShort 返回“短缓存”模板。
-// 可选传参：listTTL, totalTTL（用于覆盖默认值并设置更久时间）。
-func CacheTTLShort(override ...time.Duration) CacheTTLTemplate {
-	t := CacheTTLTemplate{ListTTL: 2 * time.Minute, TotalTTL: 10 * time.Minute}
-	if len(override) > 0 && override[0] > 0 {
-		t.ListTTL = override[0]
-	}
-	if len(override) > 1 && override[1] > 0 {
-		t.TotalTTL = override[1]
-	}
-	return t
-}
-
-// CacheTTLSWR 返回 SWR 风格模板。
-// 可选传参：listTTL, totalTTL, staleTTL（可覆盖为更久时间）。
-func CacheTTLSWR(override ...time.Duration) CacheTTLTemplate {
-	t := CacheTTLTemplate{ListTTL: 5 * time.Minute, TotalTTL: 20 * time.Minute, StaleTTL: 30 * time.Minute}
-	if len(override) > 0 && override[0] > 0 {
-		t.ListTTL = override[0]
-	}
-	if len(override) > 1 && override[1] > 0 {
-		t.TotalTTL = override[1]
-	}
-	if len(override) > 2 && override[2] > 0 {
-		t.StaleTTL = override[2]
-	}
-	if t.StaleTTL > 0 && t.StaleTTL < t.ListTTL {
-		t.StaleTTL = t.ListTTL
-	}
-	return t
 }

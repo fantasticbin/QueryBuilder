@@ -50,21 +50,6 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	}
 }
 
-func TestCacheTTLTemplates(t *testing.T) {
-	short := CacheTTLShort()
-	if short.ListTTL <= 0 || short.TotalTTL <= 0 {
-		t.Fatalf("short ttl template should be positive")
-	}
-	swr := CacheTTLSWR()
-	custom := CacheTTLShort(15*time.Minute, 45*time.Minute)
-	if custom.ListTTL != 15*time.Minute || custom.TotalTTL != 45*time.Minute {
-		t.Fatalf("expected custom short ttl override to take effect")
-	}
-	if swr.StaleTTL <= swr.ListTTL {
-		t.Fatalf("swr stale ttl should be greater than list ttl")
-	}
-}
-
 type testUser struct {
 	ID   int
 	Name string
