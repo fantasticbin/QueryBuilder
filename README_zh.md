@@ -22,6 +22,7 @@
 - **查询元信息上下文**：查询执行前自动将 `QueryMeta` 注入到 context 中——中间件可获取数据源类型、分页信息和查询开始时间。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
 - **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 MySQL（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
+- **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
 - **易于测试**：内置 `MockQuerier`，便于单元测试。
@@ -266,6 +267,105 @@ b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Conte
     return list, total, err
 })
 ```
+
+### Clone（并发分叉）
+
+每个专属构建器提供 `Clone()` 方法，创建当前查询配置的完全独立副本。克隆实例与原实例不共享任何可变状态——对其中一个的修改不会影响另一个。
+
+**核心要点：**
+- 所有标量字段、切片（fields、cursorFields、cursorValues、middlewares）以及数据源专属的 filter/sort 均为深拷贝。
+- 原始构建器**不是**并发安全的——不要在多个 goroutine 中对同一实例调用 `Set*` 方法。
+- `Clone()` 之后，每个副本可以安全地在各自的 goroutine 中使用。
+
+#### 基本用法
+
+```go
+// 构建一个"模板"，配置公共参数
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", "active")
+}).SetSort(func(db *gorm.DB) *gorm.DB {
+    return db.Order("id DESC")
+}).SetFields("id", "name", "email").SetNeedTotal(true)
+
+// Clone 后独立定制
+page1 := base.Clone().SetStart(0).SetLimit(50)
+page2 := base.Clone().SetStart(50).SetLimit(50)
+```
+
+#### 并发分叉查询（最佳实践）
+
+```go
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", "active")
+}).SetFields("id", "name", "email").SetNeedTotal(true)
+
+var wg sync.WaitGroup
+pages := []struct{ start, limit uint32 }{
+    {0, 100}, {100, 100}, {200, 100},
+}
+results := make([][]*User, len(pages))
+
+for i, page := range pages {
+    wg.Add(1)
+    go func(idx int, p struct{ start, limit uint32 }) {
+        defer wg.Done()
+        q := base.Clone().SetStart(p.start).SetLimit(p.limit)
+        list, _, err := q.QueryList(ctx)
+        if err != nil {
+            log.Printf("page %d error: %v", idx, err)
+            return
+        }
+        results[idx] = list
+    }(i, page)
+}
+wg.Wait()
+```
+
+#### Clone 后使用不同过滤条件
+
+```go
+base := builder.NewMongoBuilder[Order](builder.NewDBProxy(nil, collection, nil))
+base.SetFields("id", "user_id", "amount").SetLimit(20)
+
+// 分叉为不同的过滤条件
+pending := base.Clone().SetFilter(bson.D{{Key: "status", Value: "pending"}})
+completed := base.Clone().SetFilter(bson.D{{Key: "status", Value: "completed"}})
+
+go func() { pendingOrders, _, _ := pending.QueryList(ctx) }()
+go func() { completedOrders, _, _ := completed.QueryList(ctx) }()
+```
+
+#### Clone 后追加不同中间件
+
+```go
+base := builder.NewGormBuilder[Product](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(filterScope).SetLimit(100)
+
+// 每个 Clone 可以拥有独立的中间件栈
+go func() {
+    q := base.Clone()
+    q.Use(cacheMiddleware)  // 此副本走缓存
+    list, _, _ := q.QueryList(ctx)
+}()
+
+go func() {
+    q := base.Clone()
+    q.Use(metricsMiddleware) // 此副本收集指标
+    list, _, _ := q.QueryList(ctx)
+}()
+```
+
+#### 规则与反模式
+
+| 规则 | 说明 |
+|------|------|
+| ✅ 先配置，再 Clone | 构建"模板" builder，然后通过 Clone 分叉 |
+| ✅ 每个 goroutine 一个 Clone | 每个 goroutine 应独占自己的 Clone 副本 |
+| ✅ Clone 是对 base 的只读操作 | 可以对同一个 base 多次调用 Clone（顺序调用） |
+| ❌ 不要跨 goroutine 共享 builder | 不要在多个 goroutine 中对同一实例调用 Set 方法 |
+| ❌ 不要在 base 被修改时并发 Clone | 确保 base 完全配置好后再进行并发 Clone 调用 |
 
 ### 缓存中间件
 
@@ -693,7 +793,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 |------|------|
 | `Use(middleware)` | 添加中间件到查询管道 |
 | `SetStart(start)` | 设置分页起始位置 |
-| `SetLimit(limit)` | 设置每页数据条数 |
+| `SetLimit(limit)` | 设置每页数据条数（最大值：5000） |
 | `SetNeedTotal(bool)` | 设置是否需要查询总数 |
 | `SetNeedPagination(bool)` | 设置是否需要分页 |
 | `SetFields(fields...)` | 设置指定字段 |
@@ -710,6 +810,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 |------|-----------|------|
 | `SetFilter(...)` | 所有构建器 | 设置数据源专属过滤条件 |
 | `SetSort(...)` | 所有构建器 | 设置数据源专属排序条件 |
+| `Clone()` | 所有构建器 | 创建独立副本，用于并发分叉查询 |
 | `SetESIndex(index)` | `ElasticSearchBuilder` | 设置/修改 ES 索引名 |
 | `Explain(ctx)` | 所有构建器 | 预览生成的查询语句（Dry Run） |
 

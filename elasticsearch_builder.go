@@ -33,8 +33,28 @@ func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchB
 	}
 	e.builder.data = data
 	e.builder.dataSource = ElasticSearch
+	e.builder.limit = defaultLimit
 	e.builder.setSelf(e, e)
 	return e
+}
+
+// Clone 复制当前 ElasticSearchBuilder 的查询配置，返回一个独立的新实例
+// 新实例与原实例状态隔离，修改互不影响，适用于并发分叉查询场景
+// 注意：原 ElasticSearchBuilder 非并发安全，请勿在多 goroutine 中共享同一实例进行写操作
+func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
+	cloned := &ElasticSearchBuilder[R]{
+		index:  e.index,
+		filter: e.filter,
+	}
+	e.builder.cloneBase(&cloned.builder)
+	cloned.builder.setSelf(cloned, cloned)
+
+	// 深拷贝 sort 切片
+	if e.sort != nil {
+		cloned.sort = make([]elastic.Sorter, len(e.sort))
+		copy(cloned.sort, e.sort)
+	}
+	return cloned
 }
 
 // SetESIndex 设置 Elasticsearch 索引名（仅 ElasticSearch 构建器专属方法）
@@ -118,7 +138,7 @@ func (e *ElasticSearchBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 ElasticSearch 查询列表操作
 func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
-	if err := e.builder.validateData(); err != nil {
+	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
 	return e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
@@ -129,7 +149,7 @@ func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, e
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
 // 使用 ES 的 search_after API 进行分批查询
 func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	if err := e.builder.validateData(); err != nil {
+	if err := e.builder.prepareAndValidate(); err != nil {
 		return func(yield func(*R, error) bool) {
 			yield(nil, err)
 		}

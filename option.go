@@ -5,6 +5,7 @@ const (
 	defaultLimit          = 10   // 默认每页10条
 	defaultNeedTotal      = true // 默认需要总数
 	defaultNeedPagination = true // 默认需要分页
+	maxLimit              = 5000 // limit 允许的最大值
 )
 
 // QueryListOptions 定义了查询列表的通用选项接口

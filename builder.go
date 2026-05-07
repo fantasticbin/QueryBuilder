@@ -27,6 +27,15 @@ const (
 // ErrDataNotConfigured 数据源未正确配置的统一错误
 var ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
 
+// ErrLimitZero limit 不能为 0
+var ErrLimitZero = errors.New("limit must be greater than 0")
+
+// ErrLimitExceeded limit 超出允许的最大值
+var ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
+
+// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
+var ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
+
 // DBProxy 数据实例结构
 type DBProxy struct {
 	DB            *gorm.DB
@@ -153,9 +162,9 @@ func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 	b.querierRef = querier
 }
 
-// validateData 校验数据源是否已正确配置
-// 根据 dataSource 类型检查 DBProxy 中对应的字段是否为 nil
-func (b *builder[B, R]) validateData() error {
+// prepareAndValidate 执行查询前的参数校验与数据准备
+// 包括：数据源配置校验、limit 上下限校验、cursorValues/cursorFields 长度一致性校验、fields 自动清洗
+func (b *builder[B, R]) prepareAndValidate() error {
 	if b.data == nil {
 		return ErrDataNotConfigured
 	}
@@ -175,7 +184,86 @@ func (b *builder[B, R]) validateData() error {
 		}
 	}
 
+	// limit 校验
+	if b.limit == 0 {
+		return ErrLimitZero
+	}
+	if b.limit > maxLimit {
+		return ErrLimitExceeded
+	}
+
+	// cursorValues 与 cursorFields 长度一致性校验
+	if len(b.cursorValues) > 0 && len(b.cursorFields) > 0 && len(b.cursorValues) != len(b.cursorFields) {
+		return ErrCursorMismatch
+	}
+
+	// fields 自动清洗
+	b.sanitizeFields()
+
 	return nil
+}
+
+// sanitizeFields 对 fields 切片进行自动清洗：过滤空字符串、去重
+// 若清洗后为空切片，则将 fields 置为 nil（表示查询所有字段）
+func (b *builder[B, R]) sanitizeFields() {
+	if len(b.fields) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(b.fields))
+	cleaned := make([]string, 0, len(b.fields))
+
+	for _, field := range b.fields {
+		// 过滤空字符串
+		if field == "" {
+			continue
+		}
+		// 去重
+		if _, exists := seen[field]; exists {
+			continue
+		}
+		seen[field] = struct{}{}
+		cleaned = append(cleaned, field)
+	}
+
+	// 清洗后为空则视为未设置
+	if len(cleaned) == 0 {
+		b.fields = nil
+	} else {
+		b.fields = cleaned
+	}
+}
+
+// cloneBase 复制 builder 基类的查询配置到目标 builder
+// 用于各专属构建器的 Clone() 方法，实现状态隔离的并发分叉
+// 注意：selfRef 和 querierRef 不复制，由子类通过 setSelf 重新设置
+func (b *builder[B, R]) cloneBase(dst *builder[B, R]) {
+	dst.data = b.data
+	dst.dataSource = b.dataSource
+	dst.start = b.start
+	dst.limit = b.limit
+	dst.needTotal = b.needTotal
+	dst.needPagination = b.needPagination
+	dst.beforeHook = b.beforeHook
+	dst.afterHook = b.afterHook
+
+	// 切片类型深拷贝，确保修改互不影响
+	if b.fields != nil {
+		dst.fields = make([]string, len(b.fields))
+		copy(dst.fields, b.fields)
+	}
+	if b.cursorFields != nil {
+		dst.cursorFields = make([]string, len(b.cursorFields))
+		copy(dst.cursorFields, b.cursorFields)
+	}
+	if b.cursorValues != nil {
+		dst.cursorValues = make([]any, len(b.cursorValues))
+		copy(dst.cursorValues, b.cursorValues)
+	}
+	if b.middlewares != nil {
+		dst.middlewares = make([]Middleware[R], len(b.middlewares))
+		copy(dst.middlewares, b.middlewares)
+	}
 }
 
 // Use 添加中间件

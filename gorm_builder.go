@@ -36,8 +36,22 @@ func NewGormBuilder[R any](data *DBProxy) *GormBuilder[R] {
 	g := &GormBuilder[R]{}
 	g.builder.data = data
 	g.builder.dataSource = MySQL
+	g.builder.limit = defaultLimit
 	g.builder.setSelf(g, g)
 	return g
+}
+
+// Clone 复制当前 GormBuilder 的查询配置，返回一个独立的新实例
+// 新实例与原实例状态隔离，修改互不影响，适用于并发分叉查询场景
+// 注意：原 GormBuilder 非并发安全，请勿在多 goroutine 中共享同一实例进行写操作
+func (g *GormBuilder[R]) Clone() *GormBuilder[R] {
+	cloned := &GormBuilder[R]{
+		filter: g.filter,
+		sort:   g.sort,
+	}
+	g.builder.cloneBase(&cloned.builder)
+	cloned.builder.setSelf(cloned, cloned)
+	return cloned
 }
 
 // SetFilter 设置 GORM 过滤条件
@@ -114,7 +128,7 @@ func (g *GormBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 GORM 查询列表操作
 func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
-	if err := g.builder.validateData(); err != nil {
+	if err := g.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
 	return g.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
@@ -124,7 +138,7 @@ func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 
 // QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
 func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	if err := g.builder.validateData(); err != nil {
+	if err := g.builder.prepareAndValidate(); err != nil {
 		return func(yield func(*R, error) bool) {
 			yield(nil, err)
 		}
@@ -189,7 +203,7 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 // 用于调试场景，不会实际执行查询
 // 若已配置游标字段，将输出游标查询模式的首批查询 SQL
 func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
-	if err := g.builder.validateData(); err != nil {
+	if err := g.builder.prepareAndValidate(); err != nil {
 		return "", err
 	}
 

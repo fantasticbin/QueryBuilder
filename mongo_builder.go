@@ -38,8 +38,29 @@ func NewMongoBuilder[R any](data *DBProxy) *MongoBuilder[R] {
 	m := &MongoBuilder[R]{}
 	m.builder.data = data
 	m.builder.dataSource = MongoDB
+	m.builder.limit = defaultLimit
 	m.builder.setSelf(m, m)
 	return m
+}
+
+// Clone 复制当前 MongoBuilder 的查询配置，返回一个独立的新实例
+// 新实例与原实例状态隔离，修改互不影响，适用于并发分叉查询场景
+// 注意：原 MongoBuilder 非并发安全，请勿在多 goroutine 中共享同一实例进行写操作
+func (m *MongoBuilder[R]) Clone() *MongoBuilder[R] {
+	cloned := &MongoBuilder[R]{}
+	m.builder.cloneBase(&cloned.builder)
+	cloned.builder.setSelf(cloned, cloned)
+
+	// 深拷贝 MongoDB 专属字段（bson.D 是切片类型）
+	if m.filter != nil {
+		cloned.filter = make(MongoFilter, len(m.filter))
+		copy(cloned.filter, m.filter)
+	}
+	if m.sort != nil {
+		cloned.sort = make(MongoSort, len(m.sort))
+		copy(cloned.sort, m.sort)
+	}
+	return cloned
 }
 
 // SetFilter 设置 MongoDB 过滤条件
@@ -116,7 +137,7 @@ func (m *MongoBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 
 // QueryList 执行 MongoDB 查询列表操作
 func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
-	if err := m.builder.validateData(); err != nil {
+	if err := m.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
 	return m.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
@@ -126,7 +147,7 @@ func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 
 // QueryCursor 执行 MongoDB 游标分页查询，返回迭代器（实现 Querier 接口）
 func (m *MongoBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	if err := m.builder.validateData(); err != nil {
+	if err := m.builder.prepareAndValidate(); err != nil {
 		return func(yield func(*R, error) bool) {
 			yield(nil, err)
 		}

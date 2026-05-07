@@ -22,6 +22,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Query Meta Context**: Automatically injects `QueryMeta` into context before query execution — middleware can access data source type, pagination info, and query start time.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
 - **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports MySQL (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API).
+- **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
 - **Options Pattern**: Flexible query configuration via functional options.
 - **Easy to Test**: Built-in `MockQuerier` for convenient unit testing.
@@ -266,6 +267,105 @@ b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Conte
     return list, total, err
 })
 ```
+
+### Clone (Concurrent Forking)
+
+Each dedicated builder provides a `Clone()` method that creates a fully independent copy of the current query configuration. The cloned instance shares no mutable state with the original — modifications to one will never affect the other.
+
+**Key points:**
+- All scalar fields, slices (fields, cursorFields, cursorValues, middlewares), and data-source-specific filters/sorts are deep-copied.
+- The original builder is **not** concurrency-safe for writes — do not call `Set*` methods on the same instance from multiple goroutines.
+- After `Clone()`, each copy can be safely used in its own goroutine.
+
+#### Basic Usage
+
+```go
+// Build a "template" with common configuration
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", "active")
+}).SetSort(func(db *gorm.DB) *gorm.DB {
+    return db.Order("id DESC")
+}).SetFields("id", "name", "email").SetNeedTotal(true)
+
+// Clone and customize independently
+page1 := base.Clone().SetStart(0).SetLimit(50)
+page2 := base.Clone().SetStart(50).SetLimit(50)
+```
+
+#### Concurrent Forked Queries (Best Practice)
+
+```go
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", "active")
+}).SetFields("id", "name", "email").SetNeedTotal(true)
+
+var wg sync.WaitGroup
+pages := []struct{ start, limit uint32 }{
+    {0, 100}, {100, 100}, {200, 100},
+}
+results := make([][]*User, len(pages))
+
+for i, page := range pages {
+    wg.Add(1)
+    go func(idx int, p struct{ start, limit uint32 }) {
+        defer wg.Done()
+        q := base.Clone().SetStart(p.start).SetLimit(p.limit)
+        list, _, err := q.QueryList(ctx)
+        if err != nil {
+            log.Printf("page %d error: %v", idx, err)
+            return
+        }
+        results[idx] = list
+    }(i, page)
+}
+wg.Wait()
+```
+
+#### Clone with Different Filters
+
+```go
+base := builder.NewMongoBuilder[Order](builder.NewDBProxy(nil, collection, nil))
+base.SetFields("id", "user_id", "amount").SetLimit(20)
+
+// Fork into different filter conditions
+pending := base.Clone().SetFilter(bson.D{{Key: "status", Value: "pending"}})
+completed := base.Clone().SetFilter(bson.D{{Key: "status", Value: "completed"}})
+
+go func() { pendingOrders, _, _ := pending.QueryList(ctx) }()
+go func() { completedOrders, _, _ := completed.QueryList(ctx) }()
+```
+
+#### Clone with Additional Middleware
+
+```go
+base := builder.NewGormBuilder[Product](builder.NewDBProxy(db, nil, nil))
+base.SetFilter(filterScope).SetLimit(100)
+
+// Each clone can have its own middleware stack
+go func() {
+    q := base.Clone()
+    q.Use(cacheMiddleware)  // this clone uses cache
+    list, _, _ := q.QueryList(ctx)
+}()
+
+go func() {
+    q := base.Clone()
+    q.Use(metricsMiddleware) // this clone collects metrics
+    list, _, _ := q.QueryList(ctx)
+}()
+```
+
+#### Rules & Anti-Patterns
+
+| Rule | Description |
+|------|-------------|
+| ✅ Configure first, then Clone | Build a "template" builder, then fork via Clone |
+| ✅ One Clone per goroutine | Each goroutine should own its Clone exclusively |
+| ✅ Clone is a read operation on base | Safe to call Clone multiple times on the same base (sequentially) |
+| ❌ Don't share a builder across goroutines | Never call Set methods on the same instance from multiple goroutines |
+| ❌ Don't Clone concurrently from a mutating base | Ensure the base is fully configured before any concurrent Clone calls |
 
 ### Cache Middleware
 
@@ -693,7 +793,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 |--------|-------------|
 | `Use(middleware)` | Add middleware to the query pipeline |
 | `SetStart(start)` | Set pagination offset |
-| `SetLimit(limit)` | Set page size |
+| `SetLimit(limit)` | Set page size (max: 5000) |
 | `SetNeedTotal(bool)` | Toggle total count query |
 | `SetNeedPagination(bool)` | Toggle pagination |
 | `SetFields(fields...)` | Set field selection |
@@ -710,6 +810,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 |--------|-------------|-------------|
 | `SetFilter(...)` | All builders | Set data source specific filter |
 | `SetSort(...)` | All builders | Set data source specific sort |
+| `Clone()` | All builders | Create an independent copy for concurrent forking |
 | `SetESIndex(index)` | `ElasticSearchBuilder` | Set/change ES index name |
 | `Explain(ctx)` | All builders | Preview generated query (Dry Run) |
 
