@@ -62,6 +62,14 @@ type cacheResult[R any] struct {
 	Total int64 `json:"total"`
 }
 
+
+// CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
+func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) Middleware[R] {
+	return CacheMiddleware[R](cache, ttl, func(ctx context.Context) string {
+		return keyBuilder.Build(ctx)
+	})
+}
+
 // CacheMiddleware 创建查询结果缓存中间件
 // 该中间件会在查询前检查缓存，命中则直接返回缓存结果，未命中则执行查询并写入缓存
 // 参数:
