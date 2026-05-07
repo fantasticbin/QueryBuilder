@@ -101,10 +101,13 @@ func normalizeValue(v any) any {
 			res[i] = normalizeValue(x[i])
 		}
 		return res
-	default:
-		if v == nil {
-			return nil
+	case []string:
+		res := make([]any, len(x))
+		for i := range x {
+			res[i] = x[i]
 		}
+		return res
+	default:
 		return v
 	}
 }
