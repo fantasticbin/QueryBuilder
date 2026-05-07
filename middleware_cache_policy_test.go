@@ -17,7 +17,7 @@ func (m *mockCache) Set(ctx context.Context, key string, value []byte, ttl time.
 func TestDefaultCacheKeyBuilderStability(t *testing.T) {
 	ctx := context.Background()
 	ctx = withQueryMeta(ctx, &QueryMeta{DataSource: MySQL, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}})
-	ctx = WithCacheKeyHints(ctx, CacheKeyHints{Tenant: "t1", Filter: map[string]any{"status": "active"}, Sort: map[string]any{"id": "desc"}})
+	ctx = WithCacheKeyHints(ctx, CacheKeyHints{Filter: map[string]any{"status": "active"}, Sort: map[string]any{"id": "desc"}, Extra: map[string]any{"tenant_id": "t1"}})
 
 	builder := DefaultCacheKeyBuilder{Prefix: "users"}
 	k1 := builder.Build(ctx)
@@ -31,7 +31,7 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	cache := newMockCache()
 	ctx := context.Background()
 	ctx = withQueryMeta(ctx, &QueryMeta{DataSource: MySQL, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}})
-	ctx = WithCacheKeyHints(ctx, CacheKeyHints{Tenant: "tenant-a"})
+	ctx = WithCacheKeyHints(ctx, CacheKeyHints{Extra: map[string]any{"tenant_id": "tenant-a"}})
 
 	calls := 0
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, DefaultCacheKeyBuilder{Prefix: "user-list"})
@@ -56,6 +56,10 @@ func TestCacheTTLTemplates(t *testing.T) {
 		t.Fatalf("short ttl template should be positive")
 	}
 	swr := CacheTTLSWR()
+	custom := CacheTTLShort(15*time.Minute, 45*time.Minute)
+	if custom.ListTTL != 15*time.Minute || custom.TotalTTL != 45*time.Minute {
+		t.Fatalf("expected custom short ttl override to take effect")
+	}
 	if swr.StaleTTL <= swr.ListTTL {
 		t.Fatalf("swr stale ttl should be greater than list ttl")
 	}
