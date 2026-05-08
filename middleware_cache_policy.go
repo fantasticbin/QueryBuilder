@@ -23,7 +23,6 @@ type cacheKeyHintsKey struct{}
 type CacheKeyHints struct {
 	Filter     any
 	Sort       any
-	Pagination map[string]any
 	Extra      map[string]any
 }
 
@@ -72,9 +71,6 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context) string {
 		}
 		if hints.Sort != nil {
 			payload["sort"] = hints.Sort
-		}
-		if len(hints.Pagination) > 0 {
-			payload["pagination_hint"] = hints.Pagination
 		}
 		if len(hints.Extra) > 0 {
 			payload["extra"] = hints.Extra
