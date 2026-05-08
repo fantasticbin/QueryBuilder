@@ -428,6 +428,113 @@ b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Conte
 users, total, err := b.QueryList(ctx)
 ```
 
+### 缓存键生成策略
+
+为解决缓存键设计不统一、命中率不稳定的问题，QueryBuilder 提供了 `CacheKeyBuilder` 接口及开箱即用的 `DefaultCacheKeyBuilder` 默认实现。
+
+#### CacheKeyBuilder 接口
+
+```go
+// CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。
+type CacheKeyBuilder interface {
+    Build(ctx context.Context) string
+}
+```
+
+#### DefaultCacheKeyBuilder（默认实现）
+
+默认实现自动从 `QueryMeta`（context 中注入的查询元信息）和 `CacheKeyHints`（业务方补充的维度）中提取以下维度构建缓存键：
+
+| 维度 | 来源 | 说明 |
+|------|------|------|
+| `prefix` | `DefaultCacheKeyBuilder.Prefix` | 业务资源名（如 "users"、"orders"），隔离不同查询场景 |
+| `datasource` | `QueryMeta.DataSource` | 数据源类型（MySQL/MongoDB/ElasticSearch） |
+| `fields` | `QueryMeta.Fields` | 查询字段投影 |
+| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、cursorFields |
+| `filter` | `CacheKeyHints.Filter` | 业务过滤条件（map/struct/切片/标量） |
+| `sort` | `CacheKeyHints.Sort` | 业务排序条件 |
+| `extra` | `CacheKeyHints.Extra` | 扩展维度（如 tenant_id 等多租户隔离字段） |
+
+最终将所有维度 JSON 序列化后取 SHA1 哈希，生成格式为 `qb:cache:<sha1hex>` 的固定长度缓存键。
+
+#### 使用 CacheMiddlewareWithKeyBuilder
+
+```go
+cache := NewGCacheProvider(1000)
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", "active")
+})
+
+// 使用默认缓存键构建器
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+    cache,
+    5*time.Minute,
+    builder.DefaultCacheKeyBuilder{Prefix: "users"},
+))
+
+users, total, err := b.QueryList(ctx)
+```
+
+#### 通过 CacheKeyHints 补充维度
+
+由于 filter/sort 等业务条件无法从 `QueryMeta` 中自动获取，需要通过 `WithCacheKeyHints` 将其注入 context：
+
+```go
+ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
+    Filter: map[string]any{"status": "active", "role": "admin"},
+    Sort:   map[string]any{"created_at": "desc"},
+    Extra:  map[string]any{"tenant_id": "tenant-123"},
+})
+
+users, total, err := b.QueryList(ctx)
+```
+
+#### OptionalHintsProvider（兜底 Hints 提供者）
+
+当调用方可能遗漏 `WithCacheKeyHints` 时，可通过 `OptionalHintsProvider` 自动补充默认维度：
+
+```go
+keyBuilder := builder.DefaultCacheKeyBuilder{
+    Prefix: "users",
+    OptionalHintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+        // 从 context 中提取租户信息作为兜底
+        tenantID := getTenantFromCtx(ctx)
+        return builder.CacheKeyHints{
+            Extra: map[string]any{"tenant_id": tenantID},
+        }
+    },
+}
+
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, keyBuilder))
+```
+
+> **优先级**：当 context 中已通过 `WithCacheKeyHints` 显式注入 hints 时，`OptionalHintsProvider` 不会被调用。
+
+#### 自定义 CacheKeyBuilder
+
+业务方可实现 `CacheKeyBuilder` 接口完全覆写默认的 key 生成逻辑：
+
+```go
+type MyCacheKeyBuilder struct{}
+
+func (b MyCacheKeyBuilder) Build(ctx context.Context) string {
+    meta := builder.QueryMetaFromContext(ctx)
+    // 自定义 key 生成逻辑
+    return fmt.Sprintf("my-app:users:%d:%d", meta.Start, meta.Limit)
+}
+
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
+```
+
+#### 设计说明
+
+- **稳定性**：相同查询条件始终生成相同的缓存键（`encoding/json` 对 map key 按字典序排序）。
+- **防御性**：对不可 JSON 序列化的值（如函数、channel）自动降级为字符串表示，避免 key 空串碰撞。
+- **兜底机制**：JSON 序列化失败时使用 `fmt.Sprintf` 格式化，确保 key 不为空。
+- **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
+
 ### 查询元信息上下文
 
 查询元信息会在执行前自动注入到 context 中。中间件可通过 `QueryMetaFromContext` 获取：

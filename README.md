@@ -1,4 +1,4 @@
-**English** | [中文](README_zh.md)
+**English** | [中文](docs/README_zh.md)
 
 ---
 
@@ -427,6 +427,121 @@ b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Conte
 
 users, total, err := b.QueryList(ctx)
 ```
+
+### Cache Key Strategy
+
+For production use, manually constructing cache keys (like `fmt.Sprintf("users:list:%d:%d", start, limit)`) is error-prone and hard to maintain. QueryBuilder provides a built-in **Cache Key Strategy** system with a `CacheKeyBuilder` interface and a ready-to-use default implementation.
+
+#### CacheKeyBuilder Interface
+
+```go
+// CacheKeyBuilder defines the cache key building interface.
+// Implement this to customize key generation logic.
+type CacheKeyBuilder interface {
+    Build(ctx context.Context) string
+}
+```
+
+#### DefaultCacheKeyBuilder
+
+The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache keys by hashing a canonical JSON payload that includes:
+
+| Dimension | Source | Description |
+|-----------|--------|-------------|
+| `prefix` | `DefaultCacheKeyBuilder.Prefix` | Business resource name (e.g. `"users"`, `"orders"`) |
+| `datasource` | `QueryMeta` | Data source type (MySQL/MongoDB/ES) |
+| `fields` | `QueryMeta` | Field projection list |
+| `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, cursorFields |
+| `filter` | `CacheKeyHints` | Query filter conditions |
+| `sort` | `CacheKeyHints` | Sort conditions |
+| `extra` | `CacheKeyHints` | Additional dimensions (e.g. tenant_id) |
+
+The final key format is `qb:cache:<sha1hex>` — fixed length, safe for Redis and other backends.
+
+#### Using CacheKeyHints
+
+Since filter/sort are data-source-specific types (GORM scope, bson.D, elastic.Query), they cannot be automatically extracted from the builder. Use `WithCacheKeyHints` to inject these dimensions into the context:
+
+```go
+// Inject cache key hints into context
+ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
+    Filter: map[string]any{"status": "active", "role": "admin"},
+    Sort:   map[string]any{"created_at": "desc"},
+    Extra:  map[string]any{"tenant_id": "tenant-123"},
+})
+```
+
+#### Using CacheMiddlewareWithKeyBuilder
+
+```go
+cache := NewGCacheProvider(1000)
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ? AND role = ?", "active", "admin")
+})
+
+// Use DefaultCacheKeyBuilder — keys are automatically derived from QueryMeta + Hints
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+    cache,
+    5*time.Minute,
+    builder.DefaultCacheKeyBuilder{Prefix: "users"},
+))
+
+// Inject hints before query (typically in a BeforeQueryHook or middleware)
+ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
+    Filter: map[string]any{"status": "active", "role": "admin"},
+    Sort:   map[string]any{"created_at": "desc"},
+})
+
+users, total, err := b.QueryList(ctx)
+```
+
+#### OptionalHintsProvider (Fallback)
+
+To avoid forgetting `WithCacheKeyHints`, you can set an `OptionalHintsProvider` that automatically supplies hints when the context doesn't contain them:
+
+```go
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+    cache,
+    5*time.Minute,
+    builder.DefaultCacheKeyBuilder{
+        Prefix: "users",
+        OptionalHintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+            // Auto-extract tenant from context
+            return builder.CacheKeyHints{
+                Extra: map[string]any{"tenant_id": extractTenantID(ctx)},
+            }
+        },
+    },
+))
+```
+
+> **Note:** If `WithCacheKeyHints` is explicitly called, the context hints take priority over `OptionalHintsProvider`.
+
+#### Custom CacheKeyBuilder
+
+Implement the `CacheKeyBuilder` interface for full control over key generation:
+
+```go
+type MyCacheKeyBuilder struct{}
+
+func (b MyCacheKeyBuilder) Build(ctx context.Context) string {
+    meta := builder.QueryMetaFromContext(ctx)
+    tenantID := extractTenantID(ctx)
+    return fmt.Sprintf("myapp:%s:%s:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
+}
+
+// Use with CacheMiddlewareWithKeyBuilder
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
+```
+
+#### Key Stability & Isolation Guarantees
+
+- **Stable**: Same inputs always produce the same key (deterministic JSON serialization + SHA1).
+- **Isolated**: Different prefix / filter / sort / pagination / extra values produce different keys.
+- **Safe**: Non-serializable values (functions, channels) are gracefully degraded to string representations to avoid empty-key collisions.
+- **Nil-safe**: Passing `nil` as `keyBuilder` to `CacheMiddlewareWithKeyBuilder` falls back to `DefaultCacheKeyBuilder{Prefix: "default"}`.
 
 ### Query Meta Context
 
