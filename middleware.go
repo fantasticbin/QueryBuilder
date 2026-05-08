@@ -62,9 +62,11 @@ type cacheResult[R any] struct {
 	Total int64 `json:"total"`
 }
 
-
 // CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
 func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) Middleware[R] {
+	if keyBuilder == nil {
+		keyBuilder = DefaultCacheKeyBuilder{Prefix: "default"}
+	}
 	return CacheMiddleware[R](cache, ttl, func(ctx context.Context) string {
 		return keyBuilder.Build(ctx)
 	})

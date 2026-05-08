@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 )
 
 // CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。
@@ -19,6 +18,8 @@ type cacheKeyHintsKey struct{}
 
 // CacheKeyHints 用于补充默认缓存键维度（如 filter/sort）。
 // 如需多租户隔离，建议通过 Extra 传入 tenant_id 等稳定字段。
+// 注意：Filter/Sort 建议传入可稳定序列化的值（map/struct/切片/标量）；
+// 若传入函数、channel 等不可 JSON 序列化值，会自动降级为字符串表示，避免 key 空串碰撞。
 type CacheKeyHints struct {
 	Filter     any
 	Sort       any
@@ -37,8 +38,11 @@ func cacheKeyHintsFromContext(ctx context.Context) (CacheKeyHints, bool) {
 }
 
 // DefaultCacheKeyBuilder 为缓存中间件提供开箱即用的默认 key 方案。
+// Prefix 建议设置为业务资源名（如 "users"、"orders"），避免不同查询场景共享 key 空间。
 type DefaultCacheKeyBuilder struct {
 	Prefix string
+	// OptionalHintsProvider 在 context 未显式注入 hints 时调用，用于减少调用方遗漏。
+	OptionalHintsProvider func(context.Context) CacheKeyHints
 }
 
 func (b DefaultCacheKeyBuilder) Build(ctx context.Context) string {
@@ -48,15 +52,21 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context) string {
 		payload["datasource"] = meta.DataSource
 		payload["fields"] = append([]string(nil), meta.Fields...)
 		payload["pagination"] = map[string]any{
-			"start":           meta.Start,
-			"limit":           meta.Limit,
-			"needTotal":       meta.NeedTotal,
-			"needPagination":  meta.NeedPagination,
-			"isCursorQuery":   meta.IsCursorQuery,
-			"cursorFields":    append([]string(nil), meta.CursorFields...),
+			"start":          meta.Start,
+			"limit":          meta.Limit,
+			"needTotal":      meta.NeedTotal,
+			"needPagination": meta.NeedPagination,
+			"isCursorQuery":  meta.IsCursorQuery,
+			"cursorFields":   append([]string(nil), meta.CursorFields...),
 		}
 	}
-	if hints, ok := cacheKeyHintsFromContext(ctx); ok {
+
+	hints, ok := cacheKeyHintsFromContext(ctx)
+	if !ok && b.OptionalHintsProvider != nil {
+		hints = b.OptionalHintsProvider(ctx)
+		ok = true
+	}
+	if ok {
 		if hints.Filter != nil {
 			payload["filter"] = hints.Filter
 		}
@@ -71,30 +81,33 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context) string {
 		}
 	}
 
-	canonical := canonicalJSON(payload)
+	canonical, err := canonicalJSON(payload)
+	if err != nil {
+		// 兜底使用 fmt 格式，确保 key 不为空且低碰撞风险。
+		canonical = fmt.Sprintf("fallback:%#v", normalizeValue(payload))
+	}
 	h := sha1.Sum([]byte(canonical))
 	return fmt.Sprintf("qb:cache:%s", hex.EncodeToString(h[:]))
 }
 
-func canonicalJSON(v any) string {
+func canonicalJSON(v any) (string, error) {
 	n := normalizeValue(v)
-	buf, _ := json.Marshal(n)
-	return string(buf)
+	buf, err := json.Marshal(n)
+	if err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
+// normalizeValue 仅做可序列化防御，不再手工排序 map key（encoding/json 已稳定排序）。
 func normalizeValue(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
+		n := make(map[string]any, len(x))
+		for k, val := range x {
+			n[k] = normalizeValue(val)
 		}
-		sort.Strings(keys)
-		ordered := make(map[string]any, len(x))
-		for _, k := range keys {
-			ordered[k] = normalizeValue(x[k])
-		}
-		return ordered
+		return n
 	case []any:
 		res := make([]any, len(x))
 		for i := range x {
@@ -108,6 +121,9 @@ func normalizeValue(v any) any {
 		}
 		return res
 	default:
-		return v
+		if _, err := json.Marshal(x); err != nil {
+			return fmt.Sprintf("%T:%v", x, x)
+		}
+		return x
 	}
 }
