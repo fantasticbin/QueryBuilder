@@ -205,3 +205,17 @@ func (mr *MockQuerierMockRecorder[R]) QueryCursor(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryCursor", reflect.TypeOf((*MockQuerier[R])(nil).QueryCursor), ctx)
 }
+
+// GetQueryMeta Mock 实现
+func (m *MockQuerier[R]) GetQueryMeta() QueryMeta {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetQueryMeta")
+	ret0, _ := ret[0].(QueryMeta)
+	return ret0
+}
+
+// GetQueryMeta 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) GetQueryMeta() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetQueryMeta", reflect.TypeOf((*MockQuerier[R])(nil).GetQueryMeta))
+}

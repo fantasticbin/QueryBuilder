@@ -135,6 +135,11 @@ func (m *MongoBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 	return m
 }
 
+// GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
+func (m *MongoBuilder[R]) GetQueryMeta() QueryMeta {
+	return m.builder.GetQueryMeta()
+}
+
 // QueryList 执行 MongoDB 查询列表操作
 func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	if err := m.builder.prepareAndValidate(); err != nil {

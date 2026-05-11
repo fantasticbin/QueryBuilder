@@ -136,6 +136,11 @@ func (e *ElasticSearchBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 	return e
 }
 
+// GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
+func (e *ElasticSearchBuilder[R]) GetQueryMeta() QueryMeta {
+	return e.builder.GetQueryMeta()
+}
+
 // QueryList 执行 ElasticSearch 查询列表操作
 func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	if err := e.builder.prepareAndValidate(); err != nil {

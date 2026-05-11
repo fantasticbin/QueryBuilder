@@ -19,7 +19,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Built-in Cache Middleware**: Out-of-the-box `CacheMiddleware` with a pluggable `CacheProvider` interface — bring your own cache backend (Redis, in-memory, etc.).
 - **Field Selection**: Use `SetFields` to select only specific fields, reducing bandwidth and memory usage across all data sources.
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
-- **Query Meta Context**: Automatically injects `QueryMeta` into context before query execution — middleware can access data source type, pagination info, and query start time.
+- **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination info, and query start time are available without context injection.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
 - **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports MySQL (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API).
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
@@ -438,7 +438,7 @@ For production use, manually constructing cache keys (like `fmt.Sprintf("users:l
 // CacheKeyBuilder defines the cache key building interface.
 // Implement this to customize key generation logic.
 type CacheKeyBuilder interface {
-    Build(ctx context.Context) string
+    Build(ctx context.Context, meta QueryMeta) string
 }
 ```
 
@@ -452,23 +452,30 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | `datasource` | `QueryMeta` | Data source type (MySQL/MongoDB/ES) |
 | `fields` | `QueryMeta` | Field projection list |
 | `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, cursorFields |
-| `filter` | `CacheKeyHints` | Query filter conditions |
-| `sort` | `CacheKeyHints` | Sort conditions |
-| `extra` | `CacheKeyHints` | Additional dimensions (e.g. tenant_id) |
+| `filter` | `DefaultCacheKeyBuilder.Hints` | Query filter conditions |
+| `sort` | `DefaultCacheKeyBuilder.Hints` | Sort conditions |
+| `extra` | `DefaultCacheKeyBuilder.Hints` | Additional dimensions (e.g. tenant_id) |
 
 The final key format is `qb:cache:<sha1hex>` — fixed length, safe for Redis and other backends.
 
+`CacheKeyHints` is managed entirely by `DefaultCacheKeyBuilder` — it is **not** stored in the builder base class or injected into context. This design keeps the query builder's responsibilities clean and avoids data corruption in concurrent `Clone` scenarios.
+
+> ⚠️ **Important:** When using `DefaultCacheKeyBuilder`, you **must** provide either `Hints` or `HintsProvider`. If both are nil/empty, the generated cache key will not include filter/sort/extra dimensions, meaning **different query conditions will share the same cache key**, leading to incorrect cache hits.
+
 #### Using CacheKeyHints
 
-Since filter/sort are data-source-specific types (GORM scope, bson.D, elastic.Query), they cannot be automatically extracted from the builder. Use `WithCacheKeyHints` to inject these dimensions into the context:
+Since filter/sort are data-source-specific types (GORM scope, bson.D, elastic.Query), they cannot be automatically extracted from the builder. Provide `CacheKeyHints` directly in the `DefaultCacheKeyBuilder` when creating the cache middleware:
 
 ```go
-// Inject cache key hints into context
-ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
-    Filter: map[string]any{"status": "active", "role": "admin"},
-    Sort:   map[string]any{"created_at": "desc"},
-    Extra:  map[string]any{"tenant_id": "tenant-123"},
-})
+// Hints are provided directly in DefaultCacheKeyBuilder
+keyBuilder := builder.DefaultCacheKeyBuilder{
+    Prefix: "users",
+    Hints: builder.CacheKeyHints{
+        Filter: map[string]any{"status": "active", "role": "admin"},
+        Sort:   map[string]any{"created_at": "desc"},
+        Extra:  map[string]any{"tenant_id": "tenant-123"},
+    },
+}
 ```
 
 #### Using CacheMiddlewareWithKeyBuilder
@@ -481,25 +488,25 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ? AND role = ?", "active", "admin")
 })
 
-// Use DefaultCacheKeyBuilder — keys are automatically derived from QueryMeta + Hints
+// Use DefaultCacheKeyBuilder with Hints — keys are derived from QueryMeta + Hints
 b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{Prefix: "users"},
+    builder.DefaultCacheKeyBuilder{
+        Prefix: "users",
+        Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "active", "role": "admin"},
+            Sort:   map[string]any{"created_at": "desc"},
+        },
+    },
 ))
-
-// Inject hints before query (typically in a BeforeQueryHook or middleware)
-ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
-    Filter: map[string]any{"status": "active", "role": "admin"},
-    Sort:   map[string]any{"created_at": "desc"},
-})
 
 users, total, err := b.QueryList(ctx)
 ```
 
-#### OptionalHintsProvider (Fallback)
+#### HintsProvider (Dynamic Hints)
 
-To avoid forgetting `WithCacheKeyHints`, you can set an `OptionalHintsProvider` that automatically supplies hints when the context doesn't contain them:
+For scenarios where hints need to be dynamically resolved (e.g., multi-tenant isolation from context), use `HintsProvider`:
 
 ```go
 b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
@@ -507,17 +514,50 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
     5*time.Minute,
     builder.DefaultCacheKeyBuilder{
         Prefix: "users",
-        OptionalHintsProvider: func(ctx context.Context) builder.CacheKeyHints {
-            // Auto-extract tenant from context
+        HintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+            // Dynamically extract tenant from context
             return builder.CacheKeyHints{
-                Extra: map[string]any{"tenant_id": extractTenantID(ctx)},
+                Filter: map[string]any{"status": "active"},
+                Extra:  map[string]any{"tenant_id": extractTenantID(ctx)},
             }
         },
     },
 ))
 ```
 
-> **Note:** If `WithCacheKeyHints` is explicitly called, the context hints take priority over `OptionalHintsProvider`.
+> **Priority:** When `Hints` is non-empty, `HintsProvider` will not be called. `HintsProvider` only serves as a fallback when `Hints` is empty.
+
+#### Clone with Different Cache Keys
+
+Since `CacheKeyHints` is managed by `DefaultCacheKeyBuilder` (not by the builder base class), each `Clone` instance can safely use its own cache middleware with different hints — no shared state, no data corruption:
+
+```go
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFields("id", "name", "email").SetNeedTotal(true)
+
+// Each clone uses its own cache middleware with different hints
+go func() {
+    q := base.Clone()
+    q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "active") })
+    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "active"},
+        }},
+    ))
+    list, _, _ := q.QueryList(ctx)
+}()
+
+go func() {
+    q := base.Clone()
+    q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "inactive") })
+    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "inactive"},
+        }},
+    ))
+    list, _, _ := q.QueryList(ctx)
+}()
+```
 
 #### Custom CacheKeyBuilder
 
@@ -526,10 +566,9 @@ Implement the `CacheKeyBuilder` interface for full control over key generation:
 ```go
 type MyCacheKeyBuilder struct{}
 
-func (b MyCacheKeyBuilder) Build(ctx context.Context) string {
-    meta := builder.QueryMetaFromContext(ctx)
+func (b MyCacheKeyBuilder) Build(ctx context.Context, meta builder.QueryMeta) string {
     tenantID := extractTenantID(ctx)
-    return fmt.Sprintf("myapp:%s:%s:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
+    return fmt.Sprintf("myapp:%s:%v:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
 }
 
 // Use with CacheMiddlewareWithKeyBuilder
@@ -542,24 +581,59 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 - **Isolated**: Different prefix / filter / sort / pagination / extra values produce different keys.
 - **Safe**: Non-serializable values (functions, channels) are gracefully degraded to string representations to avoid empty-key collisions.
 - **Nil-safe**: Passing `nil` as `keyBuilder` to `CacheMiddlewareWithKeyBuilder` falls back to `DefaultCacheKeyBuilder{Prefix: "default"}`.
+- **Clone-safe**: Each Clone instance uses its own `DefaultCacheKeyBuilder` with independent `Hints`, ensuring no shared mutable state.
 
-### Query Meta Context
+### Query Meta
 
-Query metadata is automatically injected into the context before execution. Middleware can access it via `QueryMetaFromContext`:
+Middleware can access query metadata directly via the `builder` parameter's `GetQueryMeta()` method — no context injection needed:
 
 ```go
-// Inside a middleware
+// Inside a middleware — access meta directly from builder
 func MyMiddleware[R any]() builder.Middleware[R] {
     return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
-        meta := builder.QueryMetaFromContext(ctx)
-        if meta != nil {
-            log.Printf("DataSource: %v, Start: %d, Limit: %d, Fields: %v",
-                meta.DataSource, meta.Start, meta.Limit, meta.Fields)
-        }
+        meta := q.GetQueryMeta()
+        log.Printf("DataSource: %v, Start: %d, Limit: %d, Fields: %v",
+            meta.DataSource, meta.Start, meta.Limit, meta.Fields)
         return next(ctx)
     }
 }
 ```
+
+#### Why Not Inject QueryMeta into Context?
+
+In earlier versions, `QueryMeta` was automatically injected into the context before execution, and middleware accessed it via `QueryMetaFromContext(ctx)`. This approach has a critical limitation with the `Clone` feature:
+
+- When using `Clone` for concurrent forked queries, multiple builder instances may share the same parent context. If `QueryMeta` is stored in context, concurrent writes from different clones would corrupt the shared context data.
+- The new approach (`builder.GetQueryMeta()`) ensures each builder instance returns its own independent metadata snapshot — no shared state, no data races.
+
+#### Storing Meta in Context (If Needed)
+
+If you need `QueryMeta` available in context for downstream layers (e.g., passing to repository functions that don't have access to the builder), you can achieve this with a simple middleware:
+
+```go
+// Define a context key
+type queryMetaKeyType struct{}
+var queryMetaKey = queryMetaKeyType{}
+
+// Middleware that injects QueryMeta into context
+func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+        ctx = context.WithValue(ctx, queryMetaKey, q.GetQueryMeta())
+        return next(ctx)
+    }
+}
+
+// Usage
+b.Use(MetaToCtxMiddleware[User]())
+
+// Retrieve in downstream code
+func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
+    meta, ok := ctx.Value(queryMetaKey).(builder.QueryMeta)
+    return meta, ok
+}
+```
+
+This approach is safe for `Clone` scenarios because each clone's middleware pipeline runs independently with its own context.
 
 `QueryMeta` contains:
 

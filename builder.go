@@ -24,17 +24,18 @@ const (
 	ElasticSearch
 )
 
-// ErrDataNotConfigured 数据源未正确配置的统一错误
-var ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
-
-// ErrLimitZero limit 不能为 0
-var ErrLimitZero = errors.New("limit must be greater than 0")
-
-// ErrLimitExceeded limit 超出允许的最大值
-var ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
-
-// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
-var ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
+var (
+	// ErrDataNotConfigured 数据源未正确配置的统一错误
+	ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
+	// ErrDataSourceInvalid 数据源无效
+	ErrDataSourceInvalid = errors.New("data source invalid")
+	// ErrLimitZero limit 不能为 0
+	ErrLimitZero = errors.New("limit must be greater than 0")
+	// ErrLimitExceeded limit 超出允许的最大值
+	ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
+	// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
+	ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
+)
 
 // DBProxy 数据实例结构
 type DBProxy struct {
@@ -51,6 +52,20 @@ func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.C
 		Mongodb:       mongodb,
 		ElasticSearch: elasticsearch,
 	}
+}
+
+// QueryMeta 查询元信息结构体
+// 中间件可通过 builder.GetQueryMeta() 获取当前查询的元数据快照
+type QueryMeta struct {
+	DataSource     DataSource // 数据源类型
+	Start          uint32     // 分页起始位置
+	Limit          uint32     // 每页数据条数
+	NeedTotal      bool       // 是否需要查询总数
+	NeedPagination bool       // 是否需要分页
+	Fields         []string   // 查询字段投影
+	IsCursorQuery  bool       // 是否为游标查询模式
+	CursorFields   []string   // 游标分页排序字段列表
+	StartTime      time.Time  // 查询开始时间
 }
 
 // queryBuilder 构建器接口约束，利用 Go 1.26 自引用泛型约束特性
@@ -120,6 +135,16 @@ type QuerierCursor[R any] interface {
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
 }
 
+// QuerierMeta 查询元信息能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type QuerierMeta[R any] interface {
+	// GetQueryMeta 返回当前查询元信息的只读快照
+	// 中间件可通过 builder 参数直接调用此方法获取元数据，无需通过 ctx 传递
+	GetQueryMeta() QueryMeta
+}
+
 // Querier 通用查询接口，作为工厂函数的返回类型
 // 通过嵌入多个小接口组合完整能力
 // 泛型参数:
@@ -130,6 +155,7 @@ type Querier[R any] interface {
 	QuerierList[R]
 	QuerierHook[R]
 	QuerierCursor[R]
+	QuerierMeta[R]
 }
 
 // builder 查询构建器公共模板基类，使用自引用泛型约束
@@ -144,12 +170,15 @@ type builder[B queryBuilder[B, R], R any] struct {
 	limit          uint32
 	needTotal      bool
 	needPagination bool
-	fields         []string          // 查询字段投影
-	cursorFields   []string          // 游标分页排序字段列表
-	cursorValues   []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
-	beforeHook     BeforeQueryHook   // 查询前置钩子
-	afterHook      AfterQueryHook[R] // 查询后置钩子
-	middlewares    []Middleware[R]   // 中间件链
+	fields         []string  // 查询字段投影
+	cursorFields   []string  // 游标分页排序字段列表
+	cursorValues   []any     // 游标初始值（外部传入，用于断点续查/App分页场景）
+	isCursorQuery  bool      // 是否为游标查询模式
+	startTime      time.Time // 查询开始时间
+
+	beforeHook  BeforeQueryHook   // 查询前置钩子
+	afterHook   AfterQueryHook[R] // 查询后置钩子
+	middlewares []Middleware[R]   // 中间件链
 
 	selfRef    B          // 存储具体子类型引用，用于链式调用返回具体子类型
 	querierRef Querier[R] // 存储 Querier 接口引用，避免中间件执行时的类型断言
@@ -160,6 +189,22 @@ type builder[B queryBuilder[B, R], R any] struct {
 func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 	b.selfRef = self
 	b.querierRef = querier
+}
+
+// GetQueryMeta 返回当前查询元信息的只读快照
+// 中间件可通过 builder 参数直接调用此方法获取元数据
+func (b *builder[B, R]) GetQueryMeta() QueryMeta {
+	return QueryMeta{
+		DataSource:     b.dataSource,
+		Start:          b.start,
+		Limit:          b.limit,
+		NeedTotal:      b.needTotal,
+		NeedPagination: b.needPagination,
+		Fields:         b.fields,
+		IsCursorQuery:  b.isCursorQuery,
+		CursorFields:   b.cursorFields,
+		StartTime:      b.startTime,
+	}
 }
 
 // prepareAndValidate 执行查询前的参数校验与数据准备
@@ -182,6 +227,8 @@ func (b *builder[B, R]) prepareAndValidate() error {
 		if b.data.ElasticSearch == nil {
 			return ErrDataNotConfigured
 		}
+	default:
+		return ErrDataSourceInvalid
 	}
 
 	// limit 校验
@@ -246,6 +293,7 @@ func (b *builder[B, R]) cloneBase(dst *builder[B, R]) {
 	dst.needPagination = b.needPagination
 	dst.beforeHook = b.beforeHook
 	dst.afterHook = b.afterHook
+	dst.isCursorQuery = b.isCursorQuery
 
 	// 切片类型深拷贝，确保修改互不影响
 	if b.fields != nil {
@@ -318,6 +366,7 @@ func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
 // SetCursorField 设置游标分页排序字段（支持多字段）
 func (b *builder[B, R]) SetCursorField(fields ...string) B {
 	b.cursorFields = fields
+	b.isCursorQuery = true
 	return b.selfRef
 }
 
@@ -326,6 +375,7 @@ func (b *builder[B, R]) SetCursorField(fields ...string) B {
 // 如果同时设置了 start > 0 且未设置 cursorValues，start 将作为单字段数值游标的初始值
 func (b *builder[B, R]) SetCursorValue(values ...any) B {
 	b.cursorValues = values
+	b.isCursorQuery = true
 	return b.selfRef
 }
 
@@ -353,16 +403,8 @@ func (b *builder[B, R]) executeWithMiddlewares(
 	ctx context.Context,
 	queryFn func(context.Context) ([]*R, int64, error),
 ) ([]*R, int64, error) {
-	// 注入查询元信息到 context
-	ctx = withQueryMeta(ctx, &QueryMeta{
-		DataSource:     b.dataSource,
-		Start:          b.start,
-		Limit:          b.limit,
-		NeedTotal:      b.needTotal,
-		NeedPagination: b.needPagination,
-		Fields:         b.fields,
-		StartTime:      time.Now(),
-	})
+	// 设置查询开始时间
+	b.startTime = time.Now()
 
 	// 执行前置钩子
 	if b.beforeHook != nil {
@@ -412,18 +454,8 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 	// 解析初始游标值：优先使用 cursorValues（方案B），其次使用 start（方案A）
 	initialCursorValues := b.resolveInitialCursorValues()
 
-	// 注入查询元信息到 context（标识为游标查询模式）
-	ctx = withQueryMeta(ctx, &QueryMeta{
-		DataSource:     b.dataSource,
-		Start:          b.start,
-		Limit:          uint32(batchSize),
-		NeedTotal:      false,
-		NeedPagination: true,
-		Fields:         b.fields,
-		IsCursorQuery:  true,
-		CursorFields:   b.cursorFields,
-		StartTime:      time.Now(),
-	})
+	// 设置查询开始时间
+	b.startTime = time.Now()
 
 	// 执行前置钩子
 	if b.beforeHook != nil {

@@ -19,7 +19,7 @@
 - **内置缓存中间件**：开箱即用的 `CacheMiddleware`，提供可插拔的 `CacheProvider` 接口——自由对接任意缓存后端（Redis、内存缓存等）。
 - **指定字段**：通过 `SetFields` 指定只返回部分字段，减少所有数据源的带宽和内存消耗。
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
-- **查询元信息上下文**：查询执行前自动将 `QueryMeta` 注入到 context 中——中间件可获取数据源类型、分页信息和查询开始时间。
+- **查询元信息**：中间件可通过 `builder.GetQueryMeta()` 直接获取查询元数据——数据源类型、分页信息和查询开始时间无需通过 context 注入即可获取。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
 - **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 MySQL（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
@@ -437,13 +437,13 @@ users, total, err := b.QueryList(ctx)
 ```go
 // CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。
 type CacheKeyBuilder interface {
-    Build(ctx context.Context) string
+    Build(ctx context.Context, meta QueryMeta) string
 }
 ```
 
 #### DefaultCacheKeyBuilder（默认实现）
 
-默认实现自动从 `QueryMeta`（context 中注入的查询元信息）和 `CacheKeyHints`（业务方补充的维度）中提取以下维度构建缓存键：
+默认实现从 `QueryMeta`（通过 `builder.GetQueryMeta()` 获取）和 `CacheKeyHints`（由 `DefaultCacheKeyBuilder` 自身持有）中提取以下维度构建缓存键：
 
 | 维度 | 来源 | 说明 |
 |------|------|------|
@@ -451,11 +451,31 @@ type CacheKeyBuilder interface {
 | `datasource` | `QueryMeta.DataSource` | 数据源类型（MySQL/MongoDB/ElasticSearch） |
 | `fields` | `QueryMeta.Fields` | 查询字段投影 |
 | `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、cursorFields |
-| `filter` | `CacheKeyHints.Filter` | 业务过滤条件（map/struct/切片/标量） |
-| `sort` | `CacheKeyHints.Sort` | 业务排序条件 |
-| `extra` | `CacheKeyHints.Extra` | 扩展维度（如 tenant_id 等多租户隔离字段） |
+| `filter` | `DefaultCacheKeyBuilder.Hints` | 业务过滤条件（map/struct/切片/标量） |
+| `sort` | `DefaultCacheKeyBuilder.Hints` | 业务排序条件 |
+| `extra` | `DefaultCacheKeyBuilder.Hints` | 扩展维度（如 tenant_id 等多租户隔离字段） |
 
 最终将所有维度 JSON 序列化后取 SHA1 哈希，生成格式为 `qb:cache:<sha1hex>` 的固定长度缓存键。
+
+`CacheKeyHints` 完全由 `DefaultCacheKeyBuilder` 自身管理——**不存储在构建器基类中，也不注入到 context 中**。这种设计保持了查询构建器的职责纯净，并避免了 `Clone` 并发场景下的数据混乱。
+
+> ⚠️ **重要提示：** 使用 `DefaultCacheKeyBuilder` 时，**必须**提供 `Hints` 或 `HintsProvider`。如果两者都为 nil/空，生成的缓存键将不包含 filter/sort/extra 维度，这意味着**不同查询条件会共享相同的缓存键**，导致缓存串读。
+
+#### 使用 CacheKeyHints
+
+由于 filter/sort 等业务条件是数据源专属类型（GORM scope、bson.D、elastic.Query），无法从构建器中自动提取。在创建缓存中间件时，直接在 `DefaultCacheKeyBuilder` 中提供 `CacheKeyHints`：
+
+```go
+// Hints 直接在 DefaultCacheKeyBuilder 中提供
+keyBuilder := builder.DefaultCacheKeyBuilder{
+    Prefix: "users",
+    Hints: builder.CacheKeyHints{
+        Filter: map[string]any{"status": "active", "role": "admin"},
+        Sort:   map[string]any{"created_at": "desc"},
+        Extra:  map[string]any{"tenant_id": "tenant-123"},
+    },
+}
+```
 
 #### 使用 CacheMiddlewareWithKeyBuilder
 
@@ -467,50 +487,76 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 })
 
-// 使用默认缓存键构建器
+// 使用 DefaultCacheKeyBuilder 并提供 Hints——缓存键由 QueryMeta + Hints 共同决定
 b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{Prefix: "users"},
+    builder.DefaultCacheKeyBuilder{
+        Prefix: "users",
+        Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "active"},
+            Sort:   map[string]any{"created_at": "desc"},
+        },
+    },
 ))
 
 users, total, err := b.QueryList(ctx)
 ```
 
-#### 通过 CacheKeyHints 补充维度
+#### HintsProvider（动态 Hints 提供者）
 
-由于 filter/sort 等业务条件无法从 `QueryMeta` 中自动获取，需要通过 `WithCacheKeyHints` 将其注入 context：
-
-```go
-ctx = builder.WithCacheKeyHints(ctx, builder.CacheKeyHints{
-    Filter: map[string]any{"status": "active", "role": "admin"},
-    Sort:   map[string]any{"created_at": "desc"},
-    Extra:  map[string]any{"tenant_id": "tenant-123"},
-})
-
-users, total, err := b.QueryList(ctx)
-```
-
-#### OptionalHintsProvider（兜底 Hints 提供者）
-
-当调用方可能遗漏 `WithCacheKeyHints` 时，可通过 `OptionalHintsProvider` 自动补充默认维度：
+当 hints 需要从 ctx 中动态获取时（如多租户隔离），使用 `HintsProvider`：
 
 ```go
-keyBuilder := builder.DefaultCacheKeyBuilder{
-    Prefix: "users",
-    OptionalHintsProvider: func(ctx context.Context) builder.CacheKeyHints {
-        // 从 context 中提取租户信息作为兜底
-        tenantID := getTenantFromCtx(ctx)
-        return builder.CacheKeyHints{
-            Extra: map[string]any{"tenant_id": tenantID},
-        }
+b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+    cache,
+    5*time.Minute,
+    builder.DefaultCacheKeyBuilder{
+        Prefix: "users",
+        HintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+            // 从 context 中动态提取租户信息
+            return builder.CacheKeyHints{
+                Filter: map[string]any{"status": "active"},
+                Extra:  map[string]any{"tenant_id": extractTenantID(ctx)},
+            }
+        },
     },
-}
-
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, keyBuilder))
+))
 ```
 
-> **优先级**：当 context 中已通过 `WithCacheKeyHints` 显式注入 hints 时，`OptionalHintsProvider` 不会被调用。
+> **优先级**：当 `Hints` 非空时，`HintsProvider` 不会被调用。`HintsProvider` 仅在 `Hints` 为空时作为兜底。
+
+#### Clone 并发场景下的缓存隔离
+
+由于 `CacheKeyHints` 由 `DefaultCacheKeyBuilder` 自身管理（而非构建器基类），每个 `Clone` 实例可以安全地使用各自的缓存中间件携带不同的 hints——无共享状态，无数据混乱：
+
+```go
+base := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+base.SetFields("id", "name", "email").SetNeedTotal(true)
+
+// 每个 Clone 使用各自的缓存中间件，携带不同的 hints
+go func() {
+    q := base.Clone()
+    q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "active") })
+    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "active"},
+        }},
+    ))
+    list, _, _ := q.QueryList(ctx)
+}()
+
+go func() {
+    q := base.Clone()
+    q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "inactive") })
+    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+            Filter: map[string]any{"status": "inactive"},
+        }},
+    ))
+    list, _, _ := q.QueryList(ctx)
+}()
+```
 
 #### 自定义 CacheKeyBuilder
 
@@ -519,10 +565,9 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, keyBuild
 ```go
 type MyCacheKeyBuilder struct{}
 
-func (b MyCacheKeyBuilder) Build(ctx context.Context) string {
-    meta := builder.QueryMetaFromContext(ctx)
-    // 自定义 key 生成逻辑
-    return fmt.Sprintf("my-app:users:%d:%d", meta.Start, meta.Limit)
+func (b MyCacheKeyBuilder) Build(ctx context.Context, meta builder.QueryMeta) string {
+    tenantID := extractTenantID(ctx)
+    return fmt.Sprintf("my-app:%s:%v:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
 }
 
 b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
@@ -534,24 +579,59 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 - **防御性**：对不可 JSON 序列化的值（如函数、channel）自动降级为字符串表示，避免 key 空串碰撞。
 - **兜底机制**：JSON 序列化失败时使用 `fmt.Sprintf` 格式化，确保 key 不为空。
 - **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
+- **Clone 安全**：每个 Clone 实例使用各自的 `DefaultCacheKeyBuilder`（携带独立的 `Hints`），确保无共享可变状态。
 
-### 查询元信息上下文
+### 查询元信息
 
-查询元信息会在执行前自动注入到 context 中。中间件可通过 `QueryMetaFromContext` 获取：
+中间件可通过 `builder` 参数的 `GetQueryMeta()` 方法直接获取查询元数据——无需通过 context 传递：
 
 ```go
-// 在中间件中使用
+// 在中间件中——直接从 builder 获取 meta
 func MyMiddleware[R any]() builder.Middleware[R] {
     return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
-        meta := builder.QueryMetaFromContext(ctx)
-        if meta != nil {
-            log.Printf("数据源: %v, 起始: %d, 每页: %d, 字段: %v",
-                meta.DataSource, meta.Start, meta.Limit, meta.Fields)
-        }
+        meta := q.GetQueryMeta()
+        log.Printf("数据源: %v, 起始: %d, 每页: %d, 字段: %v",
+            meta.DataSource, meta.Start, meta.Limit, meta.Fields)
         return next(ctx)
     }
 }
 ```
+
+#### 为什么不再将 QueryMeta 注入到 Context 中？
+
+在早期版本中，`QueryMeta` 会在执行前自动注入到 context 中，中间件通过 `QueryMetaFromContext(ctx)` 获取。这种方式在 `Clone` 功能完善后存在关键局限性：
+
+- 当使用 `Clone` 进行并发分叉查询时，多个构建器实例可能共享同一个父 context。如果 `QueryMeta` 存储在 context 中，不同 Clone 实例的并发写入会导致共享 context 数据混乱。
+- 新方式（`builder.GetQueryMeta()`）确保每个构建器实例返回各自独立的元数据快照——无共享状态，无数据竞争。
+
+#### 在中间件中将 Meta 存入 Context（如有需要）
+
+如果你需要将 `QueryMeta` 传递到更深层的调用中（例如传递给无法访问 builder 的 repository 函数），可以通过一个简单的中间件实现：
+
+```go
+// 定义 context key
+type queryMetaKeyType struct{}
+var queryMetaKey = queryMetaKeyType{}
+
+// 将 QueryMeta 注入到 context 的中间件
+func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+        ctx = context.WithValue(ctx, queryMetaKey, q.GetQueryMeta())
+        return next(ctx)
+    }
+}
+
+// 使用
+b.Use(MetaToCtxMiddleware[User]())
+
+// 在下游代码中获取
+func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
+    meta, ok := ctx.Value(queryMetaKey).(builder.QueryMeta)
+    return meta, ok
+}
+```
+
+这种方式对 `Clone` 场景是安全的，因为每个 Clone 的中间件管道独立运行，拥有各自的 context。
 
 `QueryMeta` 包含以下字段：
 

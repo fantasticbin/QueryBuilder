@@ -126,6 +126,11 @@ func (g *GormBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 	return g
 }
 
+// GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
+func (g *GormBuilder[R]) GetQueryMeta() QueryMeta {
+	return g.builder.GetQueryMeta()
+}
+
 // QueryList 执行 GORM 查询列表操作
 func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	if err := g.builder.prepareAndValidate(); err != nil {

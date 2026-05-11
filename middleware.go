@@ -63,12 +63,13 @@ type cacheResult[R any] struct {
 }
 
 // CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
+// 中间件内部通过 builder.GetQueryMeta() 获取查询元信息，传递给 keyBuilder.Build
 func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) Middleware[R] {
 	if keyBuilder == nil {
 		keyBuilder = DefaultCacheKeyBuilder{Prefix: "default"}
 	}
-	return CacheMiddleware[R](cache, ttl, func(ctx context.Context) string {
-		return keyBuilder.Build(ctx)
+	return CacheMiddleware[R](cache, ttl, func(ctx context.Context, builder Querier[R]) string {
+		return keyBuilder.Build(ctx, builder.GetQueryMeta())
 	})
 }
 
@@ -78,14 +79,14 @@ func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration
 //
 //	cache - 缓存提供者实例，实现 CacheProvider 接口
 //	ttl   - 缓存过期时间
-//	keyFn - 缓存 key 生成函数，由用户根据查询条件自定义生成唯一的缓存键
+//	keyFn - 缓存 key 生成函数，接收 ctx 和 builder 参数，可通过 builder.GetQueryMeta() 获取查询元信息
 //
 // 返回:
 //
 //	Middleware[R] - 可直接通过 Use 方法添加到构建器的中间件
-func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context) string) Middleware[R] {
+func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context, builder Querier[R]) string) Middleware[R] {
 	return func(ctx context.Context, builder Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
-		key := keyFn(ctx)
+		key := keyFn(ctx, builder)
 
 		// 尝试从缓存获取
 		if data, ok := cache.Get(ctx, key); ok {
