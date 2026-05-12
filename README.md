@@ -421,8 +421,9 @@ Use it with the cache middleware:
 cache := NewGCacheProvider(1000) // LRU cache with 1000 entries
 
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
-b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context) string {
-    return fmt.Sprintf("users:list:%d:%d", start, limit)
+b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b builder.Querier[User]) string {
+    meta := b.GetQueryMeta()
+    return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
 users, total, err := b.QueryList(ctx)

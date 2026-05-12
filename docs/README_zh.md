@@ -421,8 +421,9 @@ func (g *GCacheProvider) Set(ctx context.Context, key string, value []byte, ttl 
 cache := NewGCacheProvider(1000) // 1000 条目的 LRU 缓存
 
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
-b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context) string {
-    return fmt.Sprintf("users:list:%d:%d", start, limit)
+b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b builder.Querier[User]) string {
+    meta := b.GetQueryMeta()
+    return fmt.Sprintf("users:list:%d:%d", meta.start, meta.limit)
 }))
 
 users, total, err := b.QueryList(ctx)

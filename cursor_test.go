@@ -345,6 +345,7 @@ func TestListQueryCursor_WithMockQuerier(t *testing.T) {
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
 	// 设置预期调用
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
 	mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
@@ -542,7 +543,8 @@ func TestListQueryCursor_WithCursorValueOption(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	// 设置预期调用：SetLimit、SetCursorField、SetCursorValue 都应被调用
+	// 设置预期调用：SetStart、SetLimit、SetCursorField、SetCursorValue 都应被调用
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("created_at", "id").Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorValue(int64(500), uint32(10)).Return(mockQuerier)

@@ -219,3 +219,18 @@ func (mr *MockQuerierMockRecorder[R]) GetQueryMeta() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetQueryMeta", reflect.TypeOf((*MockQuerier[R])(nil).GetQueryMeta))
 }
+
+// Explain Mock 实现
+func (m *MockQuerier[R]) Explain(ctx context.Context) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Explain", ctx)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Explain 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) Explain(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Explain", reflect.TypeOf((*MockQuerier[R])(nil).Explain), ctx)
+}

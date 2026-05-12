@@ -54,6 +54,28 @@ func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.C
 	}
 }
 
+// CheckConfigured 检查指定数据源是否已正确配置
+func (p *DBProxy) CheckConfigured(ds DataSource) error {
+	switch ds {
+	case MySQL:
+		if p.DB == nil {
+			return ErrDataNotConfigured
+		}
+	case MongoDB:
+		if p.Mongodb == nil {
+			return ErrDataNotConfigured
+		}
+	case ElasticSearch:
+		if p.ElasticSearch == nil {
+			return ErrDataNotConfigured
+		}
+	default:
+		return ErrDataSourceInvalid
+	}
+
+	return nil
+}
+
 // QueryMeta 查询元信息结构体
 // 中间件可通过 builder.GetQueryMeta() 获取当前查询的元数据快照
 type QueryMeta struct {
@@ -76,26 +98,52 @@ type QueryMeta struct {
 type queryBuilder[B any, R any] interface {
 	// self 返回具体构建器自身引用，用于链式调用返回具体子类型
 	self() B
-	// QueryList 执行查询列表操作，由各专属构建器各自实现
-	QueryList(ctx context.Context) ([]*R, int64, error)
-	// QueryCursor 执行游标分页查询，返回迭代器
-	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
+	// QuerierList 嵌入列表查询执行能力，由各专属构建器各自实现
+	QuerierList[R]
+	// QuerierCursor 嵌入游标查询执行能力，返回迭代器
+	QuerierCursor[R]
 }
 
-// QuerierMiddleware 中间件能力接口
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type QuerierMiddleware[R any] interface {
-	// Use 添加中间件
-	Use(middleware Middleware[R]) Querier[R]
-}
-
-// QuerierList 查询基础能力接口
+// QuerierList 列表查询执行能力接口
 // 泛型参数:
 //
 //	R: 查询结果的实体类型
 type QuerierList[R any] interface {
+	// QueryList 执行查询列表操作
+	QueryList(ctx context.Context) ([]*R, int64, error)
+}
+
+// QuerierCursor 游标查询执行能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type QuerierCursor[R any] interface {
+	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
+	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
+}
+
+// QuerierExplain 查询预览能力接口
+type QuerierExplain interface {
+	// Explain 返回构建器最终生成的查询语句（Dry Run 模式）
+	// 用于调试场景，不会实际执行查询
+	Explain(ctx context.Context) (string, error)
+}
+
+// QuerierMeta 查询元信息能力接口
+type QuerierMeta interface {
+	// GetQueryMeta 返回当前查询元信息的只读快照
+	// 中间件可通过 builder 参数直接调用此方法获取元数据，无需通过 ctx 传递
+	GetQueryMeta() QueryMeta
+}
+
+// Querier 通用查询接口，作为工厂函数的返回类型
+// 包含所有配置方法（Setter）和执行能力接口
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type Querier[R any] interface {
+	// Use 添加中间件
+	Use(middleware Middleware[R]) Querier[R]
 	// SetStart 设置分页起始位置
 	SetStart(start uint32) Querier[R]
 	// SetLimit 设置每页数据条数
@@ -106,56 +154,79 @@ type QuerierList[R any] interface {
 	SetNeedPagination(needPagination bool) Querier[R]
 	// SetFields 设置查询字段投影，指定只返回部分字段
 	SetFields(fields ...string) Querier[R]
-	// QueryList 执行查询列表操作
-	QueryList(ctx context.Context) ([]*R, int64, error)
-}
-
-// QuerierHook 钩子处理能力接口
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type QuerierHook[R any] interface {
 	// SetBeforeQueryHook 设置查询前置钩子
 	SetBeforeQueryHook(hook BeforeQueryHook) Querier[R]
 	// SetAfterQueryHook 设置查询后置钩子
 	SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R]
-}
-
-// QuerierCursor 游标模式能力接口
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type QuerierCursor[R any] interface {
 	// SetCursorField 设置游标分页排序字段（支持多字段）
 	SetCursorField(fields ...string) Querier[R]
 	// SetCursorValue 设置游标初始值（支持多字段，与 cursorFields 一一对应）
 	// 用于断点续查或 App 分页场景，指定游标查询的起始位置
 	SetCursorValue(values ...any) Querier[R]
-	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
-	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
-}
 
-// QuerierMeta 查询元信息能力接口
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type QuerierMeta[R any] interface {
-	// GetQueryMeta 返回当前查询元信息的只读快照
-	// 中间件可通过 builder 参数直接调用此方法获取元数据，无需通过 ctx 传递
-	GetQueryMeta() QueryMeta
-}
-
-// Querier 通用查询接口，作为工厂函数的返回类型
-// 通过嵌入多个小接口组合完整能力
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type Querier[R any] interface {
-	QuerierMiddleware[R]
+	// 嵌入纯执行能力接口
 	QuerierList[R]
-	QuerierHook[R]
 	QuerierCursor[R]
-	QuerierMeta[R]
+	QuerierExplain
+	QuerierMeta
+}
+
+// queryConfig 分页配置
+type queryConfig struct {
+	start          uint32   // 分页起始位置
+	limit          uint32   // 每页数据条数
+	needTotal      bool     // 是否需要查询总数
+	needPagination bool     // 是否需要分页
+	fields         []string // 查询字段投影
+}
+
+// clone 返回 queryConfig 的深拷贝
+func (c queryConfig) clone() queryConfig {
+	if c.fields != nil {
+		fields := make([]string, len(c.fields))
+		copy(fields, c.fields)
+		c.fields = fields
+	}
+	return c
+}
+
+// cursorConfig 游标配置
+type cursorConfig struct {
+	cursorFields  []string // 游标分页排序字段列表
+	cursorValues  []any    // 游标初始值（外部传入，用于断点续查/App分页场景）
+	isCursorQuery bool     // 是否为游标查询模式
+}
+
+// clone 返回 cursorConfig 的深拷贝
+func (c cursorConfig) clone() cursorConfig {
+	if c.cursorFields != nil {
+		cursorFields := make([]string, len(c.cursorFields))
+		copy(cursorFields, c.cursorFields)
+		c.cursorFields = cursorFields
+	}
+	if c.cursorValues != nil {
+		cursorValues := make([]any, len(c.cursorValues))
+		copy(cursorValues, c.cursorValues)
+		c.cursorValues = cursorValues
+	}
+	return c
+}
+
+// hookChain 钩子与中间件链
+type hookChain[R any] struct {
+	beforeHook  BeforeQueryHook   // 查询前置钩子
+	afterHook   AfterQueryHook[R] // 查询后置钩子
+	middlewares []Middleware[R]   // 中间件链
+}
+
+// clone 返回 hookChain 的深拷贝
+func (c hookChain[R]) clone() hookChain[R] {
+	if c.middlewares != nil {
+		middlewares := make([]Middleware[R], len(c.middlewares))
+		copy(middlewares, c.middlewares)
+		c.middlewares = middlewares
+	}
+	return c
 }
 
 // builder 查询构建器公共模板基类，使用自引用泛型约束
@@ -164,21 +235,13 @@ type Querier[R any] interface {
 //	B: 具体构建器类型（自引用，满足 queryBuilder 约束）
 //	R: 查询结果的实体类型
 type builder[B queryBuilder[B, R], R any] struct {
-	data           *DBProxy
-	dataSource     DataSource // 数据源类型，用于查询元信息
-	start          uint32
-	limit          uint32
-	needTotal      bool
-	needPagination bool
-	fields         []string  // 查询字段投影
-	cursorFields   []string  // 游标分页排序字段列表
-	cursorValues   []any     // 游标初始值（外部传入，用于断点续查/App分页场景）
-	isCursorQuery  bool      // 是否为游标查询模式
-	startTime      time.Time // 查询开始时间
+	data       *DBProxy
+	dataSource DataSource // 数据源类型，用于查询元信息
+	startTime  time.Time  // 查询开始时间
 
-	beforeHook  BeforeQueryHook   // 查询前置钩子
-	afterHook   AfterQueryHook[R] // 查询后置钩子
-	middlewares []Middleware[R]   // 中间件链
+	queryConfig  // 嵌入分页配置
+	cursorConfig // 嵌入游标配置
+	hookChain[R] // 嵌入钩子与中间件链
 
 	selfRef    B          // 存储具体子类型引用，用于链式调用返回具体子类型
 	querierRef Querier[R] // 存储 Querier 接口引用，避免中间件执行时的类型断言
@@ -193,18 +256,26 @@ func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 
 // GetQueryMeta 返回当前查询元信息的只读快照
 // 中间件可通过 builder 参数直接调用此方法获取元数据
+// 切片字段返回副本，防止外部意外修改内部状态
 func (b *builder[B, R]) GetQueryMeta() QueryMeta {
-	return QueryMeta{
+	meta := QueryMeta{
 		DataSource:     b.dataSource,
 		Start:          b.start,
 		Limit:          b.limit,
 		NeedTotal:      b.needTotal,
 		NeedPagination: b.needPagination,
-		Fields:         b.fields,
 		IsCursorQuery:  b.isCursorQuery,
-		CursorFields:   b.cursorFields,
 		StartTime:      b.startTime,
 	}
+	if b.fields != nil {
+		meta.Fields = make([]string, len(b.fields))
+		copy(meta.Fields, b.fields)
+	}
+	if b.cursorFields != nil {
+		meta.CursorFields = make([]string, len(b.cursorFields))
+		copy(meta.CursorFields, b.cursorFields)
+	}
+	return meta
 }
 
 // prepareAndValidate 执行查询前的参数校验与数据准备
@@ -214,21 +285,9 @@ func (b *builder[B, R]) prepareAndValidate() error {
 		return ErrDataNotConfigured
 	}
 
-	switch b.dataSource {
-	case MySQL:
-		if b.data.DB == nil {
-			return ErrDataNotConfigured
-		}
-	case MongoDB:
-		if b.data.Mongodb == nil {
-			return ErrDataNotConfigured
-		}
-	case ElasticSearch:
-		if b.data.ElasticSearch == nil {
-			return ErrDataNotConfigured
-		}
-	default:
-		return ErrDataSourceInvalid
+	// 数据源校验
+	if err := b.data.CheckConfigured(b.dataSource); err != nil {
+		return err
 	}
 
 	// limit 校验
@@ -287,31 +346,11 @@ func (b *builder[B, R]) sanitizeFields() {
 func (b *builder[B, R]) cloneBase(dst *builder[B, R]) {
 	dst.data = b.data
 	dst.dataSource = b.dataSource
-	dst.start = b.start
-	dst.limit = b.limit
-	dst.needTotal = b.needTotal
-	dst.needPagination = b.needPagination
-	dst.beforeHook = b.beforeHook
-	dst.afterHook = b.afterHook
-	dst.isCursorQuery = b.isCursorQuery
 
-	// 切片类型深拷贝，确保修改互不影响
-	if b.fields != nil {
-		dst.fields = make([]string, len(b.fields))
-		copy(dst.fields, b.fields)
-	}
-	if b.cursorFields != nil {
-		dst.cursorFields = make([]string, len(b.cursorFields))
-		copy(dst.cursorFields, b.cursorFields)
-	}
-	if b.cursorValues != nil {
-		dst.cursorValues = make([]any, len(b.cursorValues))
-		copy(dst.cursorValues, b.cursorValues)
-	}
-	if b.middlewares != nil {
-		dst.middlewares = make([]Middleware[R], len(b.middlewares))
-		copy(dst.middlewares, b.middlewares)
-	}
+	// 通过子结构体的 clone() 方法进行深拷贝，确保切片引用独立
+	dst.queryConfig = b.queryConfig.clone()
+	dst.cursorConfig = b.cursorConfig.clone()
+	dst.hookChain = b.hookChain.clone()
 }
 
 // Use 添加中间件
@@ -396,6 +435,21 @@ func (b *builder[B, R]) resolveInitialCursorValues() []any {
 	return nil
 }
 
+// buildMiddlewareChain 构建中间件链，将中间件按逆序包装到 queryFn 外层
+func (b *builder[B, R]) buildMiddlewareChain(
+	queryFn func(context.Context) ([]*R, int64, error),
+) func(context.Context) ([]*R, int64, error) {
+	next := queryFn
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
+			return func(ctx context.Context) ([]*R, int64, error) {
+				return mw(ctx, b.querierRef, fn)
+			}
+		}(b.middlewares[i], next)
+	}
+	return next
+}
+
 // executeWithMiddlewares 执行中间件链并调用最终查询逻辑
 // 由各专属构建器在 QueryList 中调用，传入最终的查询函数
 // 支持超时控制和前置/后置钩子
@@ -411,17 +465,7 @@ func (b *builder[B, R]) executeWithMiddlewares(
 		ctx = b.beforeHook(ctx)
 	}
 
-	next := queryFn
-
-	for i := len(b.middlewares) - 1; i >= 0; i-- {
-		next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
-			return func(ctx context.Context) ([]*R, int64, error) {
-				return mw(ctx, b.querierRef, fn)
-			}
-		}(b.middlewares[i], next)
-	}
-
-	list, total, err := next(ctx)
+	list, total, err := b.buildMiddlewareChain(queryFn)(ctx)
 
 	// 执行后置钩子
 	if b.afterHook != nil {
@@ -471,26 +515,21 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 			return batch, int64(len(batch)), err
 		}
 
-		// 构建中间件链
-		next := queryFn
-		for i := len(b.middlewares) - 1; i >= 0; i-- {
-			next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
-				return func(ctx context.Context) ([]*R, int64, error) {
-					return mw(ctx, b.querierRef, fn)
-				}
-			}(b.middlewares[i], next)
-		}
-
-		list, _, err := next(ctx)
+		list, _, err := b.buildMiddlewareChain(queryFn)(ctx)
 		return list, nextCursorValues, err
 	}
 
 	// 构建迭代器，并在迭代完成后执行后置钩子
 	innerIter := buildCursorIterator[R](ctx, b.cursorFields, batchSize, initialCursorValues, wrappedFetch)
 
+	// 判断是否需要累积完整结果列表给 afterHook
+	// 当批次大小超过阈值时，认为是大数据集流式场景，不累积完整列表以避免 OOM
+	collectResults := b.afterHook != nil && batchSize <= maxLimit
+
 	// 包装迭代器，在遍历结束后执行 AfterQueryHook
 	return func(yield func(*R, error) bool) {
 		var allResults []*R
+		var count int64
 		var lastErr error
 
 		for item, err := range innerIter {
@@ -501,15 +540,19 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 				}
 				break
 			}
-			allResults = append(allResults, item)
+			count++
+			if collectResults {
+				allResults = append(allResults, item)
+			}
 			if !yield(item, nil) {
 				break
 			}
 		}
 
 		// 执行后置钩子
+		// 大数据集场景下 allResults 为 nil，仅传递计数信息
 		if b.afterHook != nil {
-			b.afterHook(ctx, allResults, int64(len(allResults)), lastErr)
+			b.afterHook(ctx, allResults, count, lastErr)
 		}
 	}
 }
