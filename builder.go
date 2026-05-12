@@ -542,7 +542,6 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 		}
 
 		// 执行后置钩子
-		// 大数据集场景下 allResults 为 nil，仅传递计数信息
 		if b.afterHook != nil {
 			b.afterHook(ctx, allResults, int64(len(allResults)), lastErr)
 		}
