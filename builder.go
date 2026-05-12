@@ -522,14 +522,9 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 	// 构建迭代器，并在迭代完成后执行后置钩子
 	innerIter := buildCursorIterator[R](ctx, b.cursorFields, batchSize, initialCursorValues, wrappedFetch)
 
-	// 判断是否需要累积完整结果列表给 afterHook
-	// 当批次大小超过阈值时，认为是大数据集流式场景，不累积完整列表以避免 OOM
-	collectResults := b.afterHook != nil && batchSize <= maxLimit
-
 	// 包装迭代器，在遍历结束后执行 AfterQueryHook
 	return func(yield func(*R, error) bool) {
 		var allResults []*R
-		var count int64
 		var lastErr error
 
 		for item, err := range innerIter {
@@ -540,10 +535,7 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 				}
 				break
 			}
-			count++
-			if collectResults {
-				allResults = append(allResults, item)
-			}
+			allResults = append(allResults, item)
 			if !yield(item, nil) {
 				break
 			}
@@ -552,7 +544,7 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 		// 执行后置钩子
 		// 大数据集场景下 allResults 为 nil，仅传递计数信息
 		if b.afterHook != nil {
-			b.afterHook(ctx, allResults, count, lastErr)
+			b.afterHook(ctx, allResults, int64(len(allResults)), lastErr)
 		}
 	}
 }
