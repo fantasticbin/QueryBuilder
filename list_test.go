@@ -159,7 +159,7 @@ func TestQueryList(t *testing.T) {
 					QueryList(ctx).
 					Return(nil, int64(0), errors.New("no data source provided"))
 			},
-			opts: []QueryOption{},
+			opts:           []QueryOption{},
 			expectedResult: nil,
 			expectedTotal:  0,
 			expectedErr:    errors.New("no data source provided"),
@@ -397,6 +397,8 @@ func TestExplainCursorMode(t *testing.T) {
 	// 设置 Mock 期望：Explain 游标模式
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorValue(uint32(100)).Return(mockQuerier)
 	mockQuerier.EXPECT().Explain(ctx).Return("SELECT * FROM test_entities WHERE id > 100 ORDER BY id ASC LIMIT 10", nil)
@@ -532,6 +534,8 @@ func TestQueryCursor(t *testing.T) {
 	// 设置 Mock 期望
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
 	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
 		for _, item := range expectedData {
@@ -754,6 +758,8 @@ func TestQueryCursorWithCursorValues(t *testing.T) {
 	// 设置 Mock 期望
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorValue(uint32(50)).Return(mockQuerier)
 	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
@@ -778,5 +784,310 @@ func TestQueryCursorWithCursorValues(t *testing.T) {
 	}
 	if results[0].ID != 51 {
 		t.Errorf("expected ID 51, got %d", results[0].ID)
+	}
+}
+
+// TestQueryCursor_WithNeedPaginationTrue 测试 List.QueryCursor 传递 needPagination=true（单批次模式）
+func TestQueryCursor_WithNeedPaginationTrue(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedData := []*TestEntity{
+		{ID: 1, Name: "Alice", Age: 25},
+		{ID: 2, Name: "Bob", Age: 30},
+		{ID: 3, Name: "Charlie", Age: 35},
+	}
+
+	// 设置 Mock 期望：验证 SetNeedPagination(true) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(10)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		for _, item := range expectedData {
+			if !yield(item, nil) {
+				return
+			}
+		}
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("id"),
+		WithNeedPagination(true),
+		WithLimit(10),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 3 {
+		t.Errorf("expected 3 results, got %d", len(results))
+	}
+	for i, item := range results {
+		if item.ID != expectedData[i].ID {
+			t.Errorf("result[%d] ID mismatch: expected %d, got %d", i, expectedData[i].ID, item.ID)
+		}
+	}
+}
+
+// TestQueryCursor_WithNeedTotalTrue 测试 List.QueryCursor 传递 needTotal=true
+func TestQueryCursor_WithNeedTotalTrue(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedData := []*TestEntity{
+		{ID: 1, Name: "Alice", Age: 25},
+		{ID: 2, Name: "Bob", Age: 30},
+	}
+
+	// 设置 Mock 期望：验证 SetNeedTotal(true) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		for _, item := range expectedData {
+			if !yield(item, nil) {
+				return
+			}
+		}
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("id"),
+		WithNeedTotal(true),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+// TestQueryCursor_WithNeedPaginationAndNeedTotal 测试 List.QueryCursor 同时传递 needPagination=true 和 needTotal=true
+// 模拟 App 分页场景：只取一页数据但需要总数
+func TestQueryCursor_WithNeedPaginationAndNeedTotal(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedData := []*TestEntity{
+		{ID: 6, Name: "Frank", Age: 28},
+		{ID: 7, Name: "Grace", Age: 32},
+	}
+
+	// 设置 Mock 期望：验证 needPagination=true 和 needTotal=true 同时被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(20)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("created_at", "id").Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorValue(int64(500), uint32(5)).Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		for _, item := range expectedData {
+			if !yield(item, nil) {
+				return
+			}
+		}
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("created_at", "id"),
+		WithCursorValue(int64(500), uint32(5)),
+		WithNeedPagination(true),
+		WithNeedTotal(true),
+		WithLimit(20),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+	if results[0].ID != 6 || results[1].ID != 7 {
+		t.Errorf("unexpected result IDs: got %d, %d", results[0].ID, results[1].ID)
+	}
+}
+
+// TestQueryCursor_WithNeedPaginationFalseAndNeedTotalFalse 测试 List.QueryCursor 传递 needPagination=false 和 needTotal=false
+// 模拟全量遍历场景：不分页、不查总数
+func TestQueryCursor_WithNeedPaginationFalseAndNeedTotalFalse(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	// 设置 Mock 期望：验证 needPagination=false 和 needTotal=false 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(100)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(false).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(false).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		for i := uint32(1); i <= 5; i++ {
+			if !yield(&TestEntity{ID: i, Name: fmt.Sprintf("User%d", i), Age: int(20 + i)}, nil) {
+				return
+			}
+		}
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("id"),
+		WithNeedPagination(false),
+		WithNeedTotal(false),
+		WithLimit(100),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 5 {
+		t.Errorf("expected 5 results, got %d", len(results))
+	}
+}
+
+// TestQueryCursor_WithNeedPaginationTrueAndHooks 测试 needPagination=true 场景下钩子被正确传递
+func TestQueryCursor_WithNeedPaginationTrueAndHooks(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	beforeHook := func(ctx context.Context) context.Context {
+		return ctx
+	}
+	afterHook := func(ctx context.Context, list []*TestEntity, total int64, err error) {
+	}
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+	list.SetBeforeQueryHook(beforeHook)
+	list.SetAfterQueryHook(afterHook)
+
+	// 设置 Mock 期望：验证钩子和 needPagination=true 同时被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().SetBeforeQueryHook(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetAfterQueryHook(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		yield(&TestEntity{ID: 1, Name: "Alice", Age: 25}, nil)
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("id"),
+		WithNeedPagination(true),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+// TestQueryCursor_WithNeedTotalTrueAndMiddleware 测试 needTotal=true 场景下中间件被正确传递
+func TestQueryCursor_WithNeedTotalTrueAndMiddleware(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	// 添加一个中间件
+	list.Use(func(
+		ctx context.Context,
+		builder Querier[TestEntity],
+		next func(context.Context) ([]*TestEntity, int64, error),
+	) ([]*TestEntity, int64, error) {
+		return next(ctx)
+	})
+
+	// 设置 Mock 期望：验证中间件和 needTotal=true 同时被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(func(yield func(*TestEntity, error) bool) {
+		yield(&TestEntity{ID: 1, Name: "Alice", Age: 25}, nil)
+		yield(&TestEntity{ID: 2, Name: "Bob", Age: 30}, nil)
+	})
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("id"),
+		WithNeedTotal(true),
+		WithLimit(10),
+	)
+
+	var results []*TestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
 	}
 }

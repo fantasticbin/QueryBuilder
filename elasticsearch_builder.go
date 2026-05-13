@@ -192,7 +192,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		}
 
 		if e.builder.needPagination {
-			if e.builder.limit < 1 {
+			if e.builder.limit == 0 {
 				e.builder.limit = defaultLimit
 			}
 			searchService = searchService.From(int(e.builder.start)).Size(int(e.builder.limit))
@@ -281,7 +281,7 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	}
 
 	if e.builder.needPagination {
-		if e.builder.limit < 1 {
+		if e.builder.limit == 0 {
 			e.builder.limit = defaultLimit
 		}
 		result["from"] = e.builder.start
@@ -343,7 +343,7 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortSources() ([]any, error) {
 // explainCursor 返回游标查询模式的首批查询 DSL
 func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 	batchSize := int(e.builder.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 
@@ -390,13 +390,14 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 
 // doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 // 使用 search_after API，将上一批最后一条文档的 sort values 作为下一批的 search_after 参数
-func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) ([]*R, []any, error) {
+// isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
+func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
 	if e.index == "" {
-		return nil, nil, errors.New("elasticsearch index not configured")
+		return nil, nil, 0, errors.New("elasticsearch index not configured")
 	}
 
 	batchSize := int(e.builder.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 
@@ -424,18 +425,42 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		searchService = searchService.SearchAfter(cursorValues...)
 	}
 
-	searchResult, err := searchService.Do(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	var list []*R
-	for _, hit := range searchResult.Hits.Hits {
-		var item R
-		if err := json.Unmarshal(hit.Source, &item); err != nil {
-			return nil, nil, err
+	var total int64
+	var searchResult *elastic.SearchResult
+
+	if err := util.WaitAndGo(func() error {
+		var err error
+		searchResult, err = searchService.Do(ctx)
+		if err != nil {
+			return err
 		}
-		list = append(list, &item)
+
+		for _, hit := range searchResult.Hits.Hits {
+			var item R
+			if err := json.Unmarshal(hit.Source, &item); err != nil {
+				return err
+			}
+			list = append(list, &item)
+		}
+		return nil
+	}, func() error {
+		// 首批次且需要总数时，并行执行数据查询和 Count 查询
+		if !isFirstBatch || !e.builder.needTotal || e.afterHook == nil {
+			return nil
+		}
+
+		countService := e.builder.data.ElasticSearch.Count().
+			Index(e.index).
+			Query(filter)
+		count, err := countService.Do(ctx)
+		if err != nil {
+			return err
+		}
+		total = count
+		return nil
+	}); err != nil {
+		return nil, nil, 0, err
 	}
 
 	// 从最后一条 hit 的 Sort 字段提取 sort values 作为下一批的 search_after 参数
@@ -450,5 +475,5 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		}
 	}
 
-	return list, nextCursorValues, nil
+	return list, nextCursorValues, total, nil
 }

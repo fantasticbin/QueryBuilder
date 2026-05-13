@@ -908,6 +908,54 @@ for order, err := range list.QueryCursor(ctx,
 
 > **Priority**: When both `SetCursorValue` and `SetStart` are set, `SetCursorValue` takes precedence.
 
+#### Pagination Control in Cursor Mode
+
+`needPagination` and `needTotal` also apply to cursor queries:
+
+| Option | Default | Behavior in Cursor Mode |
+|--------|---------|------------------------|
+| `needPagination` | `true` | When `true`, only fetches a **single batch** (equivalent to one page). When `false`, iterates through the entire dataset in batches until exhausted. |
+| `needTotal` | `true` | When `true`, executes a **parallel Count query** on the first batch to retrieve the total count. The total is passed to `AfterQueryHook`. When `false`, skips the Count query entirely. |
+
+**Single-page cursor query** (App-style "load more"):
+
+```go
+// Fetch one page of data with total count — ideal for mobile "load more" pagination
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithCursorValue(uint32(lastSeenID)),
+    builder.WithLimit(20),
+    builder.WithNeedPagination(true),  // single batch only
+    builder.WithNeedTotal(true),       // get total count in parallel
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+**Full traversal without counting** (data export):
+
+```go
+// Stream all records without counting — best for batch processing / export
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(500),
+    builder.WithNeedPagination(false), // iterate all batches
+    builder.WithNeedTotal(false),      // skip Count query
+) {
+    if err != nil {
+        break
+    }
+    export(user)
+}
+```
+
+> **Performance tip:** Set `needTotal(false)` for large-dataset traversals where total count is unnecessary — this avoids an expensive `COUNT(*)` / `CountDocuments` / `Count` query.
+
 #### Early Termination
 
 Since `QueryCursor` returns a standard Go iterator, you can use `break` to stop at any time:

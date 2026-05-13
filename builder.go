@@ -29,8 +29,6 @@ var (
 	ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
 	// ErrDataSourceInvalid 数据源无效
 	ErrDataSourceInvalid = errors.New("data source invalid")
-	// ErrLimitZero limit 不能为 0
-	ErrLimitZero = errors.New("limit must be greater than 0")
 	// ErrLimitExceeded limit 超出允许的最大值
 	ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
 	// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
@@ -291,9 +289,6 @@ func (b *builder[B, R]) prepareAndValidate() error {
 	}
 
 	// limit 校验
-	if b.limit == 0 {
-		return ErrLimitZero
-	}
 	if b.limit > maxLimit {
 		return ErrLimitExceeded
 	}
@@ -480,7 +475,7 @@ func (b *builder[B, R]) executeWithMiddlewares(
 // 参数:
 //
 //	ctx: 上下文
-//	cursorQueryFn: 游标分批查询函数，接收 cursorValues 返回一批数据
+//	cursorQueryFn: 游标分批查询函数，接收 cursorValues 和 isFirstBatch 返回一批数据
 //
 // 返回:
 //
@@ -491,7 +486,7 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 ) iter.Seq2[*R, error] {
 	// 确定批次大小
 	batchSize := int(b.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 
@@ -506,21 +501,34 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 		ctx = b.beforeHook(ctx)
 	}
 
+	// 用于接收首批次查询返回的总数（needTotal 时有效）
+	var cursorTotal int64
+
 	// 包装 fetchBatch，使每批次查询经过中间件链
-	wrappedFetch := func(ctx context.Context, cursorValues []any) ([]*R, []any, error) {
+	wrappedFetch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
 		var nextCursorValues []any
+		var batchTotal int64
 		queryFn := func(ctx context.Context) ([]*R, int64, error) {
-			batch, nextCV, err := cursorQueryFn(ctx, cursorValues)
+			batch, nextCV, total, err := cursorQueryFn(ctx, cursorValues, isFirstBatch)
 			nextCursorValues = nextCV
+			batchTotal = total
 			return batch, int64(len(batch)), err
 		}
 
 		list, _, err := b.buildMiddlewareChain(queryFn)(ctx)
-		return list, nextCursorValues, err
+		return list, nextCursorValues, batchTotal, err
 	}
 
 	// 构建迭代器，并在迭代完成后执行后置钩子
-	innerIter := buildCursorIterator[R](ctx, b.cursorFields, batchSize, initialCursorValues, wrappedFetch)
+	innerIter := buildCursorIterator[R](
+		ctx,
+		b.cursorFields,
+		batchSize,
+		initialCursorValues,
+		b.needPagination,
+		wrappedFetch,
+		&cursorTotal,
+	)
 
 	// 包装迭代器，在遍历结束后执行 AfterQueryHook
 	return func(yield func(*R, error) bool) {
@@ -542,8 +550,13 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 		}
 
 		// 执行后置钩子
+		// 当 needTotal 为 true 时，使用首批次查询返回的总数；否则使用遍历到的记录数
 		if b.afterHook != nil {
-			b.afterHook(ctx, allResults, int64(len(allResults)), lastErr)
+			total := int64(len(allResults))
+			if b.needTotal && cursorTotal > 0 {
+				total = cursorTotal
+			}
+			b.afterHook(ctx, allResults, total, lastErr)
 		}
 	}
 }

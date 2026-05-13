@@ -906,6 +906,54 @@ for order, err := range list.QueryCursor(ctx,
 
 > **优先级**：当同时设置了 `SetCursorValue` 和 `SetStart` 时，`SetCursorValue` 优先。
 
+#### 游标模式下的分页控制
+
+`needPagination` 和 `needTotal` 在游标查询模式下同样生效：
+
+| 选项 | 默认值 | 游标模式下的行为 |
+|------|--------|-----------------|
+| `needPagination` | `true` | 为 `true` 时，只获取**单批次**数据（相当于一页）。为 `false` 时，自动分批遍历整个数据集直到耗尽。 |
+| `needTotal` | `true` | 为 `true` 时，在**首批次**查询时并行执行 Count 查询获取总数。总数通过 `AfterQueryHook` 传递。为 `false` 时，完全跳过 Count 查询。 |
+
+**单页游标查询**（App 端"加载更多"场景）：
+
+```go
+// 获取一页数据并返回总数——适用于移动端"加载更多"分页
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithCursorValue(uint32(lastSeenID)),
+    builder.WithLimit(20),
+    builder.WithNeedPagination(true),  // 只取单批次
+    builder.WithNeedTotal(true),       // 并行获取总数
+) {
+    if err != nil {
+        break
+    }
+    process(user)
+}
+```
+
+**全量遍历不查总数**（数据导出场景）：
+
+```go
+// 流式遍历全部记录，不查总数——适用于批处理/数据导出
+for user, err := range list.QueryCursor(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(500),
+    builder.WithNeedPagination(false), // 遍历所有批次
+    builder.WithNeedTotal(false),      // 跳过 Count 查询
+) {
+    if err != nil {
+        break
+    }
+    export(user)
+}
+```
+
+> **性能提示：** 对于不需要总数的大数据集遍历场景，设置 `needTotal(false)` 可以避免一次昂贵的 `COUNT(*)` / `CountDocuments` / `Count` 查询。
+
 #### 提前终止
 
 由于 `QueryCursor` 返回标准的 Go 迭代器，你可以随时使用 `break` 终止遍历：

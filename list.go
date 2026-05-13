@@ -80,6 +80,8 @@ func (l *List[R]) passQueryOption(options BaseQueryListOptions, cursorMode, hand
 	// 配置通用参数
 	l.querier.SetStart(options.GetStart())
 	l.querier.SetLimit(options.GetLimit())
+	l.querier.SetNeedTotal(options.GetNeedTotal())
+	l.querier.SetNeedPagination(options.GetNeedPagination())
 
 	// 应用指定字段
 	if fields := options.GetFields(); len(fields) > 0 {
@@ -95,9 +97,6 @@ func (l *List[R]) passQueryOption(options BaseQueryListOptions, cursorMode, hand
 		if cursorValues := options.GetCursorValues(); len(cursorValues) > 0 {
 			l.querier.SetCursorValue(cursorValues...)
 		}
-	} else {
-		l.querier.SetNeedTotal(options.GetNeedTotal())
-		l.querier.SetNeedPagination(options.GetNeedPagination())
 	}
 
 	// 应用 Scope 配置回调，自动设置 filter/sort

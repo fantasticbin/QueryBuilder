@@ -180,7 +180,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 		}
 
 		if m.builder.needPagination {
-			if m.builder.limit < 1 {
+			if m.builder.limit == 0 {
 				m.builder.limit = defaultLimit
 			}
 			findOpt.SetSkip(int64(m.builder.start)).SetLimit(int64(m.builder.limit))
@@ -243,7 +243,7 @@ func (m *MongoBuilder[R]) Explain(ctx context.Context) (string, error) {
 	}
 
 	if m.builder.needPagination {
-		if m.builder.limit < 1 {
+		if m.builder.limit == 0 {
 			m.builder.limit = defaultLimit
 		}
 		result["skip"] = m.builder.start
@@ -294,7 +294,7 @@ func (m *MongoBuilder[R]) buildCursorProjection() bson.D {
 // explainCursor 返回游标查询模式的首批查询 DSL
 func (m *MongoBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 	batchSize := int(m.builder.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 
@@ -325,9 +325,10 @@ func (m *MongoBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 
 // doCursorQuery 执行 MongoDB 游标分页的单批次查询
 // 构建多字段复合游标条件
-func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) ([]*R, []any, error) {
+// isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 CountDocuments 查询
+func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
 	batchSize := int(m.builder.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 
@@ -336,6 +337,9 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any)
 	if filter == nil {
 		filter = bson.D{}
 	}
+
+	// 用于 Count 查询的基础过滤条件（不含游标条件）
+	baseFilter := filter
 
 	// 构建游标条件（仅在非首次查询时添加）
 	if len(cursorValues) > 0 {
@@ -377,31 +381,44 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any)
 		findOpt.SetProjection(projection)
 	}
 
-	cursor, err := m.builder.data.Mongodb.Find(ctx, filter, findOpt)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func(cursor *mongo.Cursor, ctx context.Context) {
-		_ = cursor.Close(ctx)
-	}(cursor, ctx)
-
-	// 逐条遍历 cursor，保留最后一条文档的原始 BSON 用于提取游标值
 	var list []*R
+	var total int64
 	var lastRaw bson.Raw
-	for cursor.Next(ctx) {
-		var item R
-		if err := cursor.Decode(&item); err != nil {
-			return nil, nil, err
+
+	if err := util.WaitAndGo(func() error {
+		cursor, err := m.builder.data.Mongodb.Find(ctx, filter, findOpt)
+		if err != nil {
+			return err
 		}
-		list = append(list, &item)
-		lastRaw = cursor.Current
-	}
-	if err := cursor.Err(); err != nil {
-		return nil, nil, err
+		defer func(cursor *mongo.Cursor, ctx context.Context) {
+			_ = cursor.Close(ctx)
+		}(cursor, ctx)
+
+		// 逐条遍历 cursor，保留最后一条文档的原始 BSON 用于提取游标值
+		for cursor.Next(ctx) {
+			var item R
+			if err := cursor.Decode(&item); err != nil {
+				return err
+			}
+			list = append(list, &item)
+			lastRaw = cursor.Current
+		}
+		return cursor.Err()
+	}, func() error {
+		// 首批次且需要总数时，并行执行数据查询和 Count 查询
+		if !isFirstBatch || !m.builder.needTotal || m.afterHook == nil {
+			return nil
+		}
+
+		var countErr error
+		total, countErr = m.builder.data.Mongodb.CountDocuments(ctx, baseFilter)
+		return countErr
+	}); err != nil {
+		return nil, nil, 0, err
 	}
 
 	if len(list) == 0 {
-		return list, nil, nil
+		return list, nil, total, nil
 	}
 
 	// 从最后一条文档的原始 BSON 中直接按字段名提取游标值（零反射）
@@ -409,14 +426,14 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any)
 	for _, field := range m.builder.cursorFields {
 		rawVal, err := lastRaw.LookupErr(field)
 		if err != nil {
-			return nil, nil, fmt.Errorf("cursor field %q not found in document: %w", field, err)
+			return nil, nil, 0, fmt.Errorf("cursor field %q not found in document: %w", field, err)
 		}
 		var val any
 		if err := rawVal.Unmarshal(&val); err != nil {
-			return nil, nil, fmt.Errorf("cursor field %q unmarshal failed: %w", field, err)
+			return nil, nil, 0, fmt.Errorf("cursor field %q unmarshal failed: %w", field, err)
 		}
 		nextCursorValues = append(nextCursorValues, val)
 	}
 
-	return list, nextCursorValues, nil
+	return list, nextCursorValues, total, nil
 }

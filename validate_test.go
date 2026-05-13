@@ -18,45 +18,6 @@ type ValidateTestEntity struct {
 
 // --- limit 校验测试 ---
 
-func TestValidateData_LimitZero_Gorm(t *testing.T) {
-	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
-	g.SetLimit(0)
-
-	_, _, err := g.QueryList(context.Background())
-	if err == nil {
-		t.Fatal("expected ErrLimitZero, got nil")
-	}
-	if !errors.Is(err, ErrLimitZero) {
-		t.Errorf("expected ErrLimitZero, got: %v", err)
-	}
-}
-
-func TestValidateData_LimitZero_Mongo(t *testing.T) {
-	m := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
-	m.SetLimit(0)
-
-	_, _, err := m.QueryList(context.Background())
-	if err == nil {
-		t.Fatal("expected ErrLimitZero, got nil")
-	}
-	if !errors.Is(err, ErrLimitZero) {
-		t.Errorf("expected ErrLimitZero, got: %v", err)
-	}
-}
-
-func TestValidateData_LimitZero_ES(t *testing.T) {
-	e := NewElasticSearchBuilder[ValidateTestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
-	e.SetLimit(0)
-
-	_, _, err := e.QueryList(context.Background())
-	if err == nil {
-		t.Fatal("expected ErrLimitZero, got nil")
-	}
-	if !errors.Is(err, ErrLimitZero) {
-		t.Errorf("expected ErrLimitZero, got: %v", err)
-	}
-}
-
 func TestValidateData_LimitExceeded_Gorm(t *testing.T) {
 	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 	g.SetLimit(5001)
@@ -531,23 +492,6 @@ func TestSanitizeFields_NilFields_NoAction(t *testing.T) {
 }
 
 // --- QueryCursor 路径的 limit 校验测试 ---
-
-func TestValidateData_LimitZero_QueryCursor_Gorm(t *testing.T) {
-	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
-	g.SetLimit(0)
-	g.SetCursorField("id")
-
-	seq := g.QueryCursor(context.Background())
-	for _, err := range seq {
-		if err == nil {
-			t.Fatal("expected ErrLimitZero, got nil")
-		}
-		if !errors.Is(err, ErrLimitZero) {
-			t.Errorf("expected ErrLimitZero, got: %v", err)
-		}
-		break
-	}
-}
 
 func TestValidateData_LimitExceeded_QueryCursor_Mongo(t *testing.T) {
 	m := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))

@@ -23,7 +23,7 @@ func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -34,7 +34,7 @@ func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 1, Name: "Alice", CreatedAt: 100},
 				{ID: 2, Name: "Bob", CreatedAt: 200},
-			}, []any{uint32(2)}, nil
+			}, []any{uint32(2)}, 0, nil
 		case 2:
 			// 第二次查询，cursorValues 应为 [2]（上一批最后一条的 ID）
 			if len(cursorValues) != 1 || cursorValues[0] != uint32(2) {
@@ -42,14 +42,14 @@ func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 3, Name: "Charlie", CreatedAt: 300},
-			}, []any{uint32(3)}, nil // 返回 1 条 < batchSize，终止
+			}, []any{uint32(3)}, 0, nil // 返回 1 条 < batchSize，终止
 		default:
 			t.Error("不应有第三次调用")
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	var results []*CursorTestEntity
 	for item, err := range seq {
@@ -73,11 +73,11 @@ func TestBuildCursorIterator_EmptyFirstBatch(t *testing.T) {
 	cursorFields := []string{"ID"}
 	batchSize := 10
 
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
-		return []*CursorTestEntity{}, nil, nil
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		return []*CursorTestEntity{}, nil, 0, nil
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	count := 0
 	for _, err := range seq {
@@ -99,11 +99,11 @@ func TestBuildCursorIterator_ErrorHandling(t *testing.T) {
 	batchSize := 10
 
 	expectedErr := errors.New("database connection failed")
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
-		return nil, nil, expectedErr
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		return nil, nil, 0, expectedErr
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	var gotErr error
 	for _, err := range seq {
@@ -128,7 +128,7 @@ func TestBuildCursorIterator_BreakEarlyTermination(t *testing.T) {
 	batchSize := 10
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		// 返回满批数据
 		items := make([]*CursorTestEntity, batchSize)
@@ -136,10 +136,10 @@ func TestBuildCursorIterator_BreakEarlyTermination(t *testing.T) {
 			items[i] = &CursorTestEntity{ID: uint32(callCount*batchSize + i + 1), Name: "test"}
 		}
 		lastID := items[len(items)-1].ID
-		return items, []any{lastID}, nil
+		return items, []any{lastID}, 0, nil
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	count := 0
 	for _, err := range seq {
@@ -170,15 +170,15 @@ func TestBuildCursorIterator_ContextCancellation(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		return []*CursorTestEntity{
 			{ID: uint32(callCount*2 - 1), Name: "test1"},
 			{ID: uint32(callCount * 2), Name: "test2"},
-		}, []any{uint32(callCount * 2)}, nil
+		}, []any{uint32(callCount * 2)}, 0, nil
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	count := 0
 	var gotErr error
@@ -207,12 +207,12 @@ func TestBuildCursorIterator_NoCursorFields(t *testing.T) {
 	var cursorFields []string // 空
 	batchSize := 10
 
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		t.Error("fetchBatch should not be called")
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	var gotErr error
 	for _, err := range seq {
@@ -237,7 +237,7 @@ func TestBuildCursorIterator_MultiFieldCursor(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -247,7 +247,7 @@ func TestBuildCursorIterator_MultiFieldCursor(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 1, Name: "Alice", CreatedAt: 100},
 				{ID: 2, Name: "Bob", CreatedAt: 100},
-			}, []any{int64(100), uint32(2)}, nil
+			}, []any{int64(100), uint32(2)}, 0, nil
 		case 2:
 			// 应该提取到 [100, 2]（CreatedAt=100, ID=2）
 			if len(cursorValues) != 2 {
@@ -262,13 +262,13 @@ func TestBuildCursorIterator_MultiFieldCursor(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 3, Name: "Charlie", CreatedAt: 200},
-			}, []any{int64(200), uint32(3)}, nil
+			}, []any{int64(200), uint32(3)}, 0, nil
 		default:
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	var results []*CursorTestEntity
 	for item, err := range seq {
@@ -290,7 +290,7 @@ func TestBuildCursorIterator_CustomNextCursorValues(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -298,7 +298,7 @@ func TestBuildCursorIterator_CustomNextCursorValues(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 1, Name: "Alice"},
 				{ID: 2, Name: "Bob"},
-			}, []any{float64(1.5), "doc_2"}, nil
+			}, []any{float64(1.5), "doc_2"}, 0, nil
 		case 2:
 			// 验证传入的是上一批返回的自定义 cursorValues
 			if len(cursorValues) != 2 {
@@ -313,13 +313,13 @@ func TestBuildCursorIterator_CustomNextCursorValues(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 3, Name: "Charlie"},
-			}, nil, nil
+			}, nil, 0, nil
 		default:
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
 	}
 
-seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
 
 	var results []*CursorTestEntity
 	for item, err := range seq {
@@ -334,8 +334,6 @@ seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, 
 	}
 }
 
-
-
 // TestListQueryCursor_WithMockQuerier 测试 List.QueryCursor 使用 MockQuerier
 func TestListQueryCursor_WithMockQuerier(t *testing.T) {
 	ctx := context.Background()
@@ -347,6 +345,8 @@ func TestListQueryCursor_WithMockQuerier(t *testing.T) {
 	// 设置预期调用
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
 	mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 
@@ -395,7 +395,7 @@ func TestBuildCursorIterator_WithInitialCursorValues(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -408,7 +408,7 @@ func TestBuildCursorIterator_WithInitialCursorValues(t *testing.T) {
 			return []*CursorTestEntity{
 				{ID: 101, Name: "Alice"},
 				{ID: 102, Name: "Bob"},
-			}, []any{uint32(102)}, nil
+			}, []any{uint32(102)}, 0, nil
 		case 2:
 			// 第二次查询，cursorValues 应为上一批最后一条的 ID [102]
 			if len(cursorValues) != 1 || cursorValues[0] != uint32(102) {
@@ -416,14 +416,14 @@ func TestBuildCursorIterator_WithInitialCursorValues(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 103, Name: "Charlie"},
-			}, []any{uint32(103)}, nil
+			}, []any{uint32(103)}, 0, nil
 		default:
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
 	}
 
 	initialValues := []any{uint32(100)}
-	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, initialValues, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, initialValues, false, fetchBatch, nil)
 
 	var results []*CursorTestEntity
 	for item, err := range seq {
@@ -448,7 +448,7 @@ func TestBuildCursorIterator_WithMultiFieldInitialValues(t *testing.T) {
 	batchSize := 2
 
 	callCount := 0
-	fetchBatch := func(ctx context.Context, cursorValues []any) ([]*CursorTestEntity, []any, error) {
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -465,14 +465,14 @@ func TestBuildCursorIterator_WithMultiFieldInitialValues(t *testing.T) {
 			}
 			return []*CursorTestEntity{
 				{ID: 11, Name: "Alice", CreatedAt: 600},
-			}, nil, nil
+			}, nil, 0, nil
 		default:
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
 	}
 
 	initialValues := []any{int64(500), uint32(10)}
-	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, initialValues, fetchBatch)
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, initialValues, false, fetchBatch, nil)
 
 	var results []*CursorTestEntity
 	for item, err := range seq {
@@ -546,6 +546,8 @@ func TestListQueryCursor_WithCursorValueOption(t *testing.T) {
 	// 设置预期调用：SetStart、SetLimit、SetCursorField、SetCursorValue 都应被调用
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("created_at", "id").Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorValue(int64(500), uint32(10)).Return(mockQuerier)
 
@@ -594,6 +596,8 @@ func TestListQueryCursor_WithStartOption(t *testing.T) {
 
 	// 设置预期调用：SetLimit、SetCursorField、SetStart 都应被调用
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
 	mockQuerier.EXPECT().SetStart(uint32(100)).Return(mockQuerier)
 
@@ -617,6 +621,433 @@ func TestListQueryCursor_WithStartOption(t *testing.T) {
 	seq := list.QueryCursor(ctx,
 		WithCursorField("ID"),
 		WithStart(100),
+		WithLimit(10),
+	)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+// TestBuildCursorIterator_NeedTotalViaPointer 测试 buildCursorIterator 通过 totalPtr 接收首批次总数
+func TestBuildCursorIterator_NeedTotalViaPointer(t *testing.T) {
+	ctx := context.Background()
+	cursorFields := []string{"ID"}
+	batchSize := 2
+
+	callCount := 0
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			// 首批次：isFirstBatch 应为 true，返回 total=100
+			if !isFirstBatch {
+				t.Error("首批次 isFirstBatch 应为 true")
+			}
+			return []*CursorTestEntity{
+				{ID: 1, Name: "Alice"},
+				{ID: 2, Name: "Bob"},
+			}, []any{uint32(2)}, 100, nil
+		case 2:
+			// 第二批次：isFirstBatch 应为 false，total 返回 0（不再查 Count）
+			if isFirstBatch {
+				t.Error("第二批次 isFirstBatch 应为 false")
+			}
+			return []*CursorTestEntity{
+				{ID: 3, Name: "Charlie"},
+			}, []any{uint32(3)}, 0, nil
+		default:
+			return nil, nil, 0, nil
+		}
+	}
+
+	var total int64
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, &total)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 3 {
+		t.Errorf("expected 3 results, got %d", len(results))
+	}
+	// 验证 totalPtr 接收到了首批次返回的总数
+	if total != 100 {
+		t.Errorf("expected total=100, got %d", total)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 batch calls, got %d", callCount)
+	}
+}
+
+// TestBuildCursorIterator_NeedTotalNilPointer 测试 totalPtr 为 nil 时不会 panic
+func TestBuildCursorIterator_NeedTotalNilPointer(t *testing.T) {
+	ctx := context.Background()
+	cursorFields := []string{"ID"}
+	batchSize := 10
+
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		// 即使返回了 total，totalPtr 为 nil 也不应 panic
+		return []*CursorTestEntity{
+			{ID: 1, Name: "Alice"},
+		}, nil, 50, nil
+	}
+
+	// totalPtr 传 nil，不应 panic
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, nil)
+
+	count := 0
+	for _, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		count++
+	}
+
+	if count != 1 {
+		t.Errorf("expected 1 result, got %d", count)
+	}
+}
+
+// TestBuildCursorIterator_SingleBatchMode 测试 singleBatch=true（needPagination=true）只获取单批次
+func TestBuildCursorIterator_SingleBatchMode(t *testing.T) {
+	ctx := context.Background()
+	cursorFields := []string{"ID"}
+	batchSize := 3
+
+	callCount := 0
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		callCount++
+		// 返回满批数据（3 条 == batchSize）
+		return []*CursorTestEntity{
+			{ID: 1, Name: "Alice"},
+			{ID: 2, Name: "Bob"},
+			{ID: 3, Name: "Charlie"},
+		}, []any{uint32(3)}, 50, nil
+	}
+
+	var total int64
+	// singleBatch=true，即使返回满批数据也应在第一批后终止
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, true, fetchBatch, &total)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 3 {
+		t.Errorf("expected 3 results, got %d", len(results))
+	}
+	// singleBatch 模式下只应调用一次 fetchBatch
+	if callCount != 1 {
+		t.Errorf("expected 1 batch call in singleBatch mode, got %d", callCount)
+	}
+	// 验证 total 仍然被正确收集
+	if total != 50 {
+		t.Errorf("expected total=50, got %d", total)
+	}
+}
+
+// TestBuildCursorIterator_SingleBatchWithNeedTotal 测试 singleBatch + needTotal 组合
+// 模拟 needPagination=true 场景下只取一页数据但仍需要总数
+func TestBuildCursorIterator_SingleBatchWithNeedTotal(t *testing.T) {
+	ctx := context.Background()
+	cursorFields := []string{"CreatedAt", "ID"}
+	batchSize := 2
+
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		if !isFirstBatch {
+			t.Error("singleBatch 模式下不应有第二次调用")
+		}
+		return []*CursorTestEntity{
+			{ID: 1, Name: "Alice", CreatedAt: 100},
+			{ID: 2, Name: "Bob", CreatedAt: 200},
+		}, []any{int64(200), uint32(2)}, 999, nil
+	}
+
+	var total int64
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, true, fetchBatch, &total)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+	if total != 999 {
+		t.Errorf("expected total=999, got %d", total)
+	}
+}
+
+// TestBuildCursorIterator_IsFirstBatchFlag 测试 isFirstBatch 标记在多批次中的正确传递
+func TestBuildCursorIterator_IsFirstBatchFlag(t *testing.T) {
+	ctx := context.Background()
+	cursorFields := []string{"ID"}
+	batchSize := 1
+
+	var firstBatchFlags []bool
+	callCount := 0
+	fetchBatch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, error) {
+		callCount++
+		firstBatchFlags = append(firstBatchFlags, isFirstBatch)
+		if callCount <= 3 {
+			return []*CursorTestEntity{
+				{ID: uint32(callCount), Name: "test"},
+			}, []any{uint32(callCount)}, 42, nil
+		}
+		return nil, nil, 0, nil // 第四次返回空，终止
+	}
+
+	var total int64
+	seq := buildCursorIterator[CursorTestEntity](ctx, cursorFields, batchSize, nil, false, fetchBatch, &total)
+
+	for _, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	// 验证 isFirstBatch 标记：第一次为 true，后续为 false
+	if len(firstBatchFlags) != 4 {
+		t.Fatalf("expected 4 batch calls, got %d", len(firstBatchFlags))
+	}
+	if !firstBatchFlags[0] {
+		t.Error("expected firstBatchFlags[0]=true")
+	}
+	for i := 1; i < len(firstBatchFlags); i++ {
+		if firstBatchFlags[i] {
+			t.Errorf("expected firstBatchFlags[%d]=false, got true", i)
+		}
+	}
+	// 只有首批次的 total 被收集
+	if total != 42 {
+		t.Errorf("expected total=42 (from first batch), got %d", total)
+	}
+}
+
+// TestListQueryCursor_WithNeedTotalTrue 测试 List.QueryCursor 传递 needTotal=true
+func TestListQueryCursor_WithNeedTotalTrue(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
+
+	// 设置预期调用：验证 SetNeedTotal(true) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
+
+	expectedItems := []*CursorTestEntity{
+		{ID: 1, Name: "Alice"},
+	}
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](func(yield func(*CursorTestEntity, error) bool) {
+		for _, item := range expectedItems {
+			if !yield(item, nil) {
+				return
+			}
+		}
+	}))
+
+	list := NewList[CursorTestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("ID"),
+		WithNeedTotal(true),
+	)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+// TestListQueryCursor_WithNeedTotalFalse 测试 List.QueryCursor 传递 needTotal=false
+func TestListQueryCursor_WithNeedTotalFalse(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
+
+	// 设置预期调用：验证 SetNeedTotal(false) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(false).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
+
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](func(yield func(*CursorTestEntity, error) bool) {
+		yield(&CursorTestEntity{ID: 1, Name: "Alice"}, nil)
+	}))
+
+	list := NewList[CursorTestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("ID"),
+		WithNeedTotal(false),
+	)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+}
+
+// TestListQueryCursor_WithNeedPaginationTrue 测试 List.QueryCursor 传递 needPagination=true（单批次模式）
+func TestListQueryCursor_WithNeedPaginationTrue(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
+
+	// 设置预期调用：验证 SetNeedPagination(true) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
+
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](func(yield func(*CursorTestEntity, error) bool) {
+		yield(&CursorTestEntity{ID: 1, Name: "Alice"}, nil)
+		yield(&CursorTestEntity{ID: 2, Name: "Bob"}, nil)
+	}))
+
+	list := NewList[CursorTestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("ID"),
+		WithNeedPagination(true),
+		WithLimit(10),
+	)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+// TestListQueryCursor_WithNeedPaginationFalse 测试 List.QueryCursor 传递 needPagination=false（全量遍历模式）
+func TestListQueryCursor_WithNeedPaginationFalse(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
+
+	// 设置预期调用：验证 SetNeedPagination(false) 被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(false).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
+
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](func(yield func(*CursorTestEntity, error) bool) {
+		for i := uint32(1); i <= 5; i++ {
+			if !yield(&CursorTestEntity{ID: i, Name: "test"}, nil) {
+				return
+			}
+		}
+	}))
+
+	list := NewList[CursorTestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("ID"),
+		WithNeedPagination(false),
+		WithLimit(10),
+	)
+
+	var results []*CursorTestEntity
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		results = append(results, item)
+	}
+
+	if len(results) != 5 {
+		t.Errorf("expected 5 results, got %d", len(results))
+	}
+}
+
+// TestListQueryCursor_WithNeedPaginationAndNeedTotal 测试 List.QueryCursor 同时传递 needPagination=true 和 needTotal=true
+func TestListQueryCursor_WithNeedPaginationAndNeedTotal(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
+
+	// 设置预期调用：验证两个选项都被正确传递
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("created_at", "id").Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorValue(int64(100), uint32(5)).Return(mockQuerier)
+
+	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](func(yield func(*CursorTestEntity, error) bool) {
+		yield(&CursorTestEntity{ID: 6, Name: "Alice", CreatedAt: 200}, nil)
+		yield(&CursorTestEntity{ID: 7, Name: "Bob", CreatedAt: 300}, nil)
+	}))
+
+	list := NewList[CursorTestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	seq := list.QueryCursor(ctx,
+		WithCursorField("created_at", "id"),
+		WithCursorValue(int64(100), uint32(5)),
+		WithNeedPagination(true),
+		WithNeedTotal(true),
 		WithLimit(10),
 	)
 

@@ -169,7 +169,7 @@ func (g *GormBuilder[R]) buildQuery(db *gorm.DB) *gorm.DB {
 	}
 
 	if g.builder.needPagination {
-		if g.builder.limit < 1 {
+		if g.builder.limit == 0 {
 			g.builder.limit = defaultLimit
 		}
 		query = query.Offset(int(g.builder.start)).Limit(int(g.builder.limit))
@@ -241,7 +241,7 @@ func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
 // buildCursorBatchSize 获取游标查询的批次大小
 func (g *GormBuilder[R]) buildCursorBatchSize() int {
 	batchSize := int(g.builder.limit)
-	if batchSize < 1 {
+	if batchSize == 0 {
 		batchSize = defaultLimit
 	}
 	return batchSize
@@ -305,7 +305,8 @@ func (g *GormBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 
 // doCursorQuery 执行 GORM 游标分页的单批次查询
 // 构建基于行值表达式的 SQL 游标条件
-func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) ([]*R, []any, error) {
+// isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
+func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
 	query := g.buildCursorQuery(g.builder.data.DB.WithContext(ctx))
 
 	// 构建游标条件（仅在非首次查询时添加）
@@ -327,18 +328,33 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) 
 	}
 
 	var list []*R
-	if err := query.Find(&list).Error; err != nil {
-		return nil, nil, err
+	var total int64
+
+	if err := util.WaitAndGo(func() error {
+		return query.Find(&list).Error
+	}, func() error {
+		// 首批次且需要总数时，并行执行数据查询和 Count 查询
+		if !isFirstBatch || !g.builder.needTotal || g.afterHook == nil {
+			return nil
+		}
+
+		countQuery := g.builder.data.DB.WithContext(ctx).Model(new(R))
+		if g.filter != nil {
+			countQuery = countQuery.Scopes(g.filter)
+		}
+		return countQuery.Count(&total).Error
+	}); err != nil {
+		return nil, nil, 0, err
 	}
 
 	if len(list) == 0 {
-		return list, nil, nil
+		return list, nil, total, nil
 	}
 
 	// 通过 schema.Parse 解析结构体元数据，利用 LookUpField 按列名提取游标值
 	s, err := schema.Parse(new(R), &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("schema parse failed: %w", err)
+		return nil, nil, 0, fmt.Errorf("schema parse failed: %w", err)
 	}
 
 	lastItem := list[len(list)-1]
@@ -347,11 +363,11 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any) 
 	for _, fieldName := range g.builder.cursorFields {
 		field := s.LookUpField(fieldName)
 		if field == nil {
-			return nil, nil, fmt.Errorf("cursor field %q not found in schema", fieldName)
+			return nil, nil, 0, fmt.Errorf("cursor field %q not found in schema", fieldName)
 		}
 		val := field.ReflectValueOf(ctx, rv)
 		nextCursorValues = append(nextCursorValues, val.Interface())
 	}
 
-	return list, nextCursorValues, nil
+	return list, nextCursorValues, total, nil
 }
