@@ -823,7 +823,7 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### ElasticSearch Cursor Pagination
 
-ES cursor pagination uses the `search_after` API internally. Sort values from the last hit are automatically used as the next batch's `search_after` parameter:
+ES deep pagination uses `search_after + PIT (Point in Time)` by default to keep the index snapshot stable across requests. This avoids inconsistent ordering when refresh happens between batches.
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
@@ -832,6 +832,7 @@ b := builder.NewElasticSearchBuilder[Doc](
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at")
 b.SetSort(elastic.NewFieldSort("_id").Asc()) // auxiliary sort
+b.SetPITKeepAlive("2m")                       // optional, default is "1m"
 b.SetLimit(100)
 
 for doc, err := range b.QueryCursor(ctx) {
@@ -840,6 +841,12 @@ for doc, err := range b.QueryCursor(ctx) {
     }
     process(doc)
 }
+```
+
+If needed, PIT can be disabled and fallback to plain `search_after`:
+
+```go
+b.SetPITEnabled(false)
 ```
 
 #### Setting Initial Cursor Position

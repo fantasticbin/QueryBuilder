@@ -16,9 +16,11 @@ import (
 //	R: 查询结果的实体类型
 type ElasticSearchBuilder[R any] struct {
 	builder[*ElasticSearchBuilder[R], R]
-	index  string           // ES 索引名，仅 ElasticSearch 构建器专属
-	filter elastic.Query    // ES 专属过滤条件
-	sort   []elastic.Sorter // ES 专属排序条件
+	index        string           // ES 索引名，仅 ElasticSearch 构建器专属
+	filter       elastic.Query    // ES 专属过滤条件
+	sort         []elastic.Sorter // ES 专属排序条件
+	pitEnabled   bool             // 游标查询是否启用 PIT（Point in Time）
+	pitKeepAlive string           // PIT 保活时长，如 1m/2m
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -29,7 +31,9 @@ func (e *ElasticSearchBuilder[R]) self() *ElasticSearchBuilder[R] {
 // NewElasticSearchBuilder 创建 ElasticSearch 专属查询构建器实例
 func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchBuilder[R] {
 	e := &ElasticSearchBuilder[R]{
-		index: index,
+		index:        index,
+		pitEnabled:   true,
+		pitKeepAlive: "1m",
 	}
 	e.builder.data = data
 	e.builder.dataSource = ElasticSearch
@@ -43,8 +47,10 @@ func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchB
 // 注意：原 ElasticSearchBuilder 非并发安全，请勿在多 goroutine 中共享同一实例进行写操作
 func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
 	cloned := &ElasticSearchBuilder[R]{
-		index:  e.index,
-		filter: e.filter,
+		index:        e.index,
+		filter:       e.filter,
+		pitEnabled:   e.pitEnabled,
+		pitKeepAlive: e.pitKeepAlive,
 	}
 	e.builder.cloneBase(&cloned.builder)
 	cloned.builder.setSelf(cloned, cloned)
@@ -55,6 +61,18 @@ func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
 		copy(cloned.sort, e.sort)
 	}
 	return cloned
+}
+
+// SetPITEnabled 设置游标查询是否启用 PIT（Point in Time）
+func (e *ElasticSearchBuilder[R]) SetPITEnabled(enabled bool) *ElasticSearchBuilder[R] {
+	e.pitEnabled = enabled
+	return e
+}
+
+// SetPITKeepAlive 设置 PIT 保活时长（例如："1m"、"2m"）
+func (e *ElasticSearchBuilder[R]) SetPITKeepAlive(keepAlive string) *ElasticSearchBuilder[R] {
+	e.pitKeepAlive = keepAlive
+	return e
 }
 
 // SetESIndex 设置 Elasticsearch 索引名（仅 ElasticSearch 构建器专属方法）
@@ -160,7 +178,11 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 		}
 	}
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
-	return e.builder.executeCursorWithMiddlewares(ctx, e.doCursorQuery)
+	// 通过闭包复用同一个 pitID，在单次 QueryCursor 生命周期内持续传递给 doCursorQuery。
+	var pitID string
+	return e.builder.executeCursorWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
+		return e.doCursorQuery(ctx, cursorValues, isFirstBatch, &pitID)
+	})
 }
 
 // doQuery 执行实际的 ElasticSearch 查询逻辑
@@ -391,7 +413,7 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 // doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 // 使用 search_after API，将上一批最后一条文档的 sort values 作为下一批的 search_after 参数
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
-func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
+func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, pitID *string) (list []*R, nextCursorValues []any, total int64, err error) {
 	if e.index == "" {
 		return nil, nil, 0, errors.New("elasticsearch index not configured")
 	}
@@ -407,9 +429,37 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 	}
 
 	searchService := e.builder.data.ElasticSearch.Search().
-		Index(e.index).
 		Query(filter).
 		Size(batchSize)
+
+	openedPITInThisCall := false
+	if e.pitEnabled {
+		keepAlive := e.pitKeepAlive
+		if keepAlive == "" {
+			keepAlive = "1m"
+		}
+
+		if *pitID == "" {
+			pitResp, err := e.builder.data.ElasticSearch.OpenPointInTime(e.index).KeepAlive(keepAlive).Do(ctx)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			*pitID = pitResp.Id
+			openedPITInThisCall = true
+		}
+
+		defer func() {
+			// 若本次调用期间出现错误，关闭本次生命周期开启的 PIT，避免资源泄漏
+			if err != nil && openedPITInThisCall && *pitID != "" {
+				_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
+				*pitID = ""
+			}
+		}()
+
+		searchService = searchService.PointInTime(elastic.NewPointInTimeWithKeepAlive(*pitID, keepAlive))
+	} else {
+		searchService = searchService.Index(e.index)
+	}
 
 	// 应用字段投影
 	if len(e.builder.fields) > 0 {
@@ -425,8 +475,6 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		searchService = searchService.SearchAfter(cursorValues...)
 	}
 
-	var list []*R
-	var total int64
 	var searchResult *elastic.SearchResult
 
 	if err := util.WaitAndGo(func() error {
@@ -464,7 +512,6 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 	}
 
 	// 从最后一条 hit 的 Sort 字段提取 sort values 作为下一批的 search_after 参数
-	var nextCursorValues []any
 	if len(searchResult.Hits.Hits) > 0 {
 		lastHit := searchResult.Hits.Hits[len(searchResult.Hits.Hits)-1]
 		if lastHit.Sort != nil {
@@ -473,6 +520,11 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 				nextCursorValues[i] = v
 			}
 		}
+	}
+
+	if e.pitEnabled && len(searchResult.Hits.Hits) < batchSize && *pitID != "" {
+		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
+		*pitID = ""
 	}
 
 	return list, nextCursorValues, total, nil

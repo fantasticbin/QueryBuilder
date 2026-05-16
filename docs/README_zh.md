@@ -821,7 +821,7 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### ElasticSearch 游标分页
 
-ES 游标分页内部使用 `search_after` API。最后一条文档的 sort values 会自动作为下一批的 `search_after` 参数：
+ES 深分页默认使用 `search_after + PIT (Point in Time)`，在跨请求分页期间保持索引快照一致，避免 refresh 导致排序不稳定。
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
@@ -830,6 +830,7 @@ b := builder.NewElasticSearchBuilder[Doc](
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at")
 b.SetSort(elastic.NewFieldSort("_id").Asc()) // 辅助排序
+b.SetPITKeepAlive("2m")                       // 可选，默认 "1m"
 b.SetLimit(100)
 
 for doc, err := range b.QueryCursor(ctx) {
@@ -838,6 +839,12 @@ for doc, err := range b.QueryCursor(ctx) {
     }
     process(doc)
 }
+```
+
+如需回退为纯 `search_after`，可显式关闭 PIT：
+
+```go
+b.SetPITEnabled(false)
 ```
 
 #### 设置游标初始位置
