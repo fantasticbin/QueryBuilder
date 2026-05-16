@@ -16,8 +16,8 @@ import (
 type DataSource int
 
 const (
-	// MySQL 数据源
-	MySQL DataSource = iota
+	// Gorm 数据源
+	Gorm DataSource = iota
 	// MongoDB 数据源
 	MongoDB
 	// ElasticSearch 数据源
@@ -55,7 +55,7 @@ func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.C
 // CheckConfigured 检查指定数据源是否已正确配置
 func (p *DBProxy) CheckConfigured(ds DataSource) error {
 	switch ds {
-	case MySQL:
+	case Gorm:
 		if p.DB == nil {
 			return ErrDataNotConfigured
 		}
@@ -565,7 +565,7 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 // 返回 Querier[R] 通用查询接口
 func NewBuilder[R any](ds DataSource, data *DBProxy) Querier[R] {
 	switch ds {
-	case MySQL:
+	case Gorm:
 		return NewGormBuilder[R](data)
 	case MongoDB:
 		return NewMongoBuilder[R](data)

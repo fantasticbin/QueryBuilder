@@ -16,7 +16,7 @@ import (
 // GormScope GORM 查询作用域类型
 type GormScope = func(*gorm.DB) *gorm.DB
 
-// GormBuilder MySQL（GORM）专属查询构建器
+// GormBuilder GORM 兼容数据库专属查询构建器
 // 泛型参数:
 //
 //	R: 查询结果的实体类型
@@ -35,7 +35,7 @@ func (g *GormBuilder[R]) self() *GormBuilder[R] {
 func NewGormBuilder[R any](data *DBProxy) *GormBuilder[R] {
 	g := &GormBuilder[R]{}
 	g.builder.data = data
-	g.builder.dataSource = MySQL
+	g.builder.dataSource = Gorm
 	g.builder.limit = defaultLimit
 	g.builder.setSelf(g, g)
 	return g

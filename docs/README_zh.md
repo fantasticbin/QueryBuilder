@@ -4,7 +4,7 @@
 
 # QueryBuilder
 
-一个用于构建类型安全列表查询的 Go 库，支持多种数据源。利用 Go 1.26 自引用泛型约束特性，为 MySQL（GORM）、MongoDB、ElasticSearch 提供专属查询构建器——零类型断言、灵活中间件、统一查询接口。
+一个用于构建类型安全列表查询的 Go 库，支持多种数据源。利用 Go 1.26 自引用泛型约束特性，为 GORM 兼容数据库（如 MySQL/PostgreSQL/SQLite/SQL Server）、MongoDB、ElasticSearch 提供专属查询构建器——零类型断言、灵活中间件、统一查询接口。
 
 ---
 
@@ -21,7 +21,7 @@
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
 - **查询元信息**：中间件可通过 `builder.GetQueryMeta()` 直接获取查询元数据——数据源类型、分页信息和查询开始时间无需通过 context 注入即可获取。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
-- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 MySQL（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
+- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
@@ -132,7 +132,7 @@ import (
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
     list := builder.NewList[model.User]()
-    list.SetDataSource(builder.MySQL)
+    list.SetDataSource(builder.Gorm)
 
     // 使用 SetScope 设置 filter 和 sort
     list.SetScope(builder.NewGormScope[model.User](
@@ -168,7 +168,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
 
 ```go
 list := builder.NewList[model.User]()
-list.SetDataSource(builder.MySQL)
+list.SetDataSource(builder.Gorm)
 
 // 添加耗时统计中间件
 list.Use(func(
@@ -206,7 +206,7 @@ result, total, err := list.Query(ctx,
 
 | 数据源 | 实现方式 |
 |--------|---------|
-| MySQL (GORM) | `db.Select(fields...)` |
+| GORM-Compatible DB (GORM) | `db.Select(fields...)` |
 | MongoDB | `options.Find().SetProjection(bson.D{...})` |
 | Elasticsearch | `FetchSourceContext(true).Include(fields...)` |
 
@@ -449,7 +449,7 @@ type CacheKeyBuilder interface {
 | 维度 | 来源 | 说明 |
 |------|------|------|
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | 业务资源名（如 "users"、"orders"），隔离不同查询场景 |
-| `datasource` | `QueryMeta.DataSource` | 数据源类型（MySQL/MongoDB/ElasticSearch） |
+| `datasource` | `QueryMeta.DataSource` | 数据源类型（Gorm/MongoDB/ElasticSearch） |
 | `fields` | `QueryMeta.Fields` | 查询字段投影 |
 | `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | 业务过滤条件（map/struct/切片/标量） |
@@ -638,7 +638,7 @@ func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `DataSource` | `DataSource` | 数据源类型（MySQL/MongoDB/ElasticSearch） |
+| `DataSource` | `DataSource` | 数据源类型（Gorm/MongoDB/ElasticSearch） |
 | `Start` | `uint32` | 分页起始位置 |
 | `Limit` | `uint32` | 每页数据条数 |
 | `NeedTotal` | `bool` | 是否需要查询总数 |
@@ -734,7 +734,7 @@ docs, total, err := esBuilder.QueryList(ctx)
 
 **工作原理：**
 - 每批数据通过游标条件（而非 OFFSET）获取，无论数据深度如何都能保持稳定性能。
-- MySQL 使用行值表达式（`WHERE (col1, col2) > (v1, v2)`），MongoDB 使用 `$gt` 复合条件，ElasticSearch 使用 `search_after` API。
+- Gorm 使用行值表达式（`WHERE (col1, col2) > (v1, v2)`），MongoDB 使用 `$gt` 复合条件，ElasticSearch 使用 `search_after` API。
 - 游标值从每批最后一条记录中自动提取——无需手动管理游标。
 - 支持单字段和多字段游标。
 
@@ -785,7 +785,7 @@ for order, err := range b.QueryCursor(ctx) {
 
 ```go
 list := builder.NewList[User]()
-list.SetDataSource(builder.MySQL)
+list.SetDataSource(builder.Gorm)
 list.SetScope(builder.NewGormScope[User](
     func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
     nil, // 无需自定义排序——游标字段自动处理排序
@@ -992,7 +992,7 @@ sql, err := b.Explain(ctx)
 在 `List` 模式下，通过 `List.SetScope` 配合 Scope 辅助函数设置 filter/sort，无需手写中间件签名和类型断言：
 
 ```go
-// MySQL (GORM)
+// GORM 兼容数据库
 list.SetScope(builder.NewGormScope[model.User](
     func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
     func(db *gorm.DB) *gorm.DB { return db.Order("created_at DESC") },
@@ -1056,7 +1056,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 
 | 数据源           | 构建器 | Filter 类型 | Sort 类型 |
 |---------------|--------|-------------|-----------|
-| MySQL (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| GORM-Compatible DB (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
 | MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
 | ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 

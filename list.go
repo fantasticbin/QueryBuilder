@@ -34,7 +34,7 @@ func NewListWithData[R any](ds DataSource, data *DBProxy) *List[R] {
 }
 
 // SetDataSource 设置数据源类型
-// 支持不同数据源的查询实现，如 MySQL、MongoDB、ElasticSearch
+// 支持不同数据源的查询实现，如 Gorm、MongoDB、ElasticSearch
 // 通过该方法指定数据源类型，查询时将自动创建对应的专属构建器
 func (l *List[R]) SetDataSource(ds DataSource) *List[R] {
 	l.dataSource = ds
