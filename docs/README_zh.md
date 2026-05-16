@@ -821,7 +821,8 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### ElasticSearch 游标分页
 
-ES 默认使用 `search_after + PIT (Point in Time)` 进行深分页，在跨请求分页期间保持索引快照一致、避免 refresh 导致排序不稳定；也可退化为纯 `search_after` 分页（关闭 PIT）。
+ES 默认使用 `search_after + PIT (Point in Time)` 进行深分页，在跨请求分页期间保持索引快照一致、避免 refresh 导致排序不稳定；
+也可退化为纯 `search_after` 分页（关闭 PIT），最后一条文档的 sort values 会自动作为下一批的 `search_after` 参数：
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](

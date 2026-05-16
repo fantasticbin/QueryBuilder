@@ -823,7 +823,8 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### ElasticSearch Cursor Pagination
 
-ES uses `search_after + PIT (Point in Time)` by default for deep pagination to keep the index snapshot stable across requests and avoid inconsistent ordering when refresh happens between batches; it can also degrade to plain `search_after` pagination when PIT is disabled.
+ES uses `search_after + PIT (Point in Time)` by default for deep pagination to keep the index snapshot stable across requests and avoid inconsistent ordering when refresh happens between batches; 
+it can also degrade to plain `search_after` pagination when PIT is disabled. Sort values from the last hit are automatically used as the next batch's `search_after` parameter:
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](

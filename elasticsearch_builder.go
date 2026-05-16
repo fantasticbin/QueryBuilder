@@ -413,7 +413,12 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 // doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 // 使用 search_after API，将上一批最后一条文档的 sort values 作为下一批的 search_after 参数
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
-func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, pitID *string) (list []*R, nextCursorValues []any, total int64, err error) {
+func (e *ElasticSearchBuilder[R]) doCursorQuery(
+	ctx context.Context,
+	cursorValues []any,
+	isFirstBatch bool,
+	pitID *string,
+) (list []*R, nextCursorValues []any, total int64, err error) {
 	if e.index == "" {
 		return nil, nil, 0, errors.New("elasticsearch index not configured")
 	}
@@ -432,7 +437,6 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		Query(filter).
 		Size(batchSize)
 
-	openedPITInThisCall := false
 	if e.pitEnabled {
 		keepAlive := e.pitKeepAlive
 		if keepAlive == "" {
@@ -445,16 +449,15 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 				return nil, nil, 0, err
 			}
 			*pitID = pitResp.Id
-			openedPITInThisCall = true
-		}
 
-		defer func() {
-			// 若本次调用期间出现错误，关闭本次生命周期开启的 PIT，避免资源泄漏
-			if err != nil && openedPITInThisCall && *pitID != "" {
-				_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
-				*pitID = ""
-			}
-		}()
+			defer func() {
+				// 若本次调用期间出现错误，关闭本次生命周期开启的 PIT，避免资源泄漏
+				if err != nil {
+					_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
+					*pitID = ""
+				}
+			}()
+		}
 
 		searchService = searchService.PointInTime(elastic.NewPointInTimeWithKeepAlive(*pitID, keepAlive))
 	} else {
