@@ -204,10 +204,10 @@ result, total, err := list.Query(ctx,
 
 指定字段在所有数据源中均可使用：
 
-| 数据源 | 实现方式 |
-|--------|---------|
-| GORM-Compatible DB (GORM) | `db.Select(fields...)` |
-| MongoDB | `options.Find().SetProjection(bson.D{...})` |
+| 数据源           | 实现方式 |
+|---------------|---------|
+| Gorm          | `db.Select(fields...)` |
+| MongoDB       | `options.Find().SetProjection(bson.D{...})` |
 | Elasticsearch | `FetchSourceContext(true).Include(fields...)` |
 
 ### 查询钩子
@@ -992,7 +992,7 @@ sql, err := b.Explain(ctx)
 在 `List` 模式下，通过 `List.SetScope` 配合 Scope 辅助函数设置 filter/sort，无需手写中间件签名和类型断言：
 
 ```go
-// GORM 兼容数据库
+// MySQL (GORM)
 list.SetScope(builder.NewGormScope[model.User](
     func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
     func(db *gorm.DB) *gorm.DB { return db.Order("created_at DESC") },
@@ -1056,7 +1056,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 
 | 数据源           | 构建器 | Filter 类型 | Sort 类型 |
 |---------------|--------|-------------|-----------|
-| GORM-Compatible DB (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| Gorm          | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
 | MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
 | ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 

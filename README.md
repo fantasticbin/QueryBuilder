@@ -204,10 +204,10 @@ result, total, err := list.Query(ctx,
 
 Field selection works across all data sources:
 
-| Data Source | Implementation |
-|-------------|---------------|
-| GORM-Compatible DB (GORM) | `db.Select(fields...)` |
-| MongoDB | `options.Find().SetProjection(bson.D{...})` |
+| Data Source   | Implementation |
+|---------------|---------------|
+| Gorm          | `db.Select(fields...)` |
+| MongoDB       | `options.Find().SetProjection(bson.D{...})` |
 | Elasticsearch | `FetchSourceContext(true).Include(fields...)` |
 
 ### Query Hooks
@@ -994,7 +994,7 @@ sql, err := b.Explain(ctx)
 Under `List` mode, use `List.SetScope` with Scope helpers to set filter/sort — no manual middleware signatures or type assertions:
 
 ```go
-// GORM-Compatible DB (GORM)
+// MySQL (GORM)
 list.SetScope(builder.NewGormScope[model.User](
     func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
     func(db *gorm.DB) *gorm.DB { return db.Order("created_at DESC") },
@@ -1056,10 +1056,10 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 
 ## Supported Data Sources
 
-| Data Source   | Builder | Filter Type | Sort Type |
-|---------------|---------|-------------|-----------|
-| GORM-Compatible DB (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
-| MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
+| Data Source  | Builder | Filter Type | Sort Type |
+|--------------|---------|-------------|-----------|
+| Gorm         | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| MongoDB      | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
 | ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 
 ---
