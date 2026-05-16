@@ -20,7 +20,6 @@ type ElasticSearchBuilder[R any] struct {
 	index        string           // ES 索引名，仅 ElasticSearch 构建器专属
 	filter       elastic.Query    // ES 专属过滤条件
 	sort         []elastic.Sorter // ES 专属排序条件
-	pitEnabled   bool             // 是否启用 Point-in-Time 查询
 	pitKeepAlive time.Duration    // Point-in-Time 保持时间
 }
 
@@ -33,7 +32,6 @@ func (e *ElasticSearchBuilder[R]) self() *ElasticSearchBuilder[R] {
 func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchBuilder[R] {
 	e := &ElasticSearchBuilder[R]{
 		index:        index,
-		pitEnabled:   false,
 		pitKeepAlive: 0,
 	}
 	e.builder.data = data
@@ -50,7 +48,6 @@ func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
 	cloned := &ElasticSearchBuilder[R]{
 		index:        e.index,
 		filter:       e.filter,
-		pitEnabled:   e.pitEnabled,
 		pitKeepAlive: e.pitKeepAlive,
 	}
 	e.builder.cloneBase(&cloned.builder)
@@ -110,9 +107,6 @@ func (e *ElasticSearchBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 // SetNeedPagination 设置是否需要分页（实现 Querier 接口）
 func (e *ElasticSearchBuilder[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	e.builder.SetNeedPagination(needPagination)
-	if !needPagination {
-		e.pitEnabled = true
-	}
 	return e
 }
 
@@ -149,7 +143,6 @@ func (e *ElasticSearchBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 // SetPitKeepAlive 设置 Point-in-Time 查询的 keep alive 时间
 func (e *ElasticSearchBuilder[R]) SetPitKeepAlive(keepAlive time.Duration) *ElasticSearchBuilder[R] {
 	e.pitKeepAlive = keepAlive
-	e.pitEnabled = true
 	return e
 }
 
@@ -425,7 +418,7 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 }
 
 func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
-	if !e.pitEnabled || pitID == "" {
+	if e.needPagination || pitID == "" {
 		return
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -455,7 +448,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		Query(filter).
 		Size(batchSize)
 
-	if e.pitEnabled {
+	if !e.needPagination {
 		if *pitID == "" {
 			openResp, err := e.builder.data.ElasticSearch.OpenPointInTime(e.index).
 				KeepAlive(e.pitKeepAliveString()).
@@ -494,7 +487,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		if err != nil {
 			return err
 		}
-		if e.pitEnabled && *pitID != "" && searchResult.PitId != "" {
+		if !e.needPagination && *pitID != "" && searchResult.PitId != "" {
 			*pitID = searchResult.PitId
 		}
 
