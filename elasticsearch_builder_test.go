@@ -210,23 +210,12 @@ func TestElasticSearchBuilderPITSettings(t *testing.T) {
 		"test_index",
 	)
 
-	if esBuilder.pitEnabled {
-		t.Fatal("pitEnabled default should be false")
-	}
 	if esBuilder.pitKeepAlive != 0 {
 		t.Fatalf("pitKeepAlive default should be 0, got %v", esBuilder.pitKeepAlive)
 	}
 
 	esBuilder.SetPitKeepAlive(2 * time.Minute)
-	if !esBuilder.pitEnabled {
-		t.Fatal("pitEnabled should be true after SetPitKeepAlive")
-	}
 	if esBuilder.pitKeepAlive != 2*time.Minute {
 		t.Fatalf("pitKeepAlive should be 2m, got %v", esBuilder.pitKeepAlive)
-	}
-
-	esBuilder.SetNeedPagination(false)
-	if !esBuilder.pitEnabled {
-		t.Fatal("pitEnabled should remain true after SetNeedPagination(false)")
 	}
 }

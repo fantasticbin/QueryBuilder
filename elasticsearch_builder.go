@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"time"
 
@@ -176,7 +177,10 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	}
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
 	return func(yield func(*R, error) bool) {
-		defer e.closePIT(pitID)
+		defer func() {
+			e.closePIT(pitID)
+		}()
+
 		for item, err := range innerIter {
 			if !yield(item, err) {
 				return
@@ -411,10 +415,21 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 }
 
 func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
-	if e.pitKeepAlive <= 0 {
-		return time.Minute.String()
+	d := e.pitKeepAlive
+	if d <= 0 {
+		d = time.Minute
 	}
-	return e.pitKeepAlive.String()
+
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return fmt.Sprintf("%dms", int(d/time.Millisecond))
 }
 
 func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
