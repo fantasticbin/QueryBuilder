@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/olivere/elastic/v7"
 	"go.uber.org/mock/gomock"
@@ -43,7 +44,7 @@ func TestElasticsearchQueryList(t *testing.T) {
 		expectedErr    error
 	}{
 		{
-		name: "Elasticsearch无筛选查询&id升序",
+			name: "Elasticsearch无筛选查询&id升序",
 			mockSetup: func() {
 				mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
@@ -66,7 +67,7 @@ func TestElasticsearchQueryList(t *testing.T) {
 			expectedErr:   nil,
 		},
 		{
-		name: "Elasticsearch有筛选查询",
+			name: "Elasticsearch有筛选查询",
 			mockSetup: func() {
 				mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
@@ -201,5 +202,31 @@ func TestElasticsearchSortValidation(t *testing.T) {
 	}
 	if _, ok := invalidSort.([]elastic.Sorter); ok {
 		t.Error("string should not be a valid []elastic.Sorter")
+	}
+}
+func TestElasticSearchBuilderPITSettings(t *testing.T) {
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"test_index",
+	)
+
+	if esBuilder.pitEnabled {
+		t.Fatal("pitEnabled default should be false")
+	}
+	if esBuilder.pitKeepAlive != 0 {
+		t.Fatalf("pitKeepAlive default should be 0, got %v", esBuilder.pitKeepAlive)
+	}
+
+	esBuilder.SetPitKeepAlive(2 * time.Minute)
+	if !esBuilder.pitEnabled {
+		t.Fatal("pitEnabled should be true after SetPitKeepAlive")
+	}
+	if esBuilder.pitKeepAlive != 2*time.Minute {
+		t.Fatalf("pitKeepAlive should be 2m, got %v", esBuilder.pitKeepAlive)
+	}
+
+	esBuilder.SetNeedPagination(false)
+	if !esBuilder.pitEnabled {
+		t.Fatal("pitEnabled should remain true after SetNeedPagination(false)")
 	}
 }
