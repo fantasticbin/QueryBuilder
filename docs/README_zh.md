@@ -21,7 +21,7 @@
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
 - **查询元信息**：中间件可通过 `builder.GetQueryMeta()` 直接获取查询元数据——数据源类型、分页信息和查询开始时间无需通过 context 注入即可获取。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
-- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。
+- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
@@ -831,6 +831,8 @@ b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at")
 b.SetSort(elastic.NewFieldSort("_id").Asc()) // 辅助排序
 b.SetLimit(100)
+b.SetNeedPagination(false)         // ES 游标模式下关闭分页将自动启用 PIT
+b.SetPitKeepAlive(2 * time.Minute) // 可选：配置 PIT keep_alive 时长（默认1分钟）
 
 for doc, err := range b.QueryCursor(ctx) {
     if err != nil {
