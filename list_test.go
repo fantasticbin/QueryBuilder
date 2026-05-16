@@ -478,7 +478,7 @@ func TestGetQueryMeta(t *testing.T) {
 
 	t.Run("有querier时返回元信息", func(t *testing.T) {
 		expectedMeta := QueryMeta{
-			DataSource:     MySQL,
+			DataSource:     Gorm,
 			Start:          0,
 			Limit:          10,
 			NeedTotal:      true,
@@ -491,8 +491,8 @@ func TestGetQueryMeta(t *testing.T) {
 		list.SetQuerier(mockQuerier)
 
 		meta := list.GetQueryMeta()
-		if meta.DataSource != MySQL {
-			t.Errorf("expected DataSource MySQL, got: %v", meta.DataSource)
+		if meta.DataSource != Gorm {
+			t.Errorf("expected DataSource Gorm, got: %v", meta.DataSource)
 		}
 		if meta.Limit != 10 {
 			t.Errorf("expected Limit 10, got: %d", meta.Limit)
@@ -676,12 +676,12 @@ func TestSetScope(t *testing.T) {
 
 // TestNewListWithData 测试 NewListWithData 预创建构建器
 func TestNewListWithData(t *testing.T) {
-	list := NewListWithData[TestEntity](MySQL, NewDBProxy(&gorm.DB{}, nil, nil))
+	list := NewListWithData[TestEntity](Gorm, NewDBProxy(&gorm.DB{}, nil, nil))
 
 	// 验证 GetQueryMeta 可以正常调用（说明内部 querier 已被创建）
 	meta := list.GetQueryMeta()
-	if meta.DataSource != MySQL {
-		t.Errorf("expected DataSource MySQL, got: %v", meta.DataSource)
+	if meta.DataSource != Gorm {
+		t.Errorf("expected DataSource Gorm, got: %v", meta.DataSource)
 	}
 }
 
@@ -721,7 +721,7 @@ func TestQueryWithFields(t *testing.T) {
 func TestExplainWithNoQuerier(t *testing.T) {
 	ctx := context.Background()
 
-	list := NewListWithData[TestEntity](MySQL, NewDBProxy(&gorm.DB{}, nil, nil))
+	list := NewListWithData[TestEntity](Gorm, NewDBProxy(&gorm.DB{}, nil, nil))
 
 	// 空的 gorm.DB{} 执行 Explain 会因为内部 nil 指针触发 panic
 	// 验证 panic 被正确恢复为 error

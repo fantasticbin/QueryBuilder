@@ -4,7 +4,7 @@
 
 # QueryBuilder
 
-A Go library for building type-safe list queries across multiple data sources. Leverages Go 1.26 self-referential generic constraints to provide dedicated query builders for MySQL (GORM), MongoDB, and ElasticSearch — with zero type assertions, flexible middleware, and a unified query interface.
+A Go library for building type-safe list queries across multiple data sources. Leverages Go 1.26 self-referential generic constraints to provide dedicated query builders for GORM-Compatible DB (GORM, e.g. MySQL/PostgreSQL/SQLite/SQL Server), MongoDB, and ElasticSearch — with zero type assertions, flexible middleware, and a unified query interface.
 
 ---
 
@@ -21,7 +21,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
 - **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination info, and query start time are available without context injection.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
-- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports MySQL (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API).
+- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API).
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
 - **Options Pattern**: Flexible query configuration via functional options.
@@ -132,7 +132,7 @@ import (
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
     list := builder.NewList[model.User]()
-    list.SetDataSource(builder.MySQL)
+    list.SetDataSource(builder.Gorm)
 
     // Use SetScope to set filter and sort
     list.SetScope(builder.NewGormScope[model.User](
@@ -168,7 +168,7 @@ Insert custom middleware into the query pipeline:
 
 ```go
 list := builder.NewList[model.User]()
-list.SetDataSource(builder.MySQL)
+list.SetDataSource(builder.Gorm)
 
 // Add a timing middleware
 list.Use(func(
@@ -204,10 +204,10 @@ result, total, err := list.Query(ctx,
 
 Field selection works across all data sources:
 
-| Data Source | Implementation |
-|-------------|---------------|
-| MySQL (GORM) | `db.Select(fields...)` |
-| MongoDB | `options.Find().SetProjection(bson.D{...})` |
+| Data Source   | Implementation |
+|---------------|---------------|
+| Gorm          | `db.Select(fields...)` |
+| MongoDB       | `options.Find().SetProjection(bson.D{...})` |
 | Elasticsearch | `FetchSourceContext(true).Include(fields...)` |
 
 ### Query Hooks
@@ -450,7 +450,7 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | Dimension | Source | Description |
 |-----------|--------|-------------|
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | Business resource name (e.g. `"users"`, `"orders"`) |
-| `datasource` | `QueryMeta` | Data source type (MySQL/MongoDB/ES) |
+| `datasource` | `QueryMeta` | Data source type (Gorm/MongoDB/ES) |
 | `fields` | `QueryMeta` | Field projection list |
 | `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | Query filter conditions |
@@ -640,7 +640,7 @@ This approach is safe for `Clone` scenarios because each clone's middleware pipe
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `DataSource` | `DataSource` | Data source type (MySQL/MongoDB/ElasticSearch) |
+| `DataSource` | `DataSource` | Data source type (Gorm/MongoDB/ElasticSearch) |
 | `Start` | `uint32` | Pagination offset |
 | `Limit` | `uint32` | Page size |
 | `NeedTotal` | `bool` | Whether total count is requested |
@@ -736,7 +736,7 @@ Use `QueryCursor` for memory-efficient streaming over large datasets. It returns
 
 **How it works:**
 - Each batch is fetched using cursor conditions (not OFFSET), ensuring consistent performance regardless of data depth.
-- MySQL uses row value expressions (`WHERE (col1, col2) > (v1, v2)`), MongoDB uses `$gt` compound conditions, and ElasticSearch uses the `search_after` API.
+- Gorm uses row value expressions (`WHERE (col1, col2) > (v1, v2)`), MongoDB uses `$gt` compound conditions, and ElasticSearch uses the `search_after` API.
 - Cursor values are automatically extracted from the last record of each batch — no manual cursor management needed.
 - Supports single-field and multi-field cursors.
 
@@ -787,7 +787,7 @@ for order, err := range b.QueryCursor(ctx) {
 
 ```go
 list := builder.NewList[User]()
-list.SetDataSource(builder.MySQL)
+list.SetDataSource(builder.Gorm)
 list.SetScope(builder.NewGormScope[User](
     func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
     nil, // no custom sort — cursor fields handle ordering
@@ -1056,10 +1056,10 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 
 ## Supported Data Sources
 
-| Data Source   | Builder | Filter Type | Sort Type |
-|---------------|---------|-------------|-----------|
-| MySQL (GORM)  | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
-| MongoDB       | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
+| Data Source  | Builder | Filter Type | Sort Type |
+|--------------|---------|-------------|-----------|
+| Gorm         | `GormBuilder` | `GormScope` (`func(*gorm.DB) *gorm.DB`) | `GormScope` |
+| MongoDB      | `MongoBuilder` | `MongoFilter` (`bson.D`) | `MongoSort` (`bson.D`) |
 | ElasticSearch | `ElasticSearchBuilder` | `elastic.Query` | `...elastic.Sorter` |
 
 ---

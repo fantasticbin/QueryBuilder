@@ -15,7 +15,7 @@ func (m *mockCache) Get(ctx context.Context, key string) ([]byte, bool) { v, ok 
 func (m *mockCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) { m.store[key] = value }
 
 func baseMeta() QueryMeta {
-	return QueryMeta{DataSource: MySQL, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
+	return QueryMeta{DataSource: Gorm, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
 }
 
 func TestDefaultCacheKeyBuilderStability(t *testing.T) {
@@ -85,7 +85,7 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	cache := newMockCache()
 	ctrl := gomock.NewController(t)
 	mockBuilder := NewMockQuerier[testUser](ctrl)
-	mockBuilder.EXPECT().GetQueryMeta().Return(QueryMeta{DataSource: MySQL, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}).AnyTimes()
+	mockBuilder.EXPECT().GetQueryMeta().Return(QueryMeta{DataSource: Gorm, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}).AnyTimes()
 
 	ctx := context.Background()
 	calls := 0
