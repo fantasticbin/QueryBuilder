@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"time"
 
 	"github.com/fantasticbin/QueryBuilder/util"
 	"github.com/olivere/elastic/v7"
 )
+
+const esPITCloseTimeout = 3 * time.Second
 
 // ElasticSearchBuilder ElasticSearch 专属查询构建器
 // 泛型参数:
@@ -180,9 +183,24 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
 	// 通过闭包复用同一个 pitID，在单次 QueryCursor 生命周期内持续传递给 doCursorQuery。
 	var pitID string
-	return e.builder.executeCursorWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
+	seq := e.builder.executeCursorWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
 		return e.doCursorQuery(ctx, cursorValues, isFirstBatch, &pitID)
 	})
+
+	return func(yield func(*R, error) bool) {
+		defer e.closePITWithTimeout(&pitID)
+		seq(yield)
+	}
+}
+
+func (e *ElasticSearchBuilder[R]) closePITWithTimeout(pitID *string) {
+	if !e.pitEnabled || pitID == nil || *pitID == "" {
+		return
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
+	defer cancel()
+	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
+	*pitID = ""
 }
 
 // doQuery 执行实际的 ElasticSearch 查询逻辑
@@ -453,8 +471,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			defer func() {
 				// 若本次调用期间出现错误，关闭本次生命周期开启的 PIT，避免资源泄漏
 				if err != nil {
-					_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
-					*pitID = ""
+					e.closePITWithTimeout(pitID)
 				}
 			}()
 		}
@@ -485,6 +502,10 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		searchResult, err = searchService.Do(ctx)
 		if err != nil {
 			return err
+		}
+
+		if e.pitEnabled && searchResult.PitId != "" {
+			*pitID = searchResult.PitId
 		}
 
 		for _, hit := range searchResult.Hits.Hits {
@@ -526,8 +547,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	}
 
 	if e.pitEnabled && len(searchResult.Hits.Hits) < batchSize && *pitID != "" {
-		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(ctx)
-		*pitID = ""
+		e.closePITWithTimeout(pitID)
 	}
 
 	return list, nextCursorValues, total, nil
