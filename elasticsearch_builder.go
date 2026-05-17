@@ -12,6 +12,8 @@ import (
 	"github.com/olivere/elastic/v7"
 )
 
+const esPITCloseTimeout = 3 * time.Second
+
 // ElasticSearchBuilder ElasticSearch 专属查询构建器
 // 泛型参数:
 //
@@ -22,6 +24,17 @@ type ElasticSearchBuilder[R any] struct {
 	filter       elastic.Query    // ES 专属过滤条件
 	sort         []elastic.Sorter // ES 专属排序条件
 	pitKeepAlive time.Duration    // Point-in-Time 保持时间
+	pitID        string           // 外部传入/内部更新的 PIT ID（用于跨请求分页）
+}
+
+// ESPITPageResult ES PIT 分页查询结果。
+// PitID 与 CursorValues 可用于下一批查询。
+type ESPITPageResult[R any] struct {
+	List         []*R
+	Total        int64
+	HasMore      bool
+	PitID        string
+	CursorValues []any
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -50,6 +63,7 @@ func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
 		index:        e.index,
 		filter:       e.filter,
 		pitKeepAlive: e.pitKeepAlive,
+		pitID:        e.pitID,
 	}
 	e.builder.cloneBase(&cloned.builder)
 	cloned.builder.setSelf(cloned, cloned)
@@ -147,6 +161,12 @@ func (e *ElasticSearchBuilder[R]) SetPitKeepAlive(keepAlive time.Duration) *Elas
 	return e
 }
 
+// SetPITID 设置 Point-in-Time ID，用于跨请求分页场景续查。
+func (e *ElasticSearchBuilder[R]) SetPITID(pitID string) *ElasticSearchBuilder[R] {
+	e.pitID = pitID
+	return e
+}
+
 // GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
 func (e *ElasticSearchBuilder[R]) GetQueryMeta() QueryMeta {
 	return e.builder.GetQueryMeta()
@@ -173,7 +193,8 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
 	var pitID string
 	wrappedCursorQuery := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
-		return e.doCursorQuery(ctx, cursorValues, isFirstBatch, &pitID)
+		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
+		return list, nextCursorValues, total, err
 	}
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
 	return func(yield func(*R, error) bool) {
@@ -187,6 +208,78 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 			}
 		}
 	}
+}
+
+// QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
+// 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议。
+func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error) {
+	if err := e.builder.prepareAndValidate(); err != nil {
+		return nil, err
+	}
+	if e.index == "" {
+		return nil, errors.New("elasticsearch index not configured")
+	}
+	if len(e.builder.cursorValues) > 0 && e.pitID == "" {
+		return nil, ErrPITCursorWithoutPITID
+	}
+
+	oldNeedPagination := e.builder.needPagination
+	oldIsCursorQuery := e.builder.isCursorQuery
+	oldPitID := e.pitID
+	defer func() {
+		e.builder.needPagination = oldNeedPagination
+		e.builder.isCursorQuery = oldIsCursorQuery
+		e.pitID = oldPitID
+	}()
+
+	// PIT + search_after 本质是分页查询，确保 QueryMeta 和执行语义一致
+	e.builder.needPagination = true
+	e.builder.isCursorQuery = true
+
+	isFirstBatch := len(e.builder.cursorValues) == 0
+
+	var (
+		nextCursorValues []any
+		hasMore          bool
+		resultPitID      string
+	)
+
+	list, total, err := e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
+		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
+			ctx,
+			e.builder.cursorValues,
+			isFirstBatch,
+			true,
+			&e.pitID,
+		)
+		if queryErr != nil {
+			return nil, 0, queryErr
+		}
+
+		nextCursorValues = batchNextCursorValues
+		hasMore = batchHasMore
+		resultPitID = e.pitID
+
+		return batchList, batchTotal, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &ESPITPageResult[R]{
+		List:         list,
+		Total:        total,
+		HasMore:      hasMore,
+		PitID:        resultPitID,
+		CursorValues: nextCursorValues,
+	}
+
+	if !hasMore {
+		result.PitID = ""
+		result.CursorValues = nil
+	}
+
+	return result, nil
 }
 
 // doQuery 执行实际的 ElasticSearch 查询逻辑
@@ -432,11 +525,13 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	return fmt.Sprintf("%dms", int(d/time.Millisecond))
 }
 
+// closePIT 关闭 Point-in-Time，释放 ES 资源
 func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
-	if e.needPagination || pitID == "" {
+	if pitID == "" {
 		return
 	}
-	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
 	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(pitID).Do(closeCtx)
 }
@@ -444,9 +539,14 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 // doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 // 使用 search_after API，将上一批最后一条文档的 sort values 作为下一批的 search_after 参数
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
-func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, pitID *string) ([]*R, []any, int64, error) {
+func (e *ElasticSearchBuilder[R]) doCursorQuery(
+	ctx context.Context,
+	cursorValues []any,
+	isFirstBatch, forcePIT bool,
+	pitID *string,
+) (list []*R, nextCursorValues []any, total int64, hasMore bool, err error) {
 	if e.index == "" {
-		return nil, nil, 0, errors.New("elasticsearch index not configured")
+		return nil, nil, 0, false, errors.New("elasticsearch index not configured")
 	}
 
 	batchSize := int(e.builder.limit)
@@ -459,19 +559,39 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		filter = elastic.NewMatchAllQuery()
 	}
 
+	querySize := batchSize
+	if forcePIT {
+		// PIT 分页场景通过多取 1 条记录来判断是否还有下一页，避免 len(list)==limit 时误判。
+		querySize = batchSize + 1
+	}
+
 	searchService := e.builder.data.ElasticSearch.Search().
 		Query(filter).
-		Size(batchSize)
+		Size(querySize)
 
-	if !e.needPagination {
+	usePIT := forcePIT || !e.builder.needPagination
+	openedPITByThisCall := false
+
+	defer func() {
+		if err != nil && openedPITByThisCall && pitID != nil && *pitID != "" {
+			e.closePIT(*pitID)
+			*pitID = ""
+		}
+	}()
+
+	if usePIT {
+		if pitID == nil {
+			return nil, nil, 0, false, errors.New("pitID pointer is nil")
+		}
 		if *pitID == "" {
 			openResp, err := e.builder.data.ElasticSearch.OpenPointInTime(e.index).
 				KeepAlive(e.pitKeepAliveString()).
 				Do(ctx)
 			if err != nil {
-				return nil, nil, 0, err
+				return nil, nil, 0, false, err
 			}
 			*pitID = openResp.Id
+			openedPITByThisCall = true
 		}
 		searchService = searchService.PointInTime(elastic.NewPointInTimeWithKeepAlive(*pitID, e.pitKeepAliveString()))
 	} else {
@@ -492,51 +612,60 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		searchService = searchService.SearchAfter(cursorValues...)
 	}
 
-	var list []*R
-	var total int64
 	var searchResult *elastic.SearchResult
-
-	if err := util.WaitAndGo(func() error {
+	if err = util.WaitAndGo(func() error {
 		var err error
 		searchResult, err = searchService.Do(ctx)
 		if err != nil {
 			return err
 		}
-		if !e.needPagination && *pitID != "" && searchResult.PitId != "" {
+
+		if usePIT && *pitID != "" && searchResult.PitId != "" {
 			*pitID = searchResult.PitId
 		}
 
-		for _, hit := range searchResult.Hits.Hits {
-			var item R
-			if err := json.Unmarshal(hit.Source, &item); err != nil {
-				return err
-			}
-			list = append(list, &item)
-		}
 		return nil
 	}, func() error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
-		if !isFirstBatch || !e.builder.needTotal || e.afterHook == nil {
+		if !isFirstBatch || !e.builder.needTotal {
 			return nil
 		}
 
 		countService := e.builder.data.ElasticSearch.Count().
 			Index(e.index).
 			Query(filter)
+
 		count, err := countService.Do(ctx)
 		if err != nil {
 			return err
 		}
+
 		total = count
 		return nil
 	}); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, false, err
 	}
 
-	// 从最后一条 hit 的 Sort 字段提取 sort values 作为下一批的 search_after 参数
-	var nextCursorValues []any
-	if len(searchResult.Hits.Hits) > 0 {
-		lastHit := searchResult.Hits.Hits[len(searchResult.Hits.Hits)-1]
+	hits := searchResult.Hits.Hits
+	hasMore = forcePIT && len(hits) > batchSize
+
+	effectiveHits := hits
+	if hasMore {
+		effectiveHits = hits[:batchSize]
+	}
+
+	list = make([]*R, 0, len(effectiveHits))
+	for _, hit := range effectiveHits {
+		var item R
+		if err := json.Unmarshal(hit.Source, &item); err != nil {
+			return nil, nil, 0, false, err
+		}
+		list = append(list, &item)
+	}
+
+	// 从最后一条有效 hit 的 Sort 字段提取 sort values 作为下一批的 search_after 参数
+	if len(effectiveHits) > 0 {
+		lastHit := effectiveHits[len(effectiveHits)-1]
 		if lastHit.Sort != nil {
 			nextCursorValues = make([]any, len(lastHit.Sort))
 			for i, v := range lastHit.Sort {
@@ -545,5 +674,10 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(ctx context.Context, cursorValue
 		}
 	}
 
-	return list, nextCursorValues, total, nil
+	if forcePIT && !hasMore && *pitID != "" {
+		e.closePIT(*pitID)
+		*pitID = ""
+	}
+
+	return list, nextCursorValues, total, hasMore, nil
 }

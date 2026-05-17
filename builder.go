@@ -33,6 +33,8 @@ var (
 	ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
 	// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
 	ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
+	// ErrPITCursorWithoutPITID ElasticSearch 单批次分页查询模式下未提供 PIT ID 的错误
+	ErrPITCursorWithoutPITID = errors.New("PIT ID is required when cursor values are provided")
 )
 
 // DBProxy 数据实例结构

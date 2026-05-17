@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -217,5 +218,39 @@ func TestElasticSearchBuilderPITSettings(t *testing.T) {
 	esBuilder.SetPitKeepAlive(2 * time.Minute)
 	if esBuilder.pitKeepAlive != 2*time.Minute {
 		t.Fatalf("pitKeepAlive should be 2m, got %v", esBuilder.pitKeepAlive)
+	}
+}
+
+func TestElasticSearchBuilderQueryPageWithPITValidation(t *testing.T) {
+	ctx := context.Background()
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"", // 空索引名
+	)
+
+	_, err := esBuilder.QueryPageWithPIT(ctx)
+	if err == nil {
+		t.Fatal("expected error when index is not configured, got nil")
+	}
+	if err.Error() != "elasticsearch index not configured" {
+		t.Fatalf("expected elasticsearch index not configured error, got %v", err)
+	}
+}
+
+func TestElasticSearchBuilderQueryPageWithPITRejectsCursorWithoutPITID(t *testing.T) {
+	ctx := context.Background()
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"test_index",
+	)
+
+	esBuilder.
+		SetCursorField("created_at", "id").
+		SetCursorValue("2026-01-01T00:00:00Z", "doc_1").
+		SetLimit(10)
+
+	_, err := esBuilder.QueryPageWithPIT(ctx)
+	if !errors.Is(err, ErrPITCursorWithoutPITID) {
+		t.Fatalf("expected ErrPITCursorWithoutPITID, got %v", err)
 	}
 }
