@@ -244,9 +244,9 @@ func TestElasticSearchBuilderClosePITGuard(t *testing.T) {
 
 	// needPagination=true 时，closePIT 应直接返回，不访问 ES 客户端。
 	esBuilder.SetNeedPagination(true)
-	esBuilder.closePIT("pit-id")
+	esBuilder.closePIT("pit-id", true)
 
 	// pitID 为空时，也应直接返回。
 	esBuilder.SetNeedPagination(false)
-	esBuilder.closePIT("")
+	esBuilder.closePIT("", true)
 }

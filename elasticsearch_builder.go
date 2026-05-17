@@ -199,7 +199,7 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
 	return func(yield func(*R, error) bool) {
 		defer func() {
-			e.closePIT(pitID)
+			e.closePIT(pitID, true)
 		}()
 
 		for item, err := range innerIter {
@@ -483,15 +483,11 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	return fmt.Sprintf("%dms", int(d/time.Millisecond))
 }
 
-func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
-	if e.builder.needPagination || pitID == "" {
+func (e *ElasticSearchBuilder[R]) closePIT(pitID string, guarded bool) {
+	if pitID == "" {
 		return
 	}
-	e.closePITDirect(pitID)
-}
-
-func (e *ElasticSearchBuilder[R]) closePITDirect(pitID string) {
-	if pitID == "" {
+	if guarded && e.builder.needPagination {
 		return
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
@@ -607,7 +603,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		return nil, nil, 0, false, err
 	}
 
-	hasMore := len(searchResult.Hits.Hits) > batchSize
+	hasMore := forcePIT && len(searchResult.Hits.Hits) > batchSize
 	effectiveHits := searchResult.Hits.Hits
 	if hasMore {
 		effectiveHits = effectiveHits[:batchSize]
@@ -626,7 +622,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		}
 	}
 	if forcePIT && usePIT && !hasMore && *pitID != "" {
-		e.closePITDirect(*pitID)
+		e.closePIT(*pitID, false)
 		*pitID = ""
 	}
 
