@@ -12,6 +12,8 @@ import (
 	"github.com/olivere/elastic/v7"
 )
 
+const esPITCloseTimeout = 3 * time.Second
+
 // ElasticSearchBuilder ElasticSearch 专属查询构建器
 // 泛型参数:
 //
@@ -485,7 +487,7 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	if e.builder.needPagination || pitID == "" {
 		return
 	}
-	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
 	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(pitID).Do(closeCtx)
 }
@@ -618,7 +620,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		}
 	}
 	if usePIT && !hasMore && *pitID != "" {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 		defer cancel()
 		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
 		*pitID = ""
