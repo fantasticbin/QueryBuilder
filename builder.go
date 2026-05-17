@@ -118,6 +118,8 @@ type QuerierList[R any] interface {
 type QuerierCursor[R any] interface {
 	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
+	// QueryPageWithPIT ElasticSearchBuilder 专属：执行基于 PIT 的单页查询，返回当前页数据、下一页 search_after、最新 pitID、是否还有下一页
+	QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error)
 }
 
 // QuerierExplain 查询预览能力接口
