@@ -487,6 +487,13 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	if e.builder.needPagination || pitID == "" {
 		return
 	}
+	e.closePITDirect(pitID)
+}
+
+func (e *ElasticSearchBuilder[R]) closePITDirect(pitID string) {
+	if pitID == "" {
+		return
+	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
 	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(pitID).Do(closeCtx)
@@ -600,7 +607,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		return nil, nil, 0, false, err
 	}
 
-	hasMore := forcePIT && len(searchResult.Hits.Hits) > batchSize
+	hasMore := len(searchResult.Hits.Hits) > batchSize
 	effectiveHits := searchResult.Hits.Hits
 	if hasMore {
 		effectiveHits = effectiveHits[:batchSize]
@@ -618,10 +625,8 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			}
 		}
 	}
-	if usePIT && !hasMore && *pitID != "" {
-		closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
-		defer cancel()
-		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
+	if forcePIT && usePIT && !hasMore && *pitID != "" {
+		e.closePITDirect(*pitID)
 		*pitID = ""
 	}
 
