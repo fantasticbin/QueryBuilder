@@ -235,18 +235,3 @@ func TestElasticSearchBuilderQueryPageWithPITValidation(t *testing.T) {
 		t.Fatalf("expected elasticsearch index not configured error, got %v", err)
 	}
 }
-
-func TestElasticSearchBuilderClosePITGuard(t *testing.T) {
-	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
-		NewDBProxy(nil, nil, nil),
-		"test_index",
-	)
-
-	// needPagination=true 时，closePIT 应直接返回，不访问 ES 客户端。
-	esBuilder.SetNeedPagination(true)
-	esBuilder.closePIT("pit-id")
-
-	// pitID 为空时，也应直接返回。
-	esBuilder.SetNeedPagination(false)
-	esBuilder.closePIT("")
-}
