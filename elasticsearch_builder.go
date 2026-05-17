@@ -193,7 +193,7 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
 	var pitID string
 	wrappedCursorQuery := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
-		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, &pitID, false)
+		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
 		return list, nextCursorValues, total, err
 	}
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
@@ -221,7 +221,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 	}
 
 	isFirstBatch := len(e.builder.cursorValues) == 0
-	list, nextCursorValues, total, hasMore, err := e.doCursorQuery(ctx, e.builder.cursorValues, isFirstBatch, &e.pitID, true)
+	list, nextCursorValues, total, hasMore, err := e.doCursorQuery(ctx, e.builder.cursorValues, isFirstBatch, true, &e.pitID)
 	if err != nil {
 		return nil, err
 	}
@@ -498,9 +498,8 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	ctx context.Context,
 	cursorValues []any,
-	isFirstBatch bool,
+	isFirstBatch, forcePIT bool,
 	pitID *string,
-	forcePIT bool,
 ) ([]*R, []any, int64, bool, error) {
 	if e.index == "" {
 		return nil, nil, 0, false, errors.New("elasticsearch index not configured")
