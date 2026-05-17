@@ -567,7 +567,12 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			*pitID = searchResult.PitId
 		}
 
-		for _, hit := range searchResult.Hits.Hits {
+		effectiveHits := searchResult.Hits.Hits
+		// forcePIT 场景下多取 1 条用于 hasMore 探测，该条不参与业务反序列化。
+		if forcePIT && len(effectiveHits) > batchSize {
+			effectiveHits = effectiveHits[:batchSize]
+		}
+		for _, hit := range effectiveHits {
 			var item R
 			if err := json.Unmarshal(hit.Source, &item); err != nil {
 				return err
@@ -611,6 +616,12 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 				nextCursorValues[i] = v
 			}
 		}
+	}
+	if forcePIT && !hasMore && *pitID != "" {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
+		*pitID = ""
 	}
 
 	return list, nextCursorValues, total, hasMore, nil
