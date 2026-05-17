@@ -219,3 +219,34 @@ func TestElasticSearchBuilderPITSettings(t *testing.T) {
 		t.Fatalf("pitKeepAlive should be 2m, got %v", esBuilder.pitKeepAlive)
 	}
 }
+
+func TestElasticSearchBuilderQueryPageWithPITValidation(t *testing.T) {
+	ctx := context.Background()
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"", // 空索引名
+	)
+
+	_, err := esBuilder.QueryPageWithPIT(ctx)
+	if err == nil {
+		t.Fatal("expected error when index is not configured, got nil")
+	}
+	if err.Error() != "elasticsearch index not configured" {
+		t.Fatalf("expected elasticsearch index not configured error, got %v", err)
+	}
+}
+
+func TestElasticSearchBuilderClosePITGuard(t *testing.T) {
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, nil),
+		"test_index",
+	)
+
+	// needPagination=true 时，closePIT 应直接返回，不访问 ES 客户端。
+	esBuilder.SetNeedPagination(true)
+	esBuilder.closePIT("pit-id")
+
+	// pitID 为空时，也应直接返回。
+	esBuilder.SetNeedPagination(false)
+	esBuilder.closePIT("")
+}
