@@ -621,7 +621,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			}
 		}
 	}
-	if forcePIT && usePIT && !hasMore && *pitID != "" {
+	if forcePIT && !hasMore && *pitID != "" {
 		e.closePIT(*pitID, false)
 		*pitID = ""
 	}
