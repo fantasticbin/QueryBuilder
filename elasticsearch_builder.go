@@ -199,7 +199,7 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
 	return func(yield func(*R, error) bool) {
 		defer func() {
-			e.closePIT(pitID, true)
+			e.closePIT(pitID)
 		}()
 
 		for item, err := range innerIter {
@@ -216,6 +216,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
+	e.builder.needPagination = true
 	if e.index == "" {
 		return nil, errors.New("elasticsearch index not configured")
 	}
@@ -483,11 +484,11 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	return fmt.Sprintf("%dms", int(d/time.Millisecond))
 }
 
-func (e *ElasticSearchBuilder[R]) closePIT(pitID string, guarded bool) {
+func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	if pitID == "" {
 		return
 	}
-	if guarded && e.builder.needPagination {
+	if e.builder.needPagination {
 		return
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
@@ -622,7 +623,9 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		}
 	}
 	if forcePIT && !hasMore && *pitID != "" {
-		e.closePIT(*pitID, false)
+		closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
+		defer cancel()
+		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
 		*pitID = ""
 	}
 
