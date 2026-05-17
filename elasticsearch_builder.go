@@ -216,11 +216,11 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
-	e.builder.needPagination = true
 	if e.index == "" {
 		return nil, errors.New("elasticsearch index not configured")
 	}
 
+	e.builder.needPagination = true
 	isFirstBatch := len(e.builder.cursorValues) == 0
 	list, nextCursorValues, total, hasMore, err := e.doCursorQuery(ctx, e.builder.cursorValues, isFirstBatch, true, &e.pitID)
 	if err != nil {
@@ -484,13 +484,12 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	return fmt.Sprintf("%dms", int(d/time.Millisecond))
 }
 
+// closePIT 关闭 Point-in-Time，释放 ES 资源
 func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	if pitID == "" {
 		return
 	}
-	if e.builder.needPagination {
-		return
-	}
+
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
 	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(pitID).Do(closeCtx)
@@ -623,9 +622,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		}
 	}
 	if forcePIT && !hasMore && *pitID != "" {
-		closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
-		defer cancel()
-		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
+		e.closePIT(*pitID)
 		*pitID = ""
 	}
 
