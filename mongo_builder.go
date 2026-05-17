@@ -3,7 +3,6 @@ package builder
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
 
@@ -159,11 +158,6 @@ func (m *MongoBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] 
 		}
 	}
 	return m.builder.executeCursorWithMiddlewares(ctx, m.doCursorQuery)
-}
-
-// QueryPageWithPIT MongoDB 不支持基于 PIT 的分页查询，调用该方法将返回错误（实现 Querier 接口）
-func (m *MongoBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error) {
-	return nil, errors.New("QueryPageWithPIT is only supported by ElasticSearchBuilder")
 }
 
 // doQuery 执行实际的 MongoDB 查询逻辑

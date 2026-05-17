@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -233,5 +234,23 @@ func TestElasticSearchBuilderQueryPageWithPITValidation(t *testing.T) {
 	}
 	if err.Error() != "elasticsearch index not configured" {
 		t.Fatalf("expected elasticsearch index not configured error, got %v", err)
+	}
+}
+
+func TestElasticSearchBuilderQueryPageWithPITRejectsCursorWithoutPITID(t *testing.T) {
+	ctx := context.Background()
+	esBuilder := NewElasticSearchBuilder[ElasticTestEntity](
+		NewDBProxy(nil, nil, &elastic.Client{}),
+		"test_index",
+	)
+
+	esBuilder.
+		SetCursorField("created_at", "id").
+		SetCursorValue("2026-01-01T00:00:00Z", "doc_1").
+		SetLimit(10)
+
+	_, err := esBuilder.QueryPageWithPIT(ctx)
+	if !errors.Is(err, ErrPITCursorWithoutPITID) {
+		t.Fatalf("expected ErrPITCursorWithoutPITID, got %v", err)
 	}
 }

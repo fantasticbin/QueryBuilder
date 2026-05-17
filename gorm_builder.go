@@ -2,7 +2,6 @@ package builder
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"reflect"
@@ -150,11 +149,6 @@ func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 		}
 	}
 	return g.builder.executeCursorWithMiddlewares(ctx, g.doCursorQuery)
-}
-
-// QueryPageWithPIT GORM 构建器不支持基于 PIT 的分页查询，直接返回错误（实现 Querier 接口）
-func (g *GormBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error) {
-	return nil, errors.New("QueryPageWithPIT is only supported by ElasticSearchBuilder")
 }
 
 // buildQuery 构建公共的 GORM 查询对象（私有方法）

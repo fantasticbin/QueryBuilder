@@ -33,6 +33,8 @@ var (
 	ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
 	// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
 	ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
+	// ErrPITCursorWithoutPITID ElasticSearch 单批次分页查询模式下未提供 PIT ID 的错误
+	ErrPITCursorWithoutPITID = errors.New("PIT ID is required when cursor values are provided")
 )
 
 // DBProxy 数据实例结构
@@ -118,8 +120,6 @@ type QuerierList[R any] interface {
 type QuerierCursor[R any] interface {
 	// QueryCursor 执行游标分页查询，返回 iter.Seq2 迭代器
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
-	// QueryPageWithPIT ElasticSearchBuilder 专属：执行基于 PIT 的单页查询，返回当前页数据、下一页 search_after、最新 pitID、是否还有下一页
-	QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error)
 }
 
 // QuerierExplain 查询预览能力接口
