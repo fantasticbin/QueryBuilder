@@ -633,6 +633,8 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 - **Nil-safe**: Passing `nil` as `keyBuilder` to `CacheMiddlewareWithKeyBuilder` falls back to `DefaultCacheKeyBuilder{Prefix: "default"}`.
 - **Clone-safe**: Each Clone instance uses its own `DefaultCacheKeyBuilder` with independent `Hints`, ensuring no shared mutable state.
 
+> ⚠️ **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` **do not apply to `ElasticSearchBuilder.QueryPageWithPIT`**. `QueryPageWithPIT` is a dedicated one-page PIT + `search_after` API and does not go through the list middleware chain; additionally, each page depends on evolving PIT state (`pit_id`, `cursor_values`), so middleware-level cache reuse may return stale or out-of-order pages.
+
 ### Query Meta
 
 Middleware can access query metadata directly via the `builder` parameter's `GetQueryMeta()` method — no context injection needed:

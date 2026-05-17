@@ -631,6 +631,8 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 - **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
 - **Clone 安全**：每个 Clone 实例使用各自的 `DefaultCacheKeyBuilder`（携带独立的 `Hints`），确保无共享可变状态。
 
+> ⚠️ **注意：** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` **不适用于 `ElasticSearchBuilder.QueryPageWithPIT`**。`QueryPageWithPIT` 是独立的 PIT + `search_after` 单页查询 API，不会经过列表查询的中间件管道；同时每一页都依赖会持续演进的 PIT 状态（`pit_id`、`cursor_values`），在中间件层复用缓存容易返回过期页或页序错乱。
+
 ### 查询元信息
 
 中间件可通过 `builder` 参数的 `GetQueryMeta()` 方法直接获取查询元数据——无需通过 context 传递：
