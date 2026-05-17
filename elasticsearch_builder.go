@@ -617,7 +617,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			}
 		}
 	}
-	if forcePIT && !hasMore && *pitID != "" {
+	if usePIT && !hasMore && *pitID != "" {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_, _ = e.builder.data.ElasticSearch.ClosePointInTime(*pitID).Do(closeCtx)
