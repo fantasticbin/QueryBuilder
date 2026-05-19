@@ -10,6 +10,18 @@ import (
 // ErrCursorFieldNotSet 游标字段未设置错误
 var ErrCursorFieldNotSet = errors.New("cursor fields not set: must call SetCursorField before QueryCursor")
 
+// CursorPageResult 游标分页查询结果结构体
+// 用于 QueryPage 方法的返回值，提供单批次分页查询的结构化结果
+// 泛型参数:
+//
+//	R: 查询结果的实体类型
+type CursorPageResult[R any] struct {
+	Items            []*R  // 当前页的数据列表
+	Total            int64 // 总数（仅在 needTotal=true 时有效）
+	HasMore          bool  // 是否还有下一页数据
+	NextCursorValues []any // 下一页的游标值（用于传入下次查询的 SetCursorValue），HasMore=false 时为 nil
+}
+
 // cursorFetchBatch 游标分批获取函数类型
 // 参数:
 //
@@ -22,8 +34,9 @@ var ErrCursorFieldNotSet = errors.New("cursor fields not set: must call SetCurso
 //	[]*R: 当前批次的记录列表
 //	[]any: 下一批次的游标值（由各构建器自行从数据库层面提取）
 //	int64: 总数（仅首批次且 needTotal 时有效，其他情况返回 0）
+//	bool: 是否还有更多数据（通过 limit+1 探测精确判断）
 //	error: 错误信息
-type cursorFetchBatch[R any] func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error)
+type cursorFetchBatch[R any] func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error)
 
 // buildCursorIterator 构建游标迭代器
 // 封装"分批获取 → 逐条 yield → 更新游标值 → 继续获取"的迭代循环
@@ -42,7 +55,6 @@ type cursorFetchBatch[R any] func(ctx context.Context, cursorValues []any, isFir
 //	iter.Seq2[*R, error]: 迭代器类型
 func buildCursorIterator[R any](
 	ctx context.Context,
-	cursorFields []string,
 	batchSize int,
 	initialCursorValues []any,
 	singleBatch bool,
@@ -50,12 +62,6 @@ func buildCursorIterator[R any](
 	totalPtr *int64,
 ) iter.Seq2[*R, error] {
 	return func(yield func(*R, error) bool) {
-		// 校验游标字段
-		if len(cursorFields) == 0 {
-			yield(nil, ErrCursorFieldNotSet)
-			return
-		}
-
 		// 使用初始游标值（可能为 nil，表示从头开始）
 		cursorValues := initialCursorValues
 		isFirstBatch := true
@@ -68,7 +74,7 @@ func buildCursorIterator[R any](
 			}
 
 			// 获取一批数据
-			batch, nextCursorValues, total, err := fetchBatch(ctx, cursorValues, isFirstBatch)
+			batch, nextCursorValues, total, _, err := fetchBatch(ctx, cursorValues, isFirstBatch)
 			if err != nil {
 				yield(nil, err)
 				return

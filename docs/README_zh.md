@@ -234,55 +234,6 @@ b.SetAfterQueryHook(func(ctx context.Context, list []*User, total int64, err err
 users, total, err := b.QueryList(ctx)
 ```
 
-### ElasticSearch 跨请求分页（PIT + `search_after`）
-
-在 ElasticSearch 中，传统 `from + size` 分页在跨请求场景下，若期间发生 refresh/数据更新，可能出现页间不稳定（重复或漏数）。
-
-`ElasticSearchBuilder` 现提供 PIT 单页查询能力：
-
-- `SetPITID(pitID)`：续用上一次 PIT 会话。
-- `SetCursorValue(...)`：设置上一页返回的游标值。
-- `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`（`List`、`HasMore`、`PitID`、`CursorValues`）。
-
-```go
-es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
-es.SetFilter(elastic.NewMatchAllQuery()).
-   SetCursorField("created_at", "id").
-   SetLimit(20)
-
-// 下一次请求：恢复上一页返回的值
-es.SetPITID(prevPitID).SetCursorValue(prevCursorValues...)
-
-page, err := es.QueryPageWithPIT(ctx)
-if err != nil {
-    return err
-}
-// 持久化 page.PitID + page.CursorValues，供下一页继续使用
-```
-
-业务对接建议：
-
-- PIT 存在保活窗口；若 PIT 过期/无效，建议从第一页重启并重新申请 PIT。
-- 建议使用稳定排序键（如业务时间 + 唯一 ID），确保 `search_after` 顺序可预期。
-- `HasMore` 基于 `limit+1` 探测，可作为翻页提示；业务上仍应以返回的 cursor/token 为准。
-
-后端 API 协议参考（业务层）：
-
-- 请求参数：
-  - `page_size`: 整数
-  - `page_token`: 透传字符串（可选，首批为空）
-- 响应参数：
-  - `items`: 数据数组
-  - `next_page_token`: 透传字符串（可选，无下一页时为空）
-  - `has_more`: 布尔值
-
-推荐 `page_token` 方案：
-
-1. 组装载荷：`{"pit_id":"...","cursor_values":[...],"exp":...,"v":1}`。
-2. JSON 序列化后进行 Base64URL 编码。
-3. 按安全要求增加完整性保护（HMAC 签名）或机密性保护（AES-GCM 加密）。
-4. 每次请求先校验版本/过期时间/签名，再调用 `SetPITID` + `SetCursorValue`。
-
 ### 超时控制
 
 QueryBuilder 遵循 Go 标准的 `context` 模式进行超时控制——无需额外 API。只需使用 `context.WithTimeout` 或 `context.WithDeadline` 包装你的 context 即可：
@@ -753,32 +704,6 @@ func TestListUser(t *testing.T) {
 }
 ```
 
-### Elasticsearch 构建器
-
-`ElasticSearchBuilder` 在构造时接收索引名，也可以通过 `SetESIndex` 方法动态修改：
-
-```go
-// 构造时传入索引名
-esBuilder := builder.NewElasticSearchBuilder[Doc](
-    builder.NewDBProxy(nil, nil, esClient),
-    "my_index",
-)
-
-// 也可以通过 SetESIndex 动态修改索引名（支持链式调用）
-esBuilder.SetESIndex("another_index")
-
-esBuilder.
-    SetFilter(elastic.NewTermQuery("status", "active")).
-    SetSort(elastic.NewFieldSort("created_at").Order(false))
-
-esBuilder.SetStart(0)
-esBuilder.SetLimit(20)
-esBuilder.SetNeedTotal(true)
-esBuilder.SetNeedPagination(true)
-
-docs, total, err := esBuilder.QueryList(ctx)
-```
-
 ### 游标分页
 
 使用 `QueryCursor` 对大数据集进行内存高效的流式遍历。它返回 Go 1.23+ `iter.Seq2[*R, error]` 迭代器，内部自动基于游标条件分批获取数据。
@@ -1039,6 +964,55 @@ b.SetLimit(100)
 sql, err := b.Explain(ctx)
 // 输出: [CursorQuery] SELECT * FROM `users` WHERE status = ? ORDER BY id ASC LIMIT 100 | args: [1] | cursor_fields: [id]
 ```
+
+#### ElasticSearch 跨请求分页（PIT + `search_after`）
+
+在 ElasticSearch 中，传统 `from + size` 分页在跨请求场景下，若期间发生 refresh/数据更新，可能出现页间不稳定（重复或漏数）。
+
+`ElasticSearchBuilder` 现提供 PIT 单页查询能力：
+
+- `SetPITID(pitID)`：续用上一次 PIT 会话。
+- `SetCursorValue(...)`：设置上一页返回的游标值。
+- `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`（`List`、`HasMore`、`PitID`、`CursorValues`）。
+
+```go
+es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
+es.SetFilter(elastic.NewMatchAllQuery()).
+   SetCursorField("created_at", "id").
+   SetLimit(20)
+
+// 下一次请求：恢复上一页返回的值
+es.SetPITID(prevPitID).SetCursorValue(prevCursorValues...)
+
+page, err := es.QueryPageWithPIT(ctx)
+if err != nil {
+    return err
+}
+// 持久化 page.PitID + page.CursorValues，供下一页继续使用
+```
+
+业务对接建议：
+
+- PIT 存在保活窗口；若 PIT 过期/无效，建议从第一页重启并重新申请 PIT。
+- 建议使用稳定排序键（如业务时间 + 唯一 ID），确保 `search_after` 顺序可预期。
+- `HasMore` 基于 `limit+1` 探测，可作为翻页提示；业务上仍应以返回的 cursor/token 为准。
+
+后端 API 协议参考（业务层）：
+
+- 请求参数：
+  - `page_size`: 整数
+  - `page_token`: 透传字符串（可选，首批为空）
+- 响应参数：
+  - `items`: 数据数组
+  - `next_page_token`: 透传字符串（可选，无下一页时为空）
+  - `has_more`: 布尔值
+
+推荐 `page_token` 方案：
+
+1. 组装载荷：`{"pit_id":"...","cursor_values":[...],"exp":...,"v":1}`。
+2. JSON 序列化后进行 Base64URL 编码。
+3. 按安全要求增加完整性保护（HMAC 签名）或机密性保护（AES-GCM 加密）。
+4. 每次请求先校验版本/过期时间/签名，再调用 `SetPITID` + `SetCursorValue`。
 
 ### Scope 辅助函数
 

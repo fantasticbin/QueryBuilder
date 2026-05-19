@@ -28,13 +28,10 @@ type ElasticSearchBuilder[R any] struct {
 }
 
 // ESPITPageResult ES PIT 分页查询结果。
-// PitID 与 CursorValues 可用于下一批查询。
+// 内嵌 CursorPageResult 复用通用游标分页字段，额外提供 PitID 用于跨请求续查。
 type ESPITPageResult[R any] struct {
-	List         []*R
-	Total        int64
-	HasMore      bool
-	PitID        string
-	CursorValues []any
+	CursorPageResult[R]
+	PitID string // Point-in-Time ID，用于下一批查询（HasMore=false 时为空）
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -192,9 +189,9 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 	}
 	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
 	var pitID string
-	wrappedCursorQuery := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
+	wrappedCursorQuery := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
 		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
-		return list, nextCursorValues, total, err
+		return list, nextCursorValues, total, false, err
 	}
 	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
 	return func(yield func(*R, error) bool) {
@@ -208,6 +205,40 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 			}
 		}
 	}
+}
+
+// QueryPage 执行 ElasticSearch 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
+// 内部自动管理 PIT 生命周期：自动打开 PIT，HasMore=false 时自动关闭
+// 不暴露 PIT ID 给调用方（与 QueryPageWithPIT 的区别）
+func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+	if err := e.builder.prepareAndValidate(); err != nil {
+		return nil, err
+	}
+	if e.index == "" {
+		return nil, errors.New("elasticsearch index not configured")
+	}
+
+	// 内部自动管理 PIT
+	var pitID string
+	isFirstBatch := len(e.builder.cursorValues) == 0
+	// 使用 forcePIT=true，doCursorQuery 内部通过 limit+1 探测精确返回 hasMore
+	pageFetchFn := func(ctx context.Context, cursorValues []any, isFirst bool) ([]*R, []any, int64, bool, error) {
+		list, nextCursorValues, total, hasMore, err := e.doCursorQuery(ctx, e.builder.cursorValues, isFirstBatch, true, &pitID)
+		return list, nextCursorValues, total, hasMore, err
+	}
+
+	result, err := e.builder.executePageWithMiddlewares(ctx, pageFetchFn)
+
+	// 无论成功失败，如果 HasMore=false 则关闭 PIT
+	if err != nil {
+		e.closePIT(pitID)
+		return nil, err
+	}
+	if !result.HasMore {
+		e.closePIT(pitID)
+	}
+
+	return result, nil
 }
 
 // QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
@@ -267,16 +298,18 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 	}
 
 	result := &ESPITPageResult[R]{
-		List:         list,
-		Total:        total,
-		HasMore:      hasMore,
-		PitID:        resultPitID,
-		CursorValues: nextCursorValues,
+		CursorPageResult: CursorPageResult[R]{
+			Items:            list,
+			Total:            total,
+			HasMore:          hasMore,
+			NextCursorValues: nextCursorValues,
+		},
+		PitID: resultPitID,
 	}
 
 	if !hasMore {
 		result.PitID = ""
-		result.CursorValues = nil
+		result.NextCursorValues = nil
 	}
 
 	return result, nil

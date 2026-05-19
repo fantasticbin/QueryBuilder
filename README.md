@@ -234,55 +234,6 @@ b.SetAfterQueryHook(func(ctx context.Context, list []*User, total int64, err err
 users, total, err := b.QueryList(ctx)
 ```
 
-### Elasticsearch Cross-Request Pagination (PIT + `search_after`)
-
-For Elasticsearch, classic `from + size` pagination may become unstable across requests when index refresh/updates happen between page calls (possible duplicates/missing items).
-
-`ElasticSearchBuilder` now provides a PIT-based single-page API for this scenario:
-
-- `SetPITID(pitID)` to continue a PIT session.
-- `SetCursorValue(...)` to continue from last page cursor.
-- `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult` (`List`, `HasMore`, `PitID`, `CursorValues`).
-
-```go
-es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
-es.SetFilter(elastic.NewMatchAllQuery()).
-   SetCursorField("created_at", "id").
-   SetLimit(20)
-
-// next request: restore values from previous response
-es.SetPITID(prevPitID).SetCursorValue(prevCursorValues...)
-
-page, err := es.QueryPageWithPIT(ctx)
-if err != nil {
-    return err
-}
-// persist page.PitID + page.CursorValues for next page
-```
-
-Integration recommendations:
-
-- PIT has a keep-alive window; if PIT is expired/invalid, restart from first page and issue a new PIT.
-- Keep a stable sort key (for example: business timestamp + unique id) to make `search_after` deterministic.
-- `HasMore` is computed via `limit+1` probing; use it as a paging hint and still rely on returned cursor/token as source of truth.
-
-Backend API contract reference (business layer):
-
-- Request:
-  - `page_size`: integer
-  - `page_token`: opaque string (optional, empty for first page)
-- Response:
-  - `items`: array
-  - `next_page_token`: opaque string (optional, empty when no more data)
-  - `has_more`: boolean
-
-Recommended `page_token` strategy:
-
-1. Build payload: `{"pit_id":"...","cursor_values":[...],"exp":...,"v":1}`.
-2. Serialize JSON and Base64URL encode.
-3. Add integrity protection (HMAC signature) or encryption (AES-GCM) depending on your security requirements.
-4. Validate version/expiration/signature on each request before calling `SetPITID` + `SetCursorValue`.
-
 ### Timeout Control
 
 QueryBuilder follows Go's standard `context` pattern for timeout control — no extra API needed. Simply wrap your context with `context.WithTimeout` or `context.WithDeadline`:
@@ -755,32 +706,6 @@ func TestListUser(t *testing.T) {
 }
 ```
 
-### Elasticsearch Builder
-
-The `ElasticSearchBuilder` accepts an index name in its constructor. You can also change it later via the `SetESIndex` method:
-
-```go
-// Pass index name at construction time
-esBuilder := builder.NewElasticSearchBuilder[Doc](
-    builder.NewDBProxy(nil, nil, esClient),
-    "my_index",
-)
-
-// Or change/set the index later via SetESIndex (supports chaining)
-esBuilder.SetESIndex("another_index")
-
-esBuilder.
-    SetFilter(elastic.NewTermQuery("status", "active")).
-    SetSort(elastic.NewFieldSort("created_at").Order(false))
-
-esBuilder.SetStart(0)
-esBuilder.SetLimit(20)
-esBuilder.SetNeedTotal(true)
-esBuilder.SetNeedPagination(true)
-
-docs, total, err := esBuilder.QueryList(ctx)
-```
-
 ### Cursor Pagination
 
 Use `QueryCursor` for memory-efficient streaming over large datasets. It returns a Go 1.23+ `iter.Seq2[*R, error]` iterator that fetches data in batches internally using cursor-based pagination.
@@ -1041,6 +966,55 @@ b.SetLimit(100)
 sql, err := b.Explain(ctx)
 // Output: [CursorQuery] SELECT * FROM `users` WHERE status = ? ORDER BY id ASC LIMIT 100 | args: [1] | cursor_fields: [id]
 ```
+
+#### Elasticsearch Cross-Request Pagination (PIT + `search_after`)
+
+For Elasticsearch, classic `from + size` pagination may become unstable across requests when index refresh/updates happen between page calls (possible duplicates/missing items).
+
+`ElasticSearchBuilder` now provides a PIT-based single-page API for this scenario:
+
+- `SetPITID(pitID)` to continue a PIT session.
+- `SetCursorValue(...)` to continue from last page cursor.
+- `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult` (`List`, `HasMore`, `PitID`, `CursorValues`).
+
+```go
+es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
+es.SetFilter(elastic.NewMatchAllQuery()).
+   SetCursorField("created_at", "id").
+   SetLimit(20)
+
+// next request: restore values from previous response
+es.SetPITID(prevPitID).SetCursorValue(prevCursorValues...)
+
+page, err := es.QueryPageWithPIT(ctx)
+if err != nil {
+    return err
+}
+// persist page.PitID + page.CursorValues for next page
+```
+
+Integration recommendations:
+
+- PIT has a keep-alive window; if PIT is expired/invalid, restart from first page and issue a new PIT.
+- Keep a stable sort key (for example: business timestamp + unique id) to make `search_after` deterministic.
+- `HasMore` is computed via `limit+1` probing; use it as a paging hint and still rely on returned cursor/token as source of truth.
+
+Backend API contract reference (business layer):
+
+- Request:
+  - `page_size`: integer
+  - `page_token`: opaque string (optional, empty for first page)
+- Response:
+  - `items`: array
+  - `next_page_token`: opaque string (optional, empty when no more data)
+  - `has_more`: boolean
+
+Recommended `page_token` strategy:
+
+1. Build payload: `{"pit_id":"...","cursor_values":[...],"exp":...,"v":1}`.
+2. Serialize JSON and Base64URL encode.
+3. Add integrity protection (HMAC signature) or encryption (AES-GCM) depending on your security requirements.
+4. Validate version/expiration/signature on each request before calling `SetPITID` + `SetCursorValue`.
 
 ### Scope Helpers
 

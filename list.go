@@ -187,6 +187,38 @@ func (l *List[R]) QueryCursor(
 	return querier.QueryCursor(ctx)
 }
 
+// QueryPage 执行单批次游标分页查询，返回结构化的分页结果
+// 该方法会根据传入的 QueryOption 选项执行单批次游标分页查询
+// 返回当前页数据、是否有下一页、下一页游标值等信息
+func (l *List[R]) QueryPage(
+	ctx context.Context,
+	opts ...QueryOption,
+) (result *CursorPageResult[R], err error) {
+	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = fmt.Errorf("query page panic recovered: %v", r)
+		}
+	}()
+
+	options := LoadQueryOptions(opts...)
+
+	var querier Querier[R]
+	if l.querier != nil {
+		// 使用注入的自定义 Querier
+		querier = l.querier
+	} else {
+		// 通过工厂函数创建对应的专属查询构建器
+		querier = NewBuilder[R](l.dataSource, options.GetData())
+		l.querier = querier
+	}
+
+	// 配置通用参数
+	l.passQueryOption(options, true, true)
+	return querier.QueryPage(ctx)
+}
+
 // Explain 返回构建器最终生成的查询语句（Dry Run 模式）
 // 用于调试场景，不会实际执行查询
 func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result string, err error) {

@@ -47,6 +47,26 @@ type BeforeQueryHook func(ctx context.Context) context.Context
 //	err: 错误信息
 type AfterQueryHook[R any] func(ctx context.Context, list []*R, total int64, err error)
 
+// middlewareRunner 中间件链执行器类型
+// 接收 ctx 和查询函数，返回经过中间件链处理后的结果
+type middlewareRunner[R any] func(ctx context.Context, queryFn func(context.Context) ([]*R, int64, error)) ([]*R, int64, error)
+
+// buildRunner 构建中间件链执行器
+// 将中间件按逆序包装，返回 middlewareRunner，调用时传入 queryFn 即可执行完整中间件链
+func buildRunner[B queryBuilder[B, R], R any](b *builder[B, R]) middlewareRunner[R] {
+	return func(ctx context.Context, queryFn func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+		next := queryFn
+		for i := len(b.middlewares) - 1; i >= 0; i-- {
+			next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
+				return func(ctx context.Context) ([]*R, int64, error) {
+					return mw(ctx, b.querierRef, fn)
+				}
+			}(b.middlewares[i], next)
+		}
+		return next(ctx)
+	}
+}
+
 // CacheProvider 缓存提供者接口
 // 用户可自定义缓存后端实现（如 Redis、内存缓存等）
 type CacheProvider interface {

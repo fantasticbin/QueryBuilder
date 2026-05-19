@@ -1091,3 +1091,199 @@ func TestQueryCursor_WithNeedTotalTrueAndMiddleware(t *testing.T) {
 		t.Errorf("expected 2 results, got %d", len(results))
 	}
 }
+
+// ==================== QueryPage 测试 ====================
+
+// TestQueryPage_Basic 测试 List.QueryPage 基本功能
+func TestQueryPage_Basic(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedResult := &CursorPageResult[TestEntity]{
+		Items: []*TestEntity{
+			{ID: 1, Name: "Alice", Age: 25},
+			{ID: 2, Name: "Bob", Age: 30},
+			{ID: 3, Name: "Charlie", Age: 35},
+		},
+		Total:            100,
+		HasMore:          true,
+		NextCursorValues: []any{uint32(3)},
+	}
+
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(3)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(expectedResult, nil)
+
+	result, err := list.QueryPage(ctx,
+		WithCursorField("id"),
+		WithLimit(3),
+		WithNeedTotal(true),
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Items) != 3 {
+		t.Errorf("expected 3 items, got %d", len(result.Items))
+	}
+	if result.Total != 100 {
+		t.Errorf("expected total=100, got %d", result.Total)
+	}
+	if !result.HasMore {
+		t.Error("expected HasMore=true")
+	}
+	if result.NextCursorValues[0] != uint32(3) {
+		t.Errorf("expected NextCursorValues=[3], got %v", result.NextCursorValues)
+	}
+}
+
+// TestQueryPage_LastPage 测试 List.QueryPage 最后一页（HasMore=false）
+func TestQueryPage_LastPage(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedResult := &CursorPageResult[TestEntity]{
+		Items: []*TestEntity{
+			{ID: 4, Name: "David", Age: 40},
+		},
+		Total:            4,
+		HasMore:          false,
+		NextCursorValues: nil,
+	}
+
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(3)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorValue(uint32(3)).Return(mockQuerier)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(expectedResult, nil)
+
+	result, err := list.QueryPage(ctx,
+		WithCursorField("id"),
+		WithCursorValue(uint32(3)),
+		WithLimit(3),
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false")
+	}
+	if result.NextCursorValues != nil {
+		t.Errorf("expected NextCursorValues=nil, got %v", result.NextCursorValues)
+	}
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 item, got %d", len(result.Items))
+	}
+}
+
+// TestQueryPage_EmptyResult 测试 List.QueryPage 空结果
+func TestQueryPage_EmptyResult(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedResult := &CursorPageResult[TestEntity]{
+		Items:            []*TestEntity{},
+		Total:            0,
+		HasMore:          false,
+		NextCursorValues: nil,
+	}
+
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("id").Return(mockQuerier)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(expectedResult, nil)
+
+	result, err := list.QueryPage(ctx, WithCursorField("id"))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("expected 0 items, got %d", len(result.Items))
+	}
+	if result.HasMore {
+		t.Error("expected HasMore=false")
+	}
+}
+
+// TestQueryPage_MultiFieldCursor 测试 List.QueryPage 多字段游标
+func TestQueryPage_MultiFieldCursor(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQuerier := NewMockQuerier[TestEntity](ctrl)
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(mockQuerier)
+
+	expectedResult := &CursorPageResult[TestEntity]{
+		Items: []*TestEntity{
+			{ID: 6, Name: "Frank", Age: 28},
+			{ID: 7, Name: "Grace", Age: 32},
+		},
+		Total:            50,
+		HasMore:          true,
+		NextCursorValues: []any{int64(700), uint32(7)},
+	}
+
+	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetLimit(uint32(2)).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
+	mockQuerier.EXPECT().SetNeedTotal(true).Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorField("created_at", "id").Return(mockQuerier)
+	mockQuerier.EXPECT().SetCursorValue(int64(500), uint32(5)).Return(mockQuerier)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(expectedResult, nil)
+
+	result, err := list.QueryPage(ctx,
+		WithCursorField("created_at", "id"),
+		WithCursorValue(int64(500), uint32(5)),
+		WithNeedTotal(true),
+		WithLimit(2),
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("expected 2 items, got %d", len(result.Items))
+	}
+	if result.Total != 50 {
+		t.Errorf("expected total=50, got %d", result.Total)
+	}
+	if !result.HasMore {
+		t.Error("expected HasMore=true")
+	}
+	if len(result.NextCursorValues) != 2 {
+		t.Errorf("expected 2 cursor values, got %d", len(result.NextCursorValues))
+	}
+}

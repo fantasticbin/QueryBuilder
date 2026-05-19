@@ -206,6 +206,21 @@ func (mr *MockQuerierMockRecorder[R]) QueryCursor(ctx any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryCursor", reflect.TypeOf((*MockQuerier[R])(nil).QueryCursor), ctx)
 }
 
+// QueryPage Mock 实现
+func (m *MockQuerier[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "QueryPage", ctx)
+	ret0, _ := ret[0].(*CursorPageResult[R])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// QueryPage 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) QueryPage(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryPage", reflect.TypeOf((*MockQuerier[R])(nil).QueryPage), ctx)
+}
+
 // GetQueryMeta Mock 实现
 func (m *MockQuerier[R]) GetQueryMeta() QueryMeta {
 	m.ctrl.T.Helper()

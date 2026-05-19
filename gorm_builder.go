@@ -148,7 +148,20 @@ func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 			yield(nil, err)
 		}
 	}
-	return g.builder.executeCursorWithMiddlewares(ctx, g.doCursorQuery)
+	return g.builder.executeCursorWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+		list, nextCV, total, _, err := g.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
+		return list, nextCV, total, false, err
+	})
+}
+
+// QueryPage 执行 GORM 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
+func (g *GormBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+	if err := g.builder.prepareAndValidate(); err != nil {
+		return nil, err
+	}
+	return g.builder.executePageWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+		return g.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
+	})
 }
 
 // buildQuery 构建公共的 GORM 查询对象（私有方法）
@@ -305,11 +318,19 @@ func (g *GormBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 
 // doCursorQuery 执行 GORM 游标分页的单批次查询
 // 构建基于行值表达式的 SQL 游标条件
+// probeHasMore 为 true 时，通过 limit+1 探测精确判断是否还有下一页
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
-func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, error) {
-	query := g.buildCursorQuery(g.builder.data.DB.WithContext(ctx))
+func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, probeHasMore bool) ([]*R, []any, int64, bool, error) {
+	batchSize := g.buildCursorBatchSize()
 
-	// 构建游标条件（仅在非首次查询时添加）
+	// 构建查询
+	query := g.buildCursorQuery(g.builder.data.DB.WithContext(ctx))
+	// probeHasMore 模式下覆盖 limit 为 batchSize+1
+	if probeHasMore {
+		query = query.Limit(batchSize + 1)
+	}
+
+	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
 		cursorFields := g.builder.cursorFields
 		if len(cursorFields) == 1 {
@@ -329,7 +350,6 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	var list []*R
 	var total int64
-
 	if err := util.WaitAndGo(func() error {
 		return query.Find(&list).Error
 	}, func() error {
@@ -344,17 +364,24 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 		}
 		return countQuery.Count(&total).Error
 	}); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, false, err
 	}
 
 	if len(list) == 0 {
-		return list, nil, total, nil
+		return list, nil, total, false, nil
 	}
 
-	// 通过 schema.Parse 解析结构体元数据，利用 LookUpField 按列名提取游标值
+	// 判断 hasMore：probeHasMore 模式下通过返回条数是否超过 batchSize 精确判断
+	hasMore := probeHasMore && len(list) > batchSize
+	// 如果有更多数据，截断为 batchSize 条
+	if hasMore {
+		list = list[:batchSize]
+	}
+
+	// 从（截断后的）最后一条提取游标值
 	s, err := schema.Parse(new(R), &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("schema parse failed: %w", err)
+		return nil, nil, 0, false, fmt.Errorf("schema parse failed: %w", err)
 	}
 
 	lastItem := list[len(list)-1]
@@ -363,11 +390,11 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 	for _, fieldName := range g.builder.cursorFields {
 		field := s.LookUpField(fieldName)
 		if field == nil {
-			return nil, nil, 0, fmt.Errorf("cursor field %q not found in schema", fieldName)
+			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in schema", fieldName)
 		}
 		val := field.ReflectValueOf(ctx, rv)
 		nextCursorValues = append(nextCursorValues, val.Interface())
 	}
 
-	return list, nextCursorValues, total, nil
+	return list, nextCursorValues, total, hasMore, nil
 }
