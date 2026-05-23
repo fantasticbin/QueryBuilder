@@ -932,6 +932,119 @@ for user, err := range list.QueryCursor(ctx,
 
 > **性能提示：** 对于不需要总数的大数据集遍历场景，设置 `needTotal(false)` 可以避免一次昂贵的 `COUNT(*)` / `CountDocuments` / `Count` 查询。
 
+#### QueryPage（单批次游标分页）
+
+`QueryPage` 是专为单批次游标分页设计的 API，返回结构化的 `CursorPageResult` —— 适用于 App "加载更多" 或 API 驱动的分页场景，一次调用即可获得 `items + next_cursor + has_more`。
+
+**与 `QueryCursor` 的核心区别：**
+
+| 维度 | `QueryCursor` | `QueryPage` |
+|------|--------------|-------------|
+| 返回类型 | `iter.Seq2[*R, error]`（迭代器） | `*CursorPageResult[R]`（结构体） |
+| 使用场景 | 全量遍历 / 流式处理 | 单页获取 |
+| HasMore 检测 | 隐式（空批次 = 结束） | 显式（`limit+1` 探测） |
+| 游标管理 | 自动（内部维护） | 手动（调用方持久化 `NextCursorValues`） |
+
+**`CursorPageResult` 结构：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Items` | `[]*R` | 当前页数据 |
+| `Total` | `int64` | 总数（仅 `needTotal=true` 时有效） |
+| `HasMore` | `bool` | 是否还有下一页数据 |
+| `NextCursorValues` | `[]any` | 下一页游标值（`HasMore=false` 时为 nil） |
+
+##### 直接使用构建器
+
+```go
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+b.SetCursorField("id")
+b.SetLimit(20)
+
+// 第一页
+page, err := b.QueryPage(ctx)
+if err != nil {
+    return err
+}
+// page.Items: 当前页数据
+// page.HasMore: 是否有下一页
+// page.NextCursorValues: 传入 SetCursorValue 用于下一页查询
+
+// 下一页：设置上一页返回的游标值
+if page.HasMore {
+    b.SetCursorValue(page.NextCursorValues...)
+    nextPage, err := b.QueryPage(ctx)
+    // ...
+}
+```
+
+##### 使用 List 与选项模式
+
+```go
+list := builder.NewList[User]()
+list.SetDataSource(builder.Gorm)
+list.SetScope(builder.NewGormScope[User](
+    func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
+    nil,
+))
+
+// 第一页
+page, err := list.QueryPage(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(20),
+)
+
+// 下一页：传入游标值
+nextPage, err := list.QueryPage(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithCursorValue(page.NextCursorValues...),
+    builder.WithLimit(20),
+)
+```
+
+##### MongoDB QueryPage
+
+```go
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxy(nil, collection, nil))
+b.SetFilter(bson.D{{Key: "status", Value: "active"}})
+b.SetCursorField("created_at", "_id")
+b.SetLimit(20)
+
+page, err := b.QueryPage(ctx)
+if err != nil {
+    return err
+}
+
+// 下一页
+if page.HasMore {
+    b.SetCursorValue(page.NextCursorValues...)
+    nextPage, _ := b.QueryPage(ctx)
+}
+```
+
+##### ElasticSearch QueryPage
+
+对于 ElasticSearch，`QueryPage` 内部自动管理 PIT（Point-in-Time）生命周期，无需手动处理：
+
+```go
+b := builder.NewElasticSearchBuilder[Doc](
+    builder.NewDBProxy(nil, nil, esClient), "my_index",
+)
+b.SetFilter(elastic.NewTermQuery("status", "active"))
+b.SetCursorField("created_at", "_id")
+b.SetLimit(20)
+
+page, err := b.QueryPage(ctx)
+// PIT 自动打开，HasMore=false 时自动关闭
+```
+
+> **注意：** 如果需要显式控制 PIT（例如跨请求分页、客户端管理 PIT ID 的场景），请使用 `QueryPageWithPIT` —— 参见下方 [ElasticSearch 跨请求分页](#elasticsearch-跨请求分页pit--search_after) 章节。
+
 #### 提前终止
 
 由于 `QueryCursor` 返回标准的 Go 迭代器，你可以随时使用 `break` 终止遍历：
@@ -973,7 +1086,17 @@ sql, err := b.Explain(ctx)
 
 - `SetPITID(pitID)`：续用上一次 PIT 会话。
 - `SetCursorValue(...)`：设置上一页返回的游标值。
-- `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`（`List`、`HasMore`、`PitID`、`CursorValues`）。
+- `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`。
+
+**`ESPITPageResult` 结构**（内嵌 `CursorPageResult`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Items` | `[]*R` | 当前页数据（继承自 `CursorPageResult`） |
+| `Total` | `int64` | 总数（继承，仅 `needTotal=true` 时有效） |
+| `HasMore` | `bool` | 是否还有下一页（继承） |
+| `NextCursorValues` | `[]any` | 下一页游标值（继承，`HasMore=false` 时为 nil） |
+| `PitID` | `string` | Point-in-Time ID，用于下一次请求（`HasMore=false` 时为空） |
 
 ```go
 es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
@@ -988,7 +1111,7 @@ page, err := es.QueryPageWithPIT(ctx)
 if err != nil {
     return err
 }
-// 持久化 page.PitID + page.CursorValues，供下一页继续使用
+// 持久化 page.PitID + page.NextCursorValues，供下一页继续使用
 ```
 
 业务对接建议：
@@ -1066,6 +1189,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetCursorValue(values...)` | 设置游标初始值（用于从指定位置恢复遍历） |
 | `QueryList(ctx)` | 执行查询 |
 | `QueryCursor(ctx)` | 执行游标分页查询，返回 `iter.Seq2` 迭代器 |
+| `QueryPage(ctx)` | 执行单批次游标分页查询，返回 `*CursorPageResult`（items + has_more + next_cursor） |
 
 ### 构建器专属方法
 

@@ -934,6 +934,119 @@ for user, err := range list.QueryCursor(ctx,
 
 > **Performance tip:** Set `needTotal(false)` for large-dataset traversals where total count is unnecessary — this avoids an expensive `COUNT(*)` / `CountDocuments` / `Count` query.
 
+#### QueryPage (Single-Batch Cursor Pagination)
+
+`QueryPage` is a dedicated API for single-batch cursor pagination that returns a structured `CursorPageResult` — ideal for App-style "load more" or API-driven pagination where you need `items + next_cursor + has_more` in one call.
+
+**Key differences from `QueryCursor`:**
+
+| Aspect | `QueryCursor` | `QueryPage` |
+|--------|--------------|-------------|
+| Return type | `iter.Seq2[*R, error]` (iterator) | `*CursorPageResult[R]` (struct) |
+| Use case | Full traversal / streaming | Single-page fetch |
+| HasMore detection | Implicit (empty batch = done) | Explicit (`limit+1` probing) |
+| Cursor management | Automatic (internal) | Manual (caller persists `NextCursorValues`) |
+
+**`CursorPageResult` structure:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Items` | `[]*R` | Current page data |
+| `Total` | `int64` | Total count (only when `needTotal=true`) |
+| `HasMore` | `bool` | Whether more data exists after this page |
+| `NextCursorValues` | `[]any` | Cursor values for next page (nil when `HasMore=false`) |
+
+##### Direct Builder Usage
+
+```go
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.SetFilter(func(db *gorm.DB) *gorm.DB {
+    return db.Where("status = ?", 1)
+})
+b.SetCursorField("id")
+b.SetLimit(20)
+
+// First page
+page, err := b.QueryPage(ctx)
+if err != nil {
+    return err
+}
+// page.Items: current page data
+// page.HasMore: whether there's a next page
+// page.NextCursorValues: pass to SetCursorValue for next page
+
+// Next page: set cursor values from previous response
+if page.HasMore {
+    b.SetCursorValue(page.NextCursorValues...)
+    nextPage, err := b.QueryPage(ctx)
+    // ...
+}
+```
+
+##### Using List with Options Pattern
+
+```go
+list := builder.NewList[User]()
+list.SetDataSource(builder.Gorm)
+list.SetScope(builder.NewGormScope[User](
+    func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", 1) },
+    nil,
+))
+
+// First page
+page, err := list.QueryPage(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithLimit(20),
+)
+
+// Next page with cursor values
+nextPage, err := list.QueryPage(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithCursorField("id"),
+    builder.WithCursorValue(page.NextCursorValues...),
+    builder.WithLimit(20),
+)
+```
+
+##### MongoDB QueryPage
+
+```go
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxy(nil, collection, nil))
+b.SetFilter(bson.D{{Key: "status", Value: "active"}})
+b.SetCursorField("created_at", "_id")
+b.SetLimit(20)
+
+page, err := b.QueryPage(ctx)
+if err != nil {
+    return err
+}
+
+// Next page
+if page.HasMore {
+    b.SetCursorValue(page.NextCursorValues...)
+    nextPage, _ := b.QueryPage(ctx)
+}
+```
+
+##### ElasticSearch QueryPage
+
+For ElasticSearch, `QueryPage` internally manages PIT (Point-in-Time) lifecycle automatically — no manual PIT handling needed:
+
+```go
+b := builder.NewElasticSearchBuilder[Doc](
+    builder.NewDBProxy(nil, nil, esClient), "my_index",
+)
+b.SetFilter(elastic.NewTermQuery("status", "active"))
+b.SetCursorField("created_at", "_id")
+b.SetLimit(20)
+
+page, err := b.QueryPage(ctx)
+// PIT is automatically opened and closed when HasMore=false
+```
+
+> **Note:** For scenarios where you need explicit PIT control (e.g., cross-request pagination with client-managed PIT ID), use `QueryPageWithPIT` instead — see [Elasticsearch Cross-Request Pagination](#elasticsearch-cross-request-pagination-pit--search_after) below.
+
 #### Early Termination
 
 Since `QueryCursor` returns a standard Go iterator, you can use `break` to stop at any time:
@@ -975,7 +1088,17 @@ For Elasticsearch, classic `from + size` pagination may become unstable across r
 
 - `SetPITID(pitID)` to continue a PIT session.
 - `SetCursorValue(...)` to continue from last page cursor.
-- `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult` (`List`, `HasMore`, `PitID`, `CursorValues`).
+- `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult`.
+
+**`ESPITPageResult` structure** (embeds `CursorPageResult`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Items` | `[]*R` | Current page data (inherited from `CursorPageResult`) |
+| `Total` | `int64` | Total count (inherited, only when `needTotal=true`) |
+| `HasMore` | `bool` | Whether more data exists (inherited) |
+| `NextCursorValues` | `[]any` | Cursor values for next page (inherited, nil when `HasMore=false`) |
+| `PitID` | `string` | Point-in-Time ID for next request (empty when `HasMore=false`) |
 
 ```go
 es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxy(nil, nil, esClient), "my_index")
@@ -990,7 +1113,7 @@ page, err := es.QueryPageWithPIT(ctx)
 if err != nil {
     return err
 }
-// persist page.PitID + page.CursorValues for next page
+// persist page.PitID + page.NextCursorValues for next page
 ```
 
 Integration recommendations:
@@ -1068,6 +1191,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetCursorValue(values...)` | Set initial cursor values (for resuming from a specific position) |
 | `QueryList(ctx)` | Execute the query |
 | `QueryCursor(ctx)` | Execute cursor pagination query, returns `iter.Seq2` iterator |
+| `QueryPage(ctx)` | Execute single-batch cursor pagination, returns `*CursorPageResult` (items + has_more + next_cursor) |
 
 ### Builder-Specific Methods
 
