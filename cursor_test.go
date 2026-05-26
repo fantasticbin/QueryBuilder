@@ -1181,7 +1181,7 @@ func TestListQueryPage_Error(t *testing.T) {
 	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
-	mockQuerier.EXPECT().QueryPage(ctx).Return(nil, ErrCursorFieldNotSet)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(nil, errors.New("query failed"))
 
 	list := NewList[CursorTestEntity]()
 	list.SetQuerier(mockQuerier)

@@ -276,8 +276,13 @@ func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB) *gorm.DB {
 	}
 
 	// 游标字段排序为主（升序）
-	for _, field := range g.builder.cursorFields {
-		query = query.Order(fmt.Sprintf("%s ASC", field))
+	cursorFields := parseCursorSortFields(g.builder.cursorFields)
+	for _, cursorField := range cursorFields {
+		order := "ASC"
+		if !cursorField.Asc {
+			order = "DESC"
+		}
+		query = query.Order(fmt.Sprintf("%s %s", cursorField.Field, order))
 	}
 
 	// 用户 sort 作为辅助排序
@@ -332,19 +337,46 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
-		cursorFields := g.builder.cursorFields
+		cursorFields := parseCursorSortFields(g.builder.cursorFields)
 		if len(cursorFields) == 1 {
-			// 单字段：WHERE field > value
-			query = query.Where(fmt.Sprintf("%s > ?", cursorFields[0]), cursorValues[0])
+			op := ">"
+			if !cursorFields[0].Asc {
+				op = "<"
+			}
+			query = query.Where(fmt.Sprintf("%s %s ?", cursorFields[0].Field, op), cursorValues[0])
 		} else {
-			// 多字段：WHERE (field1, field2, ...) > (v1, v2, ...)
-			fieldList := strings.Join(cursorFields, ", ")
-			placeholders := strings.Repeat("?,", len(cursorValues))
-			placeholders = placeholders[:len(placeholders)-1] // 去掉最后一个逗号
-			query = query.Where(
-				fmt.Sprintf("(%s) > (%s)", fieldList, placeholders),
-				cursorValues...,
-			)
+			if asc, uniform := isUniformCursorDirection(cursorFields); uniform {
+				// 性能优化：方向一致时使用行值比较，通常比 OR 组合条件更利于索引与执行计划。
+				op := ">"
+				if !asc {
+					op = "<"
+				}
+				fieldList := make([]string, 0, len(cursorFields))
+				for _, cf := range cursorFields {
+					fieldList = append(fieldList, cf.Field)
+				}
+				placeholders := strings.TrimRight(strings.Repeat("?,", len(cursorValues)), ",")
+				query = query.Where(fmt.Sprintf("(%s) %s (%s)", strings.Join(fieldList, ", "), op, placeholders), cursorValues...)
+			} else {
+				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件。
+				var orParts []string
+				args := make([]any, 0, len(cursorFields)*(len(cursorFields)+1)/2)
+				for i := 0; i < len(cursorFields); i++ {
+					andParts := make([]string, 0, i+1)
+					for j := 0; j < i; j++ {
+						andParts = append(andParts, fmt.Sprintf("%s = ?", cursorFields[j].Field))
+						args = append(args, cursorValues[j])
+					}
+					op := ">"
+					if !cursorFields[i].Asc {
+						op = "<"
+					}
+					andParts = append(andParts, fmt.Sprintf("%s %s ?", cursorFields[i].Field, op))
+					args = append(args, cursorValues[i])
+					orParts = append(orParts, "("+strings.Join(andParts, " AND ")+")")
+				}
+				query = query.Where(strings.Join(orParts, " OR "), args...)
+			}
 		}
 	}
 
@@ -387,10 +419,10 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 	lastItem := list[len(list)-1]
 	rv := reflect.ValueOf(lastItem).Elem()
 	nextCursorValues := make([]any, 0, len(g.builder.cursorFields))
-	for _, fieldName := range g.builder.cursorFields {
-		field := s.LookUpField(fieldName)
+	for _, cursorField := range parseCursorSortFields(g.builder.cursorFields) {
+		field := s.LookUpField(cursorField.Field)
 		if field == nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in schema", fieldName)
+			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in schema", cursorField.Field)
 		}
 		val := field.ReflectValueOf(ctx, rv)
 		nextCursorValues = append(nextCursorValues, val.Interface())

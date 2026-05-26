@@ -715,6 +715,35 @@ func TestListUser(t *testing.T) {
 - 游标值从每批最后一条记录中自动提取——无需手动管理游标。
 - 支持单字段和多字段游标。
 
+#### 游标排序方向（Asc/Desc 混排）
+
+`SetCursorField(...)` 支持为每个字段指定方向前缀：
+
+- `field` 或 `+field`：升序（ASC）
+- `-field`：降序（DESC）
+
+示例：
+
+```go
+// 单字段降序游标
+b.SetCursorField("-id")
+
+// 多字段混排游标
+b.SetCursorField("-created_at", "id") // created_at DESC, id ASC
+```
+
+> 说明：多字段游标下，若方向一致（全 ASC 或全 DESC），Gorm 会优先使用行值比较；若是混排，则回退到词典序 OR 条件。
+
+#### 自动追加唯一 tie-breaker
+
+当进入游标模式但未显式调用 `SetCursorField(...)` 时，QueryBuilder 会按数据源自动追加默认唯一字段（tie-breaker）：
+
+- Gorm/SQL：`id`
+- MongoDB：`_id`
+- ElasticSearch：`tie_breaker_id`
+
+这样可以保证游标分页顺序稳定，并避免因未配置游标字段导致的运行时错误。
+
 #### 直接使用构建器
 
 ```go
