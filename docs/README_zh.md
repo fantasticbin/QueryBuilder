@@ -21,7 +21,7 @@
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
 - **查询元信息**：中间件可通过 `builder.GetQueryMeta()` 直接获取查询元数据——数据源类型、分页信息和查询开始时间无需通过 context 注入即可获取。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
-- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
+- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。同时提供 `QueryPage` 单批次游标分页 API，返回结构化的 `CursorPageResult`（items + has_more + next_cursor），适用于 App "加载更多" 或 API 驱动的分页场景。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
@@ -47,7 +47,7 @@ go get github.com/fantasticbin/QueryBuilder
 │  Use / SetStart / SetLimit / SetNeedTotal /              │
 │  SetNeedPagination / SetFields / SetBeforeQueryHook /    │
 │  SetAfterQueryHook / SetCursorField / QueryList /        │
-│  QueryCursor                                             │
+│  QueryCursor / QueryPage                                 │
 └──────────┬──────────────┬──────────────┬─────────────────┘
            │              │              │
     ┌──────▼──┐     ┌─────▼────┐ ┌───────▼─────────┐
@@ -423,7 +423,7 @@ cache := NewGCacheProvider(1000) // 1000 条目的 LRU 缓存
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
 b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b builder.Querier[User]) string {
     meta := b.GetQueryMeta()
-    return fmt.Sprintf("users:list:%d:%d", meta.start, meta.limit)
+    return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
 users, total, err := b.QueryList(ctx)
@@ -577,6 +577,7 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 #### 设计说明
 
 - **稳定性**：相同查询条件始终生成相同的缓存键（`encoding/json` 对 map key 按字典序排序）。
+- **隔离性**：不同的 prefix / filter / sort / pagination / extra 值会生成不同的缓存键。
 - **防御性**：对不可 JSON 序列化的值（如函数、channel）自动降级为字符串表示，避免 key 空串碰撞。
 - **兜底机制**：JSON 序列化失败时使用 `fmt.Sprintf` 格式化，确保 key 不为空。
 - **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
@@ -820,7 +821,7 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### 设置游标初始位置
 
-默认情况下，游标分页从数据集的起始位置开始。你可以指定一个初始游标位置，从特定位置恢复遍历——适用于客户端驱动的分页场景（如移动端的"加载更多"）。
+默认情况下，游标分页从数据集的起始位置开始。你可以指定一个初始游标位置，从特定位置恢复遍历。
 
 **方案A：复用 `start` 作为初始游标值** —— 适用于单字段数值型游标：
 
@@ -893,10 +894,10 @@ for order, err := range list.QueryCursor(ctx,
 | `needPagination` | `true` | 为 `true` 时，只获取**单批次**数据（相当于一页）。为 `false` 时，自动分批遍历整个数据集直到耗尽。 |
 | `needTotal` | `true` | 为 `true` 时，在**首批次**查询时并行执行 Count 查询获取总数。总数通过 `AfterQueryHook` 传递。为 `false` 时，完全跳过 Count 查询。 |
 
-**单页游标查询**（App 端"加载更多"场景）：
+**单页游标查询**（仅获取单批次）：
 
 ```go
-// 获取一页数据并返回总数——适用于移动端"加载更多"分页
+// 获取一页数据并返回总数
 for user, err := range list.QueryCursor(ctx,
     builder.WithData(builder.NewDBProxy(db, nil, nil)),
     builder.WithCursorField("id"),
@@ -911,6 +912,8 @@ for user, err := range list.QueryCursor(ctx,
     process(user)
 }
 ```
+
+> **提示：** 对于单页游标分页场景（如 API 驱动的"加载更多"），建议使用 [`QueryPage`](#querypage单批次游标分页) —— 它返回结构化的 `CursorPageResult`，包含 `HasMore` 和 `NextCursorValues`，更适合构建分页 API 响应。
 
 **全量遍历不查总数**（数据导出场景）：
 
@@ -1088,14 +1091,11 @@ sql, err := b.Explain(ctx)
 - `SetCursorValue(...)`：设置上一页返回的游标值。
 - `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`。
 
-**`ESPITPageResult` 结构**（内嵌 `CursorPageResult`）：
+**`ESPITPageResult` 结构**（内嵌 `CursorPageResult`，继承其所有字段：`Items`、`Total`、`HasMore`、`NextCursorValues`）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `Items` | `[]*R` | 当前页数据（继承自 `CursorPageResult`） |
-| `Total` | `int64` | 总数（继承，仅 `needTotal=true` 时有效） |
-| `HasMore` | `bool` | 是否还有下一页（继承） |
-| `NextCursorValues` | `[]any` | 下一页游标值（继承，`HasMore=false` 时为 nil） |
+| *（继承）* | | `CursorPageResult` 的所有字段（参见[上方](#querypage单批次游标分页)） |
 | `PitID` | `string` | Point-in-Time ID，用于下一次请求（`HasMore=false` 时为空） |
 
 ```go

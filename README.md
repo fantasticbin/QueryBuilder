@@ -21,7 +21,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
 - **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination info, and query start time are available without context injection.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
-- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
+- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Also provides `QueryPage` for single-batch cursor pagination, returning a structured `CursorPageResult` (items + has_more + next_cursor) — ideal for App "load more" or API-driven pagination. Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
 - **Options Pattern**: Flexible query configuration via functional options.
@@ -47,7 +47,7 @@ go get github.com/fantasticbin/QueryBuilder
 │  Use / SetStart / SetLimit / SetNeedTotal /              │
 │  SetNeedPagination / SetFields / SetBeforeQueryHook /    │
 │  SetAfterQueryHook / SetCursorField / QueryList /        │
-│  QueryCursor                                             │
+│  QueryCursor / QueryPage                                 │
 └──────────┬──────────────┬──────────────┬─────────────────┘
            │              │              │
     ┌──────▼──┐     ┌─────▼────┐ ┌───────▼─────────┐
@@ -578,10 +578,11 @@ b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheK
 
 #### Key Stability & Isolation Guarantees
 
-- **Stable**: Same inputs always produce the same key (deterministic JSON serialization + SHA1).
+- **Stable**: Same inputs always produce the same key (`encoding/json` sorts map keys lexicographically, ensuring deterministic serialization + SHA1).
 - **Isolated**: Different prefix / filter / sort / pagination / extra values produce different keys.
-- **Safe**: Non-serializable values (functions, channels) are gracefully degraded to string representations to avoid empty-key collisions.
-- **Nil-safe**: Passing `nil` as `keyBuilder` to `CacheMiddlewareWithKeyBuilder` falls back to `DefaultCacheKeyBuilder{Prefix: "default"}`.
+- **Defensive**: Non-serializable values (functions, channels) are gracefully degraded to string representations, avoiding empty-key collisions.
+- **Fallback**: Falls back to `fmt.Sprintf` formatting when JSON serialization fails, ensuring the key is never empty.
+- **Empty-result caching**: Empty query results are still cached to prevent cache penetration.
 - **Clone-safe**: Each Clone instance uses its own `DefaultCacheKeyBuilder` with independent `Hints`, ensuring no shared mutable state.
 
 > ⚠️ **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` **do not apply to `ElasticSearchBuilder.QueryPageWithPIT`**. `QueryPageWithPIT` is a dedicated one-page PIT + `search_after` API and does not go through the list middleware chain; additionally, each page depends on evolving PIT state (`pit_id`, `cursor_values`), so middleware-level cache reuse may return stale or out-of-order pages.
@@ -822,7 +823,7 @@ for doc, err := range b.QueryCursor(ctx) {
 
 #### Setting Initial Cursor Position
 
-By default, cursor pagination starts from the beginning of the dataset. You can specify an initial cursor position to resume from a specific point — useful for client-driven pagination (e.g., "load more" in mobile apps).
+By default, cursor pagination starts from the beginning of the dataset. You can specify an initial cursor position to resume from a specific point.
 
 **Option A: Reuse `start` as initial cursor value** — suitable for single-field numeric cursors:
 
@@ -895,10 +896,10 @@ for order, err := range list.QueryCursor(ctx,
 | `needPagination` | `true` | When `true`, only fetches a **single batch** (equivalent to one page). When `false`, iterates through the entire dataset in batches until exhausted. |
 | `needTotal` | `true` | When `true`, executes a **parallel Count query** on the first batch to retrieve the total count. The total is passed to `AfterQueryHook`. When `false`, skips the Count query entirely. |
 
-**Single-page cursor query** (App-style "load more"):
+**Single-page cursor query** (fetch one batch only):
 
 ```go
-// Fetch one page of data with total count — ideal for mobile "load more" pagination
+// Fetch one page of data with total count
 for user, err := range list.QueryCursor(ctx,
     builder.WithData(builder.NewDBProxy(db, nil, nil)),
     builder.WithCursorField("id"),
@@ -913,6 +914,8 @@ for user, err := range list.QueryCursor(ctx,
     process(user)
 }
 ```
+
+> **Tip:** For single-page cursor pagination scenarios (e.g., API-driven "load more"), consider using [`QueryPage`](#querypage-single-batch-cursor-pagination) instead — it returns a structured `CursorPageResult` with `HasMore` and `NextCursorValues`, which is more convenient for building paginated API responses.
 
 **Full traversal without counting** (data export):
 
@@ -1090,14 +1093,11 @@ For Elasticsearch, classic `from + size` pagination may become unstable across r
 - `SetCursorValue(...)` to continue from last page cursor.
 - `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult`.
 
-**`ESPITPageResult` structure** (embeds `CursorPageResult`):
+**`ESPITPageResult` structure** (embeds `CursorPageResult` — inherits all its fields: `Items`, `Total`, `HasMore`, `NextCursorValues`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Items` | `[]*R` | Current page data (inherited from `CursorPageResult`) |
-| `Total` | `int64` | Total count (inherited, only when `needTotal=true`) |
-| `HasMore` | `bool` | Whether more data exists (inherited) |
-| `NextCursorValues` | `[]any` | Cursor values for next page (inherited, nil when `HasMore=false`) |
+| *(inherited)* | | All fields from `CursorPageResult` (see [above](#querypage-single-batch-cursor-pagination)) |
 | `PitID` | `string` | Point-in-Time ID for next request (empty when `HasMore=false`) |
 
 ```go
