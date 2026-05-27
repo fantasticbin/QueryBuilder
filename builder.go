@@ -629,11 +629,15 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 	return nil
 }
 
+// hasStructFieldByName 判断泛型实体 R 是否包含指定字段（大小写不敏感）。
+// 会递归检查匿名嵌入结构体字段，并支持通过 gorm column tag 识别字段名。
 func hasStructFieldByName[R any](fieldName string) bool {
 	t := reflect.TypeOf(new(R)).Elem()
 	return hasFieldInType(t, fieldName)
 }
 
+// hasFieldInType 递归检查结构体类型中是否存在目标字段。
+// 支持指针类型、匿名嵌入字段与 gorm column tag。
 func hasFieldInType(t reflect.Type, fieldName string) bool {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -656,6 +660,7 @@ func hasFieldInType(t reflect.Type, fieldName string) bool {
 	return false
 }
 
+// containsTagField 判断 gorm tag 中是否声明了指定 column 字段。
 func containsTagField(tag, fieldName string) bool {
 	return strings.Contains(tag, "column:"+fieldName)
 }
