@@ -717,6 +717,40 @@ Use `QueryCursor` for memory-efficient streaming over large datasets. It returns
 - Cursor values are automatically extracted from the last record of each batch — no manual cursor management needed.
 - Supports single-field and multi-field cursors.
 
+#### Cursor Sort Direction (ASC/DESC Mixed)
+
+`SetCursorField(...)` supports direction prefixes per field:
+
+- `field` or `+field`: ASC
+- `-field`: DESC
+
+Examples:
+
+```go
+// Single-field descending cursor
+b.SetCursorField("-id")
+
+// Mixed-direction multi-field cursor
+b.SetCursorField("-created_at", "id") // created_at DESC, id ASC
+```
+
+> Note: For multi-field cursors, Gorm uses row-value comparison when all cursor fields share the same direction (all ASC or all DESC), and falls back to lexicographic OR conditions for mixed directions.
+
+#### Automatic Unique Tie-Breaker
+
+When cursor mode is used without explicitly calling `SetCursorField(...)`, QueryBuilder automatically appends a default unique tie-breaker field by data source:
+
+- Gorm/SQL: `id`
+- MongoDB: `_id`
+- ElasticSearch: `_shard_doc`
+
+This keeps cursor pagination deterministic and avoids missing cursor-field configuration errors.
+
+> ⚠️ **Important:** auto-append only injects the default field name.  
+> You must ensure that field is actually sortable/available in your model/index:
+> - For Gorm/SQL, if the model/table does not expose a sortable `id` column, query execution will return a SQL error.
+> - For ElasticSearch, `_shard_doc` is mainly intended for stable deep pagination in PIT/search context; for strict business ordering, still prefer explicit business sort fields + unique tie-breaker.
+
 #### Direct Builder Usage
 
 ```go

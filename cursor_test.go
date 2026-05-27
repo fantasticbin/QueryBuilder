@@ -16,6 +16,7 @@ type CursorTestEntity struct {
 	CreatedAt int64  `json:"created_at" bson:"created_at" gorm:"column:created_at"`
 }
 
+
 // TestBuildCursorIterator_NormalIteration 测试正常分批遍历
 func TestBuildCursorIterator_NormalIteration(t *testing.T) {
 	ctx := context.Background()
@@ -1181,7 +1182,7 @@ func TestListQueryPage_Error(t *testing.T) {
 	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetCursorField("ID").Return(mockQuerier)
-	mockQuerier.EXPECT().QueryPage(ctx).Return(nil, ErrCursorFieldNotSet)
+	mockQuerier.EXPECT().QueryPage(ctx).Return(nil, errors.New("query failed"))
 
 	list := NewList[CursorTestEntity]()
 	list.SetQuerier(mockQuerier)
@@ -1195,6 +1196,43 @@ func TestListQueryPage_Error(t *testing.T) {
 		t.Errorf("expected nil result, got %v", result)
 	}
 }
+
+func TestParseCursorSortFields_MixedDirections(t *testing.T) {
+	fields := parseCursorSortFields([]string{"-created_at", "id", "+score"})
+	if len(fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(fields))
+	}
+	if fields[0].Field != "created_at" || fields[0].Asc {
+		t.Fatalf("unexpected field[0]: %+v", fields[0])
+	}
+	if fields[1].Field != "id" || !fields[1].Asc {
+		t.Fatalf("unexpected field[1]: %+v", fields[1])
+	}
+	if fields[2].Field != "score" || !fields[2].Asc {
+		t.Fatalf("unexpected field[2]: %+v", fields[2])
+	}
+	if _, uniform := isUniformCursorDirection(fields); uniform {
+		t.Fatalf("expected mixed direction")
+	}
+}
+
+func TestMongoBuildCursorSort_MixedDirections(t *testing.T) {
+	b := &MongoBuilder[CursorTestEntity]{}
+	b.builder.cursorFields = []string{"-created_at", "id"}
+	b.builder.parsedCursorFields = parseCursorSortFields(b.builder.cursorFields)
+
+	sortDoc := b.buildCursorSort()
+	if len(sortDoc) != 2 {
+		t.Fatalf("expected 2 sort fields, got %d", len(sortDoc))
+	}
+	if sortDoc[0].Key != "created_at" || sortDoc[0].Value != -1 {
+		t.Fatalf("unexpected first sort: %+v", sortDoc[0])
+	}
+	if sortDoc[1].Key != "id" || sortDoc[1].Value != 1 {
+		t.Fatalf("unexpected second sort: %+v", sortDoc[1])
+	}
+}
+
 
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {

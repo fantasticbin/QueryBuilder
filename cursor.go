@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 )
 
-// ErrCursorFieldNotSet 游标字段未设置错误
+// ErrCursorFieldNotSet 游标字段未设置，且无法自动推断可用的唯一 tie-breaker。
 var ErrCursorFieldNotSet = errors.New("cursor fields not set: must call SetCursorField before QueryCursor")
 
 // CursorPageResult 游标分页查询结果结构体
@@ -37,6 +38,50 @@ type CursorPageResult[R any] struct {
 //	bool: 是否还有更多数据（通过 limit+1 探测精确判断）
 //	error: 错误信息
 type cursorFetchBatch[R any] func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error)
+
+// cursorSortField 表示单个游标排序字段及其方向。
+// Asc=true 表示升序，Asc=false 表示降序。
+type cursorSortField struct {
+	Field string
+	Asc   bool
+}
+
+// parseCursorSortFields 解析游标排序字段，支持前缀方向标记：
+// - "-field" 表示降序
+// - "+field" 或 "field" 表示升序
+func parseCursorSortFields(rawFields []string) []cursorSortField {
+	parsed := make([]cursorSortField, 0, len(rawFields))
+	for _, raw := range rawFields {
+		field := raw
+		asc := true
+		if strings.HasPrefix(raw, "-") {
+			field = strings.TrimPrefix(raw, "-")
+			asc = false
+		} else if strings.HasPrefix(raw, "+") {
+			field = strings.TrimPrefix(raw, "+")
+		}
+		parsed = append(parsed, cursorSortField{Field: field, Asc: asc})
+	}
+	return parsed
+}
+
+// isUniformCursorDirection 判断游标排序方向是否一致（全升序或全降序）。
+// 返回:
+//
+//	asc: 统一方向时的方向值（true=ASC, false=DESC）
+//	ok:  是否方向一致；当字段为空时返回 false
+func isUniformCursorDirection(fields []cursorSortField) (asc bool, ok bool) {
+	if len(fields) == 0 {
+		return true, false
+	}
+	first := fields[0].Asc
+	for i := 1; i < len(fields); i++ {
+		if fields[i].Asc != first {
+			return true, false
+		}
+	}
+	return first, true
+}
 
 // buildCursorIterator 构建游标迭代器
 // 封装"分批获取 → 逐条 yield → 更新游标值 → 继续获取"的迭代循环

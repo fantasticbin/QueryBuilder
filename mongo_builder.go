@@ -274,14 +274,19 @@ func (m *MongoBuilder[R]) Explain(ctx context.Context) (string, error) {
 // buildCursorSort 构建游标查询的排序条件（游标字段排序为主，用户 sort 去重追加）
 func (m *MongoBuilder[R]) buildCursorSort() bson.D {
 	sortDoc := bson.D{}
-	for _, field := range m.builder.cursorFields {
-		sortDoc = append(sortDoc, bson.E{Key: field, Value: 1}) // 升序
+	cursorFields := m.builder.getParsedCursorFields()
+	for _, cursorField := range cursorFields {
+		direction := 1
+		if !cursorField.Asc {
+			direction = -1
+		}
+		sortDoc = append(sortDoc, bson.E{Key: cursorField.Field, Value: direction})
 	}
 	// 追加用户 sort 中的其他字段（排除已在游标字段中的）
 	if m.sort != nil {
 		cursorFieldSet := make(map[string]bool, len(m.builder.cursorFields))
-		for _, f := range m.builder.cursorFields {
-			cursorFieldSet[f] = true
+		for _, cursorField := range cursorFields {
+			cursorFieldSet[cursorField.Field] = true
 		}
 		for _, s := range m.sort {
 			if !cursorFieldSet[s.Key] {
@@ -356,12 +361,14 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 	baseFilter := filter
 	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
-		cursorFields := m.builder.cursorFields
+		cursorFields := m.builder.getParsedCursorFields()
 		var cursorCondition bson.D
-
 		if len(cursorFields) == 1 {
-			// 单字段：{"field": {"$gt": value}}
-			cursorCondition = bson.D{{Key: cursorFields[0], Value: bson.D{{Key: "$gt", Value: cursorValues[0]}}}}
+			op := "$gt"
+			if !cursorFields[0].Asc {
+				op = "$lt"
+			}
+			cursorCondition = bson.D{{Key: cursorFields[0].Field, Value: bson.D{{Key: op, Value: cursorValues[0]}}}}
 		} else {
 			// 多字段复合游标条件：
 			// {"$or": [{"a": {"$gt": v1}}, {"a": v1, "b": {"$gt": v2}}]}
@@ -370,10 +377,13 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 				cond := bson.D{}
 				// 前面的字段等于对应的游标值
 				for j := 0; j < i; j++ {
-					cond = append(cond, bson.E{Key: cursorFields[j], Value: cursorValues[j]})
+					cond = append(cond, bson.E{Key: cursorFields[j].Field, Value: cursorValues[j]})
 				}
-				// 当前字段大于对应的游标值
-				cond = append(cond, bson.E{Key: cursorFields[i], Value: bson.D{{Key: "$gt", Value: cursorValues[i]}}})
+				op := "$gt"
+				if !cursorFields[i].Asc {
+					op = "$lt"
+				}
+				cond = append(cond, bson.E{Key: cursorFields[i].Field, Value: bson.D{{Key: op, Value: cursorValues[i]}}})
 				orConditions = append(orConditions, cond)
 			}
 			cursorCondition = bson.D{{Key: "$or", Value: orConditions}}
@@ -451,14 +461,14 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 
 	// 从（截断后的）最后一条文档的原始 BSON 中提取游标值（零反射）
 	nextCursorValues := make([]any, 0, len(m.builder.cursorFields))
-	for _, field := range m.builder.cursorFields {
-		rawVal, err := lastRaw.LookupErr(field)
+	for _, cursorField := range m.builder.getParsedCursorFields() {
+		rawVal, err := lastRaw.LookupErr(cursorField.Field)
 		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in document: %w", field, err)
+			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in document: %w", cursorField.Field, err)
 		}
 		var val any
 		if err := rawVal.Unmarshal(&val); err != nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q unmarshal failed: %w", field, err)
+			return nil, nil, 0, false, fmt.Errorf("cursor field %q unmarshal failed: %w", cursorField.Field, err)
 		}
 		nextCursorValues = append(nextCursorValues, val)
 	}

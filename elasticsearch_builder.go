@@ -453,8 +453,12 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 func (e *ElasticSearchBuilder[R]) buildCursorSortService(searchService *elastic.SearchService) *elastic.SearchService {
 	cursorFields := e.builder.cursorFields
 	if len(cursorFields) > 0 {
-		for _, field := range cursorFields {
-			searchService = searchService.SortBy(elastic.NewFieldSort(field).Asc())
+		for _, cursorField := range e.builder.getParsedCursorFields() {
+			fs := elastic.NewFieldSort(cursorField.Field).Asc()
+			if !cursorField.Asc {
+				fs = fs.Desc()
+			}
+			searchService = searchService.SortBy(fs)
 		}
 	} else if len(e.sort) == 0 {
 		// 未设置排序条件时默认使用 _doc 排序以获得最佳性能
@@ -474,8 +478,12 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortSources() ([]any, error) {
 	var sortList []any
 	cursorFields := e.builder.cursorFields
 	if len(cursorFields) > 0 {
-		for _, field := range cursorFields {
-			src, _ := elastic.NewFieldSort(field).Asc().Source()
+		for _, cursorField := range e.builder.getParsedCursorFields() {
+			fs := elastic.NewFieldSort(cursorField.Field).Asc()
+			if !cursorField.Asc {
+				fs = fs.Desc()
+			}
+			src, _ := fs.Source()
 			sortList = append(sortList, src)
 		}
 	} else if len(e.sort) == 0 {
