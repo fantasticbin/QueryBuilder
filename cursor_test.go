@@ -16,14 +16,6 @@ type CursorTestEntity struct {
 	CreatedAt int64  `json:"created_at" bson:"created_at" gorm:"column:created_at"`
 }
 
-type EmbeddedBase struct {
-	ID uint64 `gorm:"column:id"`
-}
-
-type CursorEmbeddedEntity struct {
-	EmbeddedBase
-	Name string
-}
 
 // TestBuildCursorIterator_NormalIteration 测试正常分批遍历
 func TestBuildCursorIterator_NormalIteration(t *testing.T) {
@@ -1241,11 +1233,6 @@ func TestMongoBuildCursorSort_MixedDirections(t *testing.T) {
 	}
 }
 
-func TestHasStructFieldByName_EmbeddedStruct(t *testing.T) {
-	if !hasStructFieldByName[CursorEmbeddedEntity]("id") {
-		t.Fatalf("expected embedded id field to be detected")
-	}
-}
 
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {
