@@ -744,6 +744,11 @@ b.SetCursorField("-created_at", "id") // created_at DESC, id ASC
 
 这样可以保证游标分页顺序稳定，并避免因未配置游标字段导致的运行时错误。
 
+> ⚠️ **重要提示：** 自动追加只会注入默认字段名。  
+> 你仍需确保该字段在模型/索引中真实可用且可排序：
+> - 对 Gorm/SQL，如果模型或表中不存在可排序的 `id` 列，执行查询时会返回 SQL 错误。
+> - 对 ElasticSearch，`_shard_doc` 更适合 PIT/search 场景下的稳定深分页；若需要严格业务排序，建议显式设置业务排序字段 + 唯一 tie-breaker。
+
 #### 直接使用构建器
 
 ```go

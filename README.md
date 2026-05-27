@@ -746,6 +746,11 @@ When cursor mode is used without explicitly calling `SetCursorField(...)`, Query
 
 This keeps cursor pagination deterministic and avoids missing cursor-field configuration errors.
 
+> ⚠️ **Important:** auto-append only injects the default field name.  
+> You must ensure that field is actually sortable/available in your model/index:
+> - For Gorm/SQL, if the model/table does not expose a sortable `id` column, query execution will return a SQL error.
+> - For ElasticSearch, `_shard_doc` is mainly intended for stable deep pagination in PIT/search context; for strict business ordering, still prefer explicit business sort fields + unique tie-breaker.
+
 #### Direct Builder Usage
 
 ```go
