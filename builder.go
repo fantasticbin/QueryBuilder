@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/olivere/elastic/v7"
@@ -474,7 +476,9 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 	ctx context.Context,
 	cursorQueryFn cursorFetchBatch[R],
 ) iter.Seq2[*R, error] {
-	b.ensureDefaultCursorField()
+	if err := b.ensureDefaultCursorField(); err != nil {
+		return func(yield func(*R, error) bool) { yield(nil, err) }
+	}
 
 	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
 
@@ -544,7 +548,9 @@ func (b *builder[B, R]) executePageWithMiddlewares(
 	ctx context.Context,
 	pageFetchFn cursorFetchBatch[R],
 ) (*CursorPageResult[R], error) {
-	b.ensureDefaultCursorField()
+	if err := b.ensureDefaultCursorField(); err != nil {
+		return nil, err
+	}
 
 	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
 
@@ -590,18 +596,43 @@ func (b *builder[B, R]) executePageWithMiddlewares(
 }
 
 // ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker。
-func (b *builder[B, R]) ensureDefaultCursorField() {
+func (b *builder[B, R]) ensureDefaultCursorField() error {
 	if len(b.cursorFields) > 0 {
-		return
+		return nil
 	}
 	switch b.dataSource {
 	case Gorm:
+		if !hasStructFieldByName[R]("id") {
+			return ErrCursorFieldNotSet
+		}
 		b.cursorFields = []string{"id"}
 	case MongoDB:
 		b.cursorFields = []string{"_id"}
 	case ElasticSearch:
 		b.cursorFields = []string{"tie_breaker_id"}
 	}
+	return nil
+}
+
+func hasStructFieldByName[R any](fieldName string) bool {
+	t := reflect.TypeOf(new(R)).Elem()
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < t.NumField(); i++ {
+		sf := t.Field(i)
+		if sf.Name == fieldName {
+			return true
+		}
+		if gormTag := sf.Tag.Get("gorm"); gormTag != "" && containsTagField(gormTag, fieldName) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTagField(tag, fieldName string) bool {
+	return strings.Contains(tag, "column:"+fieldName)
 }
 
 // prepareCursorPipeline 抽离游标查询的公共准备逻辑

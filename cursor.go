@@ -2,10 +2,14 @@ package builder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
 )
+
+// ErrCursorFieldNotSet 游标字段未设置，且无法自动推断可用的唯一 tie-breaker。
+var ErrCursorFieldNotSet = errors.New("cursor fields not set: must call SetCursorField before QueryCursor")
 
 // CursorPageResult 游标分页查询结果结构体
 // 用于 QueryPage 方法的返回值，提供单批次分页查询的结构化结果
