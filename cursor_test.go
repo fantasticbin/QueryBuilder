@@ -1215,6 +1215,23 @@ func TestParseCursorSortFields_MixedDirections(t *testing.T) {
 	}
 }
 
+func TestMongoBuildCursorSort_MixedDirections(t *testing.T) {
+	b := &MongoBuilder[CursorTestEntity]{}
+	b.builder.cursorFields = []string{"-created_at", "id"}
+	b.builder.parsedCursorFields = parseCursorSortFields(b.builder.cursorFields)
+
+	sortDoc := b.buildCursorSort()
+	if len(sortDoc) != 2 {
+		t.Fatalf("expected 2 sort fields, got %d", len(sortDoc))
+	}
+	if sortDoc[0].Key != "created_at" || sortDoc[0].Value != -1 {
+		t.Fatalf("unexpected first sort: %+v", sortDoc[0])
+	}
+	if sortDoc[1].Key != "id" || sortDoc[1].Value != 1 {
+		t.Fatalf("unexpected second sort: %+v", sortDoc[1])
+	}
+}
+
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {
 	ctx := context.Background()

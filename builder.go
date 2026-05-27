@@ -322,6 +322,8 @@ func (b *builder[B, R]) prepareAndValidate() error {
 	return nil
 }
 
+// getParsedCursorFields 返回解析后的游标字段缓存。
+// 若缓存为空且 cursorFields 已设置，则延迟解析一次并写回缓存。
 func (b *builder[B, R]) getParsedCursorFields() []cursorSortField {
 	if len(b.parsedCursorFields) == 0 && len(b.cursorFields) > 0 {
 		b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
@@ -495,6 +497,7 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 	ctx context.Context,
 	cursorQueryFn cursorFetchBatch[R],
 ) iter.Seq2[*R, error] {
+	// 游标字段默认值/合法性已在 prepareAndValidate 中统一处理。
 	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
 
 	// 包装 fetchBatch，使每批次查询经过中间件链

@@ -363,23 +363,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 	if len(cursorValues) > 0 {
 		cursorFields := m.builder.getParsedCursorFields()
 		var cursorCondition bson.D
-		if asc, uniform := isUniformCursorDirection(cursorFields); uniform && len(cursorFields) > 1 {
-			op := "$gt"
-			if !asc {
-				op = "$lt"
-			}
-			row := bson.A{}
-			for _, cf := range cursorFields {
-				row = append(row, "$"+cf.Field)
-			}
-			cursorCondition = bson.D{{
-				Key: "$expr",
-				Value: bson.D{{Key: op, Value: bson.A{
-					row,
-					bson.A(cursorValues),
-				}}},
-			}}
-		} else if len(cursorFields) == 1 {
+		if len(cursorFields) == 1 {
 			op := "$gt"
 			if !cursorFields[0].Asc {
 				op = "$lt"

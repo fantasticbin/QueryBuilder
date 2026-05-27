@@ -337,7 +337,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
-			cursorFields := g.builder.getParsedCursorFields()
+		cursorFields := g.builder.getParsedCursorFields()
 		if len(cursorFields) == 1 {
 			op := ">"
 			if !cursorFields[0].Asc {
