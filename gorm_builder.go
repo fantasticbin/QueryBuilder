@@ -276,7 +276,7 @@ func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB) *gorm.DB {
 	}
 
 	// 游标字段排序为主（升序）
-	cursorFields := parseCursorSortFields(g.builder.cursorFields)
+	cursorFields := g.builder.getParsedCursorFields()
 	for _, cursorField := range cursorFields {
 		order := "ASC"
 		if !cursorField.Asc {
@@ -337,7 +337,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
-		cursorFields := parseCursorSortFields(g.builder.cursorFields)
+			cursorFields := g.builder.getParsedCursorFields()
 		if len(cursorFields) == 1 {
 			op := ">"
 			if !cursorFields[0].Asc {
@@ -419,7 +419,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 	lastItem := list[len(list)-1]
 	rv := reflect.ValueOf(lastItem).Elem()
 	nextCursorValues := make([]any, 0, len(g.builder.cursorFields))
-	for _, cursorField := range parseCursorSortFields(g.builder.cursorFields) {
+	for _, cursorField := range g.builder.getParsedCursorFields() {
 		field := s.LookUpField(cursorField.Field)
 		if field == nil {
 			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in schema", cursorField.Field)

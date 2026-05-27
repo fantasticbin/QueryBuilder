@@ -740,7 +740,7 @@ b.SetCursorField("-created_at", "id") // created_at DESC, id ASC
 
 - Gorm/SQL：`id`
 - MongoDB：`_id`
-- ElasticSearch：`tie_breaker_id`
+- ElasticSearch：`_shard_doc`
 
 这样可以保证游标分页顺序稳定，并避免因未配置游标字段导致的运行时错误。
 

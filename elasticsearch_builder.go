@@ -453,7 +453,7 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 func (e *ElasticSearchBuilder[R]) buildCursorSortService(searchService *elastic.SearchService) *elastic.SearchService {
 	cursorFields := e.builder.cursorFields
 	if len(cursorFields) > 0 {
-		for _, cursorField := range parseCursorSortFields(cursorFields) {
+		for _, cursorField := range e.builder.getParsedCursorFields() {
 			fs := elastic.NewFieldSort(cursorField.Field).Asc()
 			if !cursorField.Asc {
 				fs = fs.Desc()
@@ -478,7 +478,7 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortSources() ([]any, error) {
 	var sortList []any
 	cursorFields := e.builder.cursorFields
 	if len(cursorFields) > 0 {
-		for _, cursorField := range parseCursorSortFields(cursorFields) {
+		for _, cursorField := range e.builder.getParsedCursorFields() {
 			fs := elastic.NewFieldSort(cursorField.Field).Asc()
 			if !cursorField.Asc {
 				fs = fs.Desc()

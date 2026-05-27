@@ -742,7 +742,7 @@ When cursor mode is used without explicitly calling `SetCursorField(...)`, Query
 
 - Gorm/SQL: `id`
 - MongoDB: `_id`
-- ElasticSearch: `tie_breaker_id`
+- ElasticSearch: `_shard_doc`
 
 This keeps cursor pagination deterministic and avoids missing cursor-field configuration errors.
 

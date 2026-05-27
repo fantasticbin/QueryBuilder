@@ -1196,6 +1196,25 @@ func TestListQueryPage_Error(t *testing.T) {
 	}
 }
 
+func TestParseCursorSortFields_MixedDirections(t *testing.T) {
+	fields := parseCursorSortFields([]string{"-created_at", "id", "+score"})
+	if len(fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(fields))
+	}
+	if fields[0].Field != "created_at" || fields[0].Asc {
+		t.Fatalf("unexpected field[0]: %+v", fields[0])
+	}
+	if fields[1].Field != "id" || !fields[1].Asc {
+		t.Fatalf("unexpected field[1]: %+v", fields[1])
+	}
+	if fields[2].Field != "score" || !fields[2].Asc {
+		t.Fatalf("unexpected field[2]: %+v", fields[2])
+	}
+	if _, uniform := isUniformCursorDirection(fields); uniform {
+		t.Fatalf("expected mixed direction")
+	}
+}
+
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {
 	ctx := context.Background()

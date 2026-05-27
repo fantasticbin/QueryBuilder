@@ -197,9 +197,10 @@ func (c queryConfig) clone() queryConfig {
 
 // cursorConfig 游标配置
 type cursorConfig struct {
-	cursorFields  []string // 游标分页排序字段列表
-	cursorValues  []any    // 游标初始值（外部传入，用于断点续查/App分页场景）
-	isCursorQuery bool     // 是否为游标查询模式
+	cursorFields       []string          // 游标分页排序字段列表
+	parsedCursorFields []cursorSortField // 解析后的游标字段与方向缓存
+	cursorValues       []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
+	isCursorQuery      bool              // 是否为游标查询模式
 }
 
 // clone 返回 cursorConfig 的深拷贝
@@ -213,6 +214,11 @@ func (c cursorConfig) clone() cursorConfig {
 		cursorValues := make([]any, len(c.cursorValues))
 		copy(cursorValues, c.cursorValues)
 		c.cursorValues = cursorValues
+	}
+	if c.parsedCursorFields != nil {
+		parsed := make([]cursorSortField, len(c.parsedCursorFields))
+		copy(parsed, c.parsedCursorFields)
+		c.parsedCursorFields = parsed
 	}
 	return c
 }
@@ -307,8 +313,20 @@ func (b *builder[B, R]) prepareAndValidate() error {
 
 	// fields 自动清洗
 	b.sanitizeFields()
+	if b.isCursorQuery {
+		if err := b.ensureDefaultCursorField(); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+func (b *builder[B, R]) getParsedCursorFields() []cursorSortField {
+	if len(b.parsedCursorFields) == 0 && len(b.cursorFields) > 0 {
+		b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
+	}
+	return b.parsedCursorFields
 }
 
 // sanitizeFields 对 fields 切片进行自动清洗：过滤空字符串、去重
@@ -407,6 +425,7 @@ func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
 // SetCursorField 设置游标分页排序字段（支持多字段）
 func (b *builder[B, R]) SetCursorField(fields ...string) B {
 	b.cursorFields = fields
+	b.parsedCursorFields = parseCursorSortFields(fields)
 	b.isCursorQuery = true
 	return b.selfRef
 }
@@ -476,10 +495,6 @@ func (b *builder[B, R]) executeCursorWithMiddlewares(
 	ctx context.Context,
 	cursorQueryFn cursorFetchBatch[R],
 ) iter.Seq2[*R, error] {
-	if err := b.ensureDefaultCursorField(); err != nil {
-		return func(yield func(*R, error) bool) { yield(nil, err) }
-	}
-
 	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
 
 	// 包装 fetchBatch，使每批次查询经过中间件链
@@ -548,10 +563,6 @@ func (b *builder[B, R]) executePageWithMiddlewares(
 	ctx context.Context,
 	pageFetchFn cursorFetchBatch[R],
 ) (*CursorPageResult[R], error) {
-	if err := b.ensureDefaultCursorField(); err != nil {
-		return nil, err
-	}
-
 	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
 
 	// 单批次查询：直接包装 pageFetchFn 经过中间件链执行一次
@@ -609,8 +620,9 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 	case MongoDB:
 		b.cursorFields = []string{"_id"}
 	case ElasticSearch:
-		b.cursorFields = []string{"tie_breaker_id"}
+		b.cursorFields = []string{"_shard_doc"}
 	}
+	b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
 	return nil
 }
 
@@ -621,7 +633,7 @@ func hasStructFieldByName[R any](fieldName string) bool {
 	}
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
-		if sf.Name == fieldName {
+		if strings.EqualFold(sf.Name, fieldName) {
 			return true
 		}
 		if gormTag := sf.Tag.Get("gorm"); gormTag != "" && containsTagField(gormTag, fieldName) {
