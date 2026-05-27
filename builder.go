@@ -631,6 +631,13 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 
 func hasStructFieldByName[R any](fieldName string) bool {
 	t := reflect.TypeOf(new(R)).Elem()
+	return hasFieldInType(t, fieldName)
+}
+
+func hasFieldInType(t reflect.Type, fieldName string) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
 	if t.Kind() != reflect.Struct {
 		return false
 	}
@@ -640,6 +647,9 @@ func hasStructFieldByName[R any](fieldName string) bool {
 			return true
 		}
 		if gormTag := sf.Tag.Get("gorm"); gormTag != "" && containsTagField(gormTag, fieldName) {
+			return true
+		}
+		if sf.Anonymous && hasFieldInType(sf.Type, fieldName) {
 			return true
 		}
 	}
