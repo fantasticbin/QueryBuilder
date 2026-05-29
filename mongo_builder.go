@@ -145,9 +145,13 @@ func (m *MongoBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 	if err := m.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
-	return m.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
-		return m.doQuery(ctx)
-	})
+	return executeWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&m.builder),
+		func(ctx context.Context) ([]*R, int64, error) {
+			return m.doQuery(ctx)
+		},
+	)
 }
 
 // QueryCursor 执行 MongoDB 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -157,10 +161,14 @@ func (m *MongoBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] 
 			yield(nil, err)
 		}
 	}
-	return m.builder.executeCursorWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-		list, nextCV, total, _, err := m.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
-		return list, nextCV, total, false, err
-	})
+	return executeCursorWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&m.builder),
+		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+			list, nextCV, total, _, err := m.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
+			return list, nextCV, total, false, err
+		},
+	)
 }
 
 // QueryPage 执行 MongoDB 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
@@ -168,9 +176,13 @@ func (m *MongoBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], 
 	if err := m.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
-	return m.builder.executePageWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-		return m.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
-	})
+	return executePageWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&m.builder),
+		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+			return m.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
+		},
+	)
 }
 
 // doQuery 执行实际的 MongoDB 查询逻辑

@@ -7,21 +7,22 @@ import (
 	"iter"
 	"time"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
 
-// DataSource 数据源类型枚举
-type DataSource int
+// DataSource 数据源类型枚举（定义于 core 包，此处为类型别名）
+type DataSource = core.DataSource
 
 const (
 	// Gorm 数据源
-	Gorm DataSource = iota
+	Gorm = core.Gorm
 	// MongoDB 数据源
-	MongoDB
+	MongoDB = core.MongoDB
 	// ElasticSearch 数据源
-	ElasticSearch
+	ElasticSearch = core.ElasticSearch
 )
 
 var (
@@ -76,19 +77,9 @@ func (p *DBProxy) CheckConfigured(ds DataSource) error {
 	return nil
 }
 
-// QueryMeta 查询元信息结构体
+// QueryMeta 查询元信息结构体（定义于 core 包，此处为类型别名）
 // 中间件可通过 builder.GetQueryMeta() 获取当前查询的元数据快照
-type QueryMeta struct {
-	DataSource     DataSource // 数据源类型
-	Start          uint32     // 分页起始位置
-	Limit          uint32     // 每页数据条数
-	NeedTotal      bool       // 是否需要查询总数
-	NeedPagination bool       // 是否需要分页
-	Fields         []string   // 查询字段投影
-	IsCursorQuery  bool       // 是否为游标查询模式
-	CursorFields   []string   // 游标分页排序字段列表
-	StartTime      time.Time  // 查询开始时间
-}
+type QueryMeta = core.QueryMeta
 
 // queryBuilder 构建器接口约束，利用 Go 1.26 自引用泛型约束特性
 // 泛型参数:
@@ -132,12 +123,8 @@ type QuerierExplain interface {
 	Explain(ctx context.Context) (string, error)
 }
 
-// QuerierMeta 查询元信息能力接口
-type QuerierMeta interface {
-	// GetQueryMeta 返回当前查询元信息的只读快照
-	// 中间件可通过 builder 参数直接调用此方法获取元数据，无需通过 ctx 传递
-	GetQueryMeta() QueryMeta
-}
+// QuerierMeta 查询元信息能力接口（定义于 core 包，此处为类型别名）
+type QuerierMeta = core.QuerierMeta
 
 // Querier 通用查询接口，作为工厂函数的返回类型
 // 包含所有配置方法（Setter）和执行能力接口
@@ -262,6 +249,18 @@ func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 	b.selfRef = self
 	b.querierRef = querier
 }
+
+// 以下方法实现 middlewareProvider[R] 接口，供 newMiddlewareContext 通过接口约束获取数据
+func (b *builder[B, R]) getMiddlewares() []Middleware[R]  { return b.middlewares }
+func (b *builder[B, R]) getQuerierRef() Querier[R]       { return b.querierRef }
+func (b *builder[B, R]) getBeforeHook() BeforeQueryHook  { return b.beforeHook }
+func (b *builder[B, R]) getAfterHook() AfterQueryHook[R] { return b.afterHook }
+func (b *builder[B, R]) getNeedTotal() bool              { return b.needTotal }
+func (b *builder[B, R]) getNeedPagination() bool         { return b.needPagination }
+func (b *builder[B, R]) getLimit() uint32                { return b.limit }
+func (b *builder[B, R]) getCursorValues() []any          { return b.cursorValues }
+func (b *builder[B, R]) getStart() uint32                { return b.start }
+func (b *builder[B, R]) setStartTime(t time.Time)        { b.startTime = t }
 
 // GetQueryMeta 返回当前查询元信息的只读快照
 // 中间件可通过 builder 参数直接调用此方法获取元数据
@@ -439,174 +438,6 @@ func (b *builder[B, R]) SetCursorValue(values ...any) B {
 	return b.selfRef
 }
 
-// resolveInitialCursorValues 解析初始游标值
-// 优先级：cursorValues（方案B：显式设置）> start（方案A：复用 start 作为单字段数值游标）
-// 返回 nil 表示从数据集起始位置开始查询
-func (b *builder[B, R]) resolveInitialCursorValues() []any {
-	// 方案B：如果显式设置了 cursorValues，直接使用
-	if len(b.cursorValues) > 0 {
-		return b.cursorValues
-	}
-
-	// 方案A：如果 start > 0，将其作为单字段数值游标的初始值
-	if b.start > 0 {
-		return []any{b.start}
-	}
-
-	return nil
-}
-
-// executeWithMiddlewares 执行中间件链并调用最终查询逻辑
-// 由各专属构建器在 QueryList 中调用，传入最终的查询函数
-// 支持超时控制和前置/后置钩子
-func (b *builder[B, R]) executeWithMiddlewares(
-	ctx context.Context,
-	queryFn func(context.Context) ([]*R, int64, error),
-) ([]*R, int64, error) {
-	// 设置查询开始时间
-	b.startTime = time.Now()
-
-	// 执行前置钩子
-	if b.beforeHook != nil {
-		ctx = b.beforeHook(ctx)
-	}
-
-	list, total, err := buildRunner[B, R](b)(ctx, queryFn)
-
-	// 执行后置钩子
-	if b.afterHook != nil {
-		b.afterHook(ctx, list, total, err)
-	}
-
-	return list, total, err
-}
-
-// executeCursorWithMiddlewares 执行游标查询模式下的中间件链和钩子
-// 封装游标查询的完整生命周期：BeforeQueryHook → 分批获取（每批执行中间件链）→ AfterQueryHook
-// 参数:
-//
-//	ctx: 上下文
-//	cursorQueryFn: 游标分批查询函数，接收 cursorValues 和 isFirstBatch 返回一批数据
-//
-// 返回:
-//
-//	iter.Seq2[*R, error]: 游标迭代器
-func (b *builder[B, R]) executeCursorWithMiddlewares(
-	ctx context.Context,
-	cursorQueryFn cursorFetchBatch[R],
-) iter.Seq2[*R, error] {
-	// 游标字段默认值/合法性已在 prepareAndValidate 中统一处理。
-	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
-
-	// 包装 fetchBatch，使每批次查询经过中间件链
-	wrappedFetch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-		var nextCursorValues []any
-		var batchTotal int64
-		queryFn := func(ctx context.Context) ([]*R, int64, error) {
-			batch, nextCV, total, _, err := cursorQueryFn(ctx, cursorValues, isFirstBatch)
-			nextCursorValues = nextCV
-			batchTotal = total
-			return batch, int64(len(batch)), err
-		}
-
-		list, _, err := runChain(ctx, queryFn)
-		return list, nextCursorValues, batchTotal, false, err
-	}
-
-	// 用于接收首批次查询返回的总数（needTotal 时有效）
-	var cursorTotal int64
-	// 构建迭代器，并在迭代完成后执行后置钩子
-	innerIter := buildCursorIterator[R](
-		ctx,
-		batchSize,
-		initialCursorValues,
-		b.needPagination,
-		wrappedFetch,
-		&cursorTotal,
-	)
-
-	// 包装迭代器，在遍历结束后执行 AfterQueryHook
-	return func(yield func(*R, error) bool) {
-		var allResults []*R
-		var lastErr error
-
-		for item, err := range innerIter {
-			if err != nil {
-				lastErr = err
-				if !yield(nil, err) {
-					break
-				}
-				break
-			}
-			allResults = append(allResults, item)
-			if !yield(item, nil) {
-				break
-			}
-		}
-
-		// 执行后置钩子
-		b.invokeAfterHook(ctx, allResults, cursorTotal, lastErr)
-	}
-}
-
-// executePageWithMiddlewares 执行单批次游标分页查询，返回结构化的分页结果
-// 封装"单批次游标查询 + 中间件链 + 前置/后置钩子 + HasMore 判断"的完整生命周期
-// 参数:
-//
-//	ctx: 上下文
-//	cursorQueryFn: 游标分批查询函数，接收 cursorValues 和 isFirstBatch 返回一批数据
-//
-// 返回:
-//
-//	*CursorPageResult[R]: 游标分页结果
-//	error: 错误信息
-func (b *builder[B, R]) executePageWithMiddlewares(
-	ctx context.Context,
-	pageFetchFn cursorFetchBatch[R],
-) (*CursorPageResult[R], error) {
-	ctx, batchSize, initialCursorValues, runChain := b.prepareCursorPipeline(ctx)
-
-	// 单批次查询：直接包装 pageFetchFn 经过中间件链执行一次
-	var nextCursorValues []any
-	var batchTotal int64
-	var hasMore bool
-	queryFn := func(ctx context.Context) ([]*R, int64, error) {
-		batch, nextCV, total, more, err := pageFetchFn(ctx, initialCursorValues, true)
-		nextCursorValues = nextCV
-		batchTotal = total
-		hasMore = more
-		return batch, int64(len(batch)), err
-	}
-
-	list, _, err := runChain(ctx, queryFn)
-	// 执行后置钩子
-	b.invokeAfterHook(ctx, list, batchTotal, err)
-	if err != nil {
-		return nil, err
-	}
-
-	// 组装结果
-	result := &CursorPageResult[R]{
-		Items: list,
-		Total: batchTotal,
-	}
-
-	// 使用各构建器通过 limit+1 探测精确返回的 hasMore
-	// HasMore=false 时 NextCursorValues 保持 nil（零值）
-	if hasMore {
-		result.HasMore = true
-		result.NextCursorValues = nextCursorValues
-	}
-
-	// 兜底：如果返回条数小于 batchSize，强制 HasMore=false
-	if len(list) < batchSize {
-		result.HasMore = false
-		result.NextCursorValues = nil
-	}
-
-	return result, nil
-}
-
 // ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker。
 func (b *builder[B, R]) ensureDefaultCursorField() error {
 	if len(b.cursorFields) > 0 {
@@ -622,51 +453,6 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 	}
 	b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
 	return nil
-}
-
-// prepareCursorPipeline 抽离游标查询的公共准备逻辑
-// 包含：确定批次大小、解析初始游标值、设置查询开始时间、执行前置钩子、构建中间件链执行器
-// 返回:
-//
-//	ctx: 经过前置钩子处理后的上下文
-//	batchSize: 每批次获取的数据条数
-//	initialCursorValues: 初始游标值
-//	runChain: 中间件链执行器，将查询函数包装进中间件链并执行
-func (b *builder[B, R]) prepareCursorPipeline(
-	ctx context.Context,
-) (context.Context, int, []any, middlewareRunner[R]) {
-	// 确定批次大小
-	batchSize := int(b.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
-
-	// 解析初始游标值：优先使用 cursorValues（方案B），其次使用 start（方案A）
-	initialCursorValues := b.resolveInitialCursorValues()
-	// 设置查询开始时间
-	b.startTime = time.Now()
-	// 执行前置钩子
-	if b.beforeHook != nil {
-		ctx = b.beforeHook(ctx)
-	}
-
-	// 通过 buildRunner 构建中间件链执行器
-	runChain := buildRunner[B, R](b)
-	return ctx, batchSize, initialCursorValues, runChain
-}
-
-// invokeAfterHook 执行后置钩子的统一逻辑
-// 当 needTotal 为 true 且 batchTotal > 0 时使用 batchTotal 作为总数；否则使用 list 长度
-func (b *builder[B, R]) invokeAfterHook(ctx context.Context, list []*R, batchTotal int64, err error) {
-	if b.afterHook == nil {
-		return
-	}
-	total := int64(len(list))
-	if b.needTotal && batchTotal > 0 {
-		total = batchTotal
-	}
-
-	b.afterHook(ctx, list, total, err)
 }
 
 // NewBuilder 通用工厂函数，根据 DataSource 枚举值创建对应的专属查询构建器

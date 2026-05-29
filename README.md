@@ -387,10 +387,10 @@ import (
     "time"
 
     "github.com/bluele/gcache"
-    builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/middleware"
 )
 
-// GCacheProvider implements builder.CacheProvider using gcache
+// GCacheProvider implements middleware.CacheProvider using gcache
 type GCacheProvider struct {
     cache gcache.Cache
 }
@@ -421,7 +421,7 @@ Use it with the cache middleware:
 cache := NewGCacheProvider(1000) // LRU cache with 1000 entries
 
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
-b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b builder.Querier[User]) string {
+b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
     meta := b.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
@@ -469,9 +469,9 @@ Since filter/sort are data-source-specific types (GORM scope, bson.D, elastic.Qu
 
 ```go
 // Hints are provided directly in DefaultCacheKeyBuilder
-keyBuilder := builder.DefaultCacheKeyBuilder{
+keyBuilder := middleware.DefaultCacheKeyBuilder{
     Prefix: "users",
-    Hints: builder.CacheKeyHints{
+    Hints: middleware.CacheKeyHints{
         Filter: map[string]any{"status": "active", "role": "admin"},
         Sort:   map[string]any{"created_at": "desc"},
         Extra:  map[string]any{"tenant_id": "tenant-123"},
@@ -490,12 +490,12 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
 })
 
 // Use DefaultCacheKeyBuilder with Hints — keys are derived from QueryMeta + Hints
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{
+    middleware.DefaultCacheKeyBuilder{
         Prefix: "users",
-        Hints: builder.CacheKeyHints{
+        Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "active", "role": "admin"},
             Sort:   map[string]any{"created_at": "desc"},
         },
@@ -510,14 +510,14 @@ users, total, err := b.QueryList(ctx)
 For scenarios where hints need to be dynamically resolved (e.g., multi-tenant isolation from context), use `HintsProvider`:
 
 ```go
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{
+    middleware.DefaultCacheKeyBuilder{
         Prefix: "users",
-        HintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+        HintsProvider: func(ctx context.Context) middleware.CacheKeyHints {
             // Dynamically extract tenant from context
-            return builder.CacheKeyHints{
+            return middleware.CacheKeyHints{
                 Filter: map[string]any{"status": "active"},
                 Extra:  map[string]any{"tenant_id": extractTenantID(ctx)},
             }
@@ -540,8 +540,8 @@ base.SetFields("id", "name", "email").SetNeedTotal(true)
 go func() {
     q := base.Clone()
     q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "active") })
-    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
-        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+    q.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        middleware.DefaultCacheKeyBuilder{Prefix: "users", Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "active"},
         }},
     ))
@@ -551,8 +551,8 @@ go func() {
 go func() {
     q := base.Clone()
     q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "inactive") })
-    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
-        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+    q.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        middleware.DefaultCacheKeyBuilder{Prefix: "users", Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "inactive"},
         }},
     ))
@@ -567,13 +567,13 @@ Implement the `CacheKeyBuilder` interface for full control over key generation:
 ```go
 type MyCacheKeyBuilder struct{}
 
-func (b MyCacheKeyBuilder) Build(ctx context.Context, meta builder.QueryMeta) string {
+func (b MyCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) string {
     tenantID := extractTenantID(ctx)
     return fmt.Sprintf("myapp:%s:%v:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
 }
 
 // Use with CacheMiddlewareWithKeyBuilder
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
 ```
 
 #### Key Stability & Isolation Guarantees

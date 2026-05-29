@@ -159,3 +159,24 @@ func buildCursorIterator[R any](
 		}
 	}
 }
+
+// resolveInitialCursorValues 解析初始游标值
+// 优先级：cursorValues（方案B：显式设置）> start（方案A：复用 start 作为单字段数值游标）
+// 返回 nil 表示从数据集起始位置开始查询
+// 参数:
+//
+//	cursorValues: 外部显式设置的游标初始值
+//	start: 分页起始位置（当 cursorValues 为空且 start > 0 时，作为单字段数值游标的初始值）
+func resolveInitialCursorValues(cursorValues []any, start uint32) []any {
+	// 方案B：如果显式设置了 cursorValues，直接使用
+	if len(cursorValues) > 0 {
+		return cursorValues
+	}
+
+	// 方案A：如果 start > 0，将其作为单字段数值游标的初始值
+	if start > 0 {
+		return []any{start}
+	}
+
+	return nil
+}

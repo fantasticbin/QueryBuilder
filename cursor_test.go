@@ -475,7 +475,7 @@ func TestResolveInitialCursorValues_CursorValuesPriority(t *testing.T) {
 	g.SetCursorValue(int64(999), "extra")
 	g.SetStart(50)
 
-	result := g.builder.resolveInitialCursorValues()
+	result := resolveInitialCursorValues(g.builder.cursorValues, g.builder.start)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 values, got %d", len(result))
@@ -494,7 +494,7 @@ func TestResolveInitialCursorValues_StartFallback(t *testing.T) {
 	g.SetCursorField("ID")
 	g.SetStart(42)
 
-	result := g.builder.resolveInitialCursorValues()
+	result := resolveInitialCursorValues(g.builder.cursorValues, g.builder.start)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 value, got %d", len(result))
@@ -509,7 +509,7 @@ func TestResolveInitialCursorValues_NeitherSet(t *testing.T) {
 	g := NewGormBuilder[CursorTestEntity](nil)
 	g.SetCursorField("ID")
 
-	result := g.builder.resolveInitialCursorValues()
+	result := resolveInitialCursorValues(g.builder.cursorValues, g.builder.start)
 
 	if result != nil {
 		t.Errorf("expected nil, got %v", result)

@@ -1,32 +1,44 @@
-package builder
+package middleware
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	gomock "go.uber.org/mock/gomock"
+	"github.com/fantasticbin/QueryBuilder/core"
 )
 
 type mockCache struct{ store map[string][]byte }
 
 func newMockCache() *mockCache { return &mockCache{store: map[string][]byte{}} }
-func (m *mockCache) Get(ctx context.Context, key string) ([]byte, bool) { v, ok := m.store[key]; return v, ok }
-func (m *mockCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) { m.store[key] = value }
+func (m *mockCache) Get(ctx context.Context, key string) ([]byte, bool) {
+	v, ok := m.store[key]
+	return v, ok
+}
+func (m *mockCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) {
+	m.store[key] = value
+}
 
-func baseMeta() QueryMeta {
-	return QueryMeta{DataSource: Gorm, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
+// mockQuerier 实现 core.QuerierMeta 接口
+type mockQuerier struct {
+	meta core.QueryMeta
+}
+
+func (m *mockQuerier) GetQueryMeta() core.QueryMeta { return m.meta }
+
+func baseMeta() core.QueryMeta {
+	return core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
 }
 
 func TestDefaultCacheKeyBuilderStability(t *testing.T) {
 	ctx := context.Background()
-	builder := DefaultCacheKeyBuilder{
+	kb := DefaultCacheKeyBuilder{
 		Prefix: "users",
 		Hints:  CacheKeyHints{Filter: map[string]any{"status": "active"}, Sort: map[string]any{"id": "desc"}, Extra: map[string]any{"tenant_id": "t1"}},
 	}
 	meta := baseMeta()
-	k1 := builder.Build(ctx, meta)
-	k2 := builder.Build(ctx, meta)
+	k1 := kb.Build(ctx, meta)
+	k2 := kb.Build(ctx, meta)
 	if k1 != k2 {
 		t.Fatalf("expected stable key, got %s != %s", k1, k2)
 	}
@@ -57,8 +69,8 @@ func TestDefaultCacheKeyBuilderPrefixIsolation(t *testing.T) {
 func TestDefaultCacheKeyBuilderWithoutHints(t *testing.T) {
 	ctx := context.Background()
 	meta := baseMeta()
-	builder := DefaultCacheKeyBuilder{Prefix: "users"}
-	if builder.Build(ctx, meta) == "" {
+	kb := DefaultCacheKeyBuilder{Prefix: "users"}
+	if kb.Build(ctx, meta) == "" {
 		t.Fatalf("key should not be empty when hints empty")
 	}
 }
@@ -81,19 +93,22 @@ func TestDefaultCacheKeyBuilderHintsProvider(t *testing.T) {
 	}
 }
 
+type testUser struct {
+	ID   int
+	Name string
+}
+
 func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	cache := newMockCache()
-	ctrl := gomock.NewController(t)
-	mockBuilder := NewMockQuerier[testUser](ctrl)
-	mockBuilder.EXPECT().GetQueryMeta().Return(QueryMeta{DataSource: Gorm, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}).AnyTimes()
+	mq := &mockQuerier{meta: core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}}
 
 	ctx := context.Background()
 	calls := 0
 	keyBuilder := DefaultCacheKeyBuilder{Prefix: "user-list", Hints: CacheKeyHints{Extra: map[string]any{"tenant_id": "tenant-a"}}}
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, keyBuilder)
 	next := func(ctx context.Context) ([]*testUser, int64, error) { calls++; return []*testUser{{ID: 1, Name: "A"}}, 1, nil }
-	_, _, _ = mw(ctx, mockBuilder, next)
-	_, _, _ = mw(ctx, mockBuilder, next)
+	_, _, _ = mw(ctx, mq, next)
+	_, _, _ = mw(ctx, mq, next)
 	if calls != 1 {
 		t.Fatalf("expected backend called once due to cache hit, got %d", calls)
 	}
@@ -101,13 +116,11 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 
 func TestCacheMiddlewareWithNilKeyBuilder(t *testing.T) {
 	cache := newMockCache()
-	ctrl := gomock.NewController(t)
-	mockBuilder := NewMockQuerier[testUser](ctrl)
-	mockBuilder.EXPECT().GetQueryMeta().Return(baseMeta()).AnyTimes()
+	mq := &mockQuerier{meta: baseMeta()}
 
 	ctx := context.Background()
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, nil)
-	_, _, err := mw(ctx, mockBuilder, func(ctx context.Context) ([]*testUser, int64, error) { return []*testUser{{ID: 1}}, 1, nil })
+	_, _, err := mw(ctx, mq, func(ctx context.Context) ([]*testUser, int64, error) { return []*testUser{{ID: 1}}, 1, nil })
 	if err != nil {
 		t.Fatalf("nil keyBuilder should not cause error: %v", err)
 	}
@@ -135,9 +148,4 @@ func TestCloneCacheIsolation(t *testing.T) {
 	if _, ok := cache.Get(ctx, k2); ok {
 		t.Fatalf("cache for k1 should not be accessible via k2")
 	}
-}
-
-type testUser struct {
-	ID   int
-	Name string
 }

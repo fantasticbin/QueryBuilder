@@ -174,9 +174,13 @@ func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, e
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
-	return e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
-		return e.doQuery(ctx)
-	})
+	return executeWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&e.builder),
+		func(ctx context.Context) ([]*R, int64, error) {
+			return e.doQuery(ctx)
+		},
+	)
 }
 
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -193,7 +197,11 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
 		return list, nextCursorValues, total, false, err
 	}
-	innerIter := e.builder.executeCursorWithMiddlewares(ctx, wrappedCursorQuery)
+	innerIter := executeCursorWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&e.builder),
+		wrappedCursorQuery,
+	)
 	return func(yield func(*R, error) bool) {
 		defer func() {
 			e.closePIT(pitID)
@@ -227,7 +235,11 @@ func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageRes
 		return list, nextCursorValues, total, hasMore, err
 	}
 
-	result, err := e.builder.executePageWithMiddlewares(ctx, pageFetchFn)
+	result, err := executePageWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](&e.builder),
+		pageFetchFn,
+	)
 
 	// 无论成功失败，如果 HasMore=false 则关闭 PIT
 	if err != nil {
@@ -275,7 +287,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 		resultPitID      string
 	)
 
-	list, total, err := e.builder.executeWithMiddlewares(ctx, func(ctx context.Context) ([]*R, int64, error) {
+	list, total, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) ([]*R, int64, error) {
 		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
 			ctx,
 			e.builder.cursorValues,

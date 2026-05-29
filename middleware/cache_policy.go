@@ -1,4 +1,4 @@
-package builder
+package middleware
 
 import (
 	"context"
@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/fantasticbin/QueryBuilder/core"
 )
 
 // CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。
 type CacheKeyBuilder interface {
-	Build(ctx context.Context, meta QueryMeta) string
+	Build(ctx context.Context, meta core.QueryMeta) string
 }
 
 // CacheKeyHints 用于补充默认缓存键维度（如 filter/sort）。
@@ -35,7 +37,10 @@ type DefaultCacheKeyBuilder struct {
 	HintsProvider func(context.Context) CacheKeyHints
 }
 
-func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta QueryMeta) string {
+// Build 根据查询元信息和 Hints 构建确定性、抗碰撞的缓存键。
+// 内部将 prefix、datasource、fields、pagination 及 hints（filter/sort/extra）组装为规范化 JSON，
+// 再取 SHA1 摘要生成最终 key，格式为 "qb:cache:<hex>"。
+func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) string {
 	payload := map[string]any{"prefix": b.Prefix}
 	payload["datasource"] = meta.DataSource
 	payload["fields"] = append([]string(nil), meta.Fields...)

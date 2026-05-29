@@ -387,10 +387,10 @@ import (
     "time"
 
     "github.com/bluele/gcache"
-    builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/middleware"
 )
 
-// GCacheProvider 使用 gcache 实现 builder.CacheProvider 接口
+// GCacheProvider 使用 gcache 实现 middleware.CacheProvider 接口
 type GCacheProvider struct {
     cache gcache.Cache
 }
@@ -421,7 +421,7 @@ func (g *GCacheProvider) Set(ctx context.Context, key string, value []byte, ttl 
 cache := NewGCacheProvider(1000) // 1000 条目的 LRU 缓存
 
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
-b.Use(builder.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b builder.Querier[User]) string {
+b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
     meta := b.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
@@ -468,9 +468,9 @@ type CacheKeyBuilder interface {
 
 ```go
 // Hints 直接在 DefaultCacheKeyBuilder 中提供
-keyBuilder := builder.DefaultCacheKeyBuilder{
+keyBuilder := middleware.DefaultCacheKeyBuilder{
     Prefix: "users",
-    Hints: builder.CacheKeyHints{
+    Hints: middleware.CacheKeyHints{
         Filter: map[string]any{"status": "active", "role": "admin"},
         Sort:   map[string]any{"created_at": "desc"},
         Extra:  map[string]any{"tenant_id": "tenant-123"},
@@ -489,12 +489,12 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
 })
 
 // 使用 DefaultCacheKeyBuilder 并提供 Hints——缓存键由 QueryMeta + Hints 共同决定
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{
+    middleware.DefaultCacheKeyBuilder{
         Prefix: "users",
-        Hints: builder.CacheKeyHints{
+        Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "active"},
             Sort:   map[string]any{"created_at": "desc"},
         },
@@ -509,14 +509,14 @@ users, total, err := b.QueryList(ctx)
 当 hints 需要从 ctx 中动态获取时（如多租户隔离），使用 `HintsProvider`：
 
 ```go
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     cache,
     5*time.Minute,
-    builder.DefaultCacheKeyBuilder{
+    middleware.DefaultCacheKeyBuilder{
         Prefix: "users",
-        HintsProvider: func(ctx context.Context) builder.CacheKeyHints {
+        HintsProvider: func(ctx context.Context) middleware.CacheKeyHints {
             // 从 context 中动态提取租户信息
-            return builder.CacheKeyHints{
+            return middleware.CacheKeyHints{
                 Filter: map[string]any{"status": "active"},
                 Extra:  map[string]any{"tenant_id": extractTenantID(ctx)},
             }
@@ -539,8 +539,8 @@ base.SetFields("id", "name", "email").SetNeedTotal(true)
 go func() {
     q := base.Clone()
     q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "active") })
-    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
-        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+    q.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        middleware.DefaultCacheKeyBuilder{Prefix: "users", Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "active"},
         }},
     ))
@@ -550,8 +550,8 @@ go func() {
 go func() {
     q := base.Clone()
     q.SetFilter(func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "inactive") })
-    q.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
-        builder.DefaultCacheKeyBuilder{Prefix: "users", Hints: builder.CacheKeyHints{
+    q.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute,
+        middleware.DefaultCacheKeyBuilder{Prefix: "users", Hints: middleware.CacheKeyHints{
             Filter: map[string]any{"status": "inactive"},
         }},
     ))
@@ -566,12 +566,12 @@ go func() {
 ```go
 type MyCacheKeyBuilder struct{}
 
-func (b MyCacheKeyBuilder) Build(ctx context.Context, meta builder.QueryMeta) string {
+func (b MyCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) string {
     tenantID := extractTenantID(ctx)
     return fmt.Sprintf("my-app:%s:%v:%d:%d", tenantID, meta.DataSource, meta.Start, meta.Limit)
 }
 
-b.Use(builder.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
+b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCacheKeyBuilder{}))
 ```
 
 #### 设计说明
