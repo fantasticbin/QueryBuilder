@@ -1233,6 +1233,9 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetSort(...)` | 所有构建器 | 设置数据源专属排序条件 |
 | `Clone()` | 所有构建器 | 创建独立副本，用于并发分叉查询 |
 | `SetESIndex(index)` | `ElasticSearchBuilder` | 设置/修改 ES 索引名 |
+| `SetPitKeepAlive(keepAlive)` | `ElasticSearchBuilder` | 设置 PIT（Point-in-Time）保活时长 |
+| `SetPITID(pitID)` | `ElasticSearchBuilder` | 设置 PIT ID，用于跨请求分页续查 |
+| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | 执行基于 PIT 的单批次分页查询，返回 `*ESPITPageResult` |
 | `Explain(ctx)` | 所有构建器 | 预览生成的查询语句（Dry Run） |
 
 ---

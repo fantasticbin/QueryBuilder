@@ -1235,6 +1235,9 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetSort(...)` | All builders | Set data source specific sort |
 | `Clone()` | All builders | Create an independent copy for concurrent forking |
 | `SetESIndex(index)` | `ElasticSearchBuilder` | Set/change ES index name |
+| `SetPitKeepAlive(keepAlive)` | `ElasticSearchBuilder` | Set PIT (Point-in-Time) keep-alive duration |
+| `SetPITID(pitID)` | `ElasticSearchBuilder` | Set PIT ID for cross-request pagination resumption |
+| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | Execute single-batch PIT-based pagination, returns `*ESPITPageResult` |
 | `Explain(ctx)` | All builders | Preview generated query (Dry Run) |
 
 ---

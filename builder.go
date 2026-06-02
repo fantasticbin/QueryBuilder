@@ -91,7 +91,7 @@ type queryBuilder[B any, R any] interface {
 	self() B
 	// QuerierList 嵌入列表查询执行能力，由各专属构建器各自实现
 	QuerierList[R]
-	// QuerierCursor 嵌入游标查询执行能力，返回迭代器
+	// QuerierCursor 嵌入游标查询执行能力
 	QuerierCursor[R]
 }
 
@@ -251,7 +251,7 @@ func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 }
 
 // 以下方法实现 middlewareProvider[R] 接口，供 newMiddlewareContext 通过接口约束获取数据
-func (b *builder[B, R]) getMiddlewares() []Middleware[R]  { return b.middlewares }
+func (b *builder[B, R]) getMiddlewares() []Middleware[R] { return b.middlewares }
 func (b *builder[B, R]) getQuerierRef() Querier[R]       { return b.querierRef }
 func (b *builder[B, R]) getBeforeHook() BeforeQueryHook  { return b.beforeHook }
 func (b *builder[B, R]) getAfterHook() AfterQueryHook[R] { return b.afterHook }

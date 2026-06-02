@@ -280,43 +280,6 @@ func executePageWithMiddlewares[R any](
 	return result, nil
 }
 
-// prepareCursorPipeline 抽离游标查询的公共准备逻辑
-// 包含：确定批次大小、解析初始游标值、设置查询开始时间、执行前置钩子、构建中间件链执行器
-// 参数:
-//
-//	ctx: 请求上下文
-//	mc: 中间件执行上下文
-//
-// 返回:
-//
-//	ctx: 经过前置钩子处理后的上下文
-//	batchSize: 每批次获取的数据条数
-//	initialCursorValues: 初始游标值
-//	runChain: 中间件链执行器，将查询函数包装进中间件链并执行
-func prepareCursorPipeline[R any](
-	ctx context.Context,
-	mc *middlewareContext[R],
-) (context.Context, int, []any, middlewareRunner[R]) {
-	// 确定批次大小
-	batchSize := int(mc.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
-
-	// 解析初始游标值：优先使用 cursorValues（方案B），其次使用 start（方案A）
-	initialCursorValues := resolveInitialCursorValues(mc.cursorValues, mc.start)
-	// 设置查询开始时间
-	mc.onStartTime(time.Now())
-	// 执行前置钩子
-	if mc.beforeHook != nil {
-		ctx = mc.beforeHook(ctx)
-	}
-
-	// 构建中间件链执行器
-	runChain := buildRunner[R](mc)
-	return ctx, batchSize, initialCursorValues, runChain
-}
-
 // invokeAfterHook 执行后置钩子的统一逻辑
 // 当 needTotal 为 true 且 batchTotal > 0 时使用 batchTotal 作为总数；否则使用 list 长度
 func invokeAfterHook[R any](ctx context.Context, mc *middlewareContext[R], list []*R, batchTotal int64, err error) {
