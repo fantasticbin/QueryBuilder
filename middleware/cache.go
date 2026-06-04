@@ -5,16 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	builder "github.com/fantasticbin/QueryBuilder"
 )
-
-// MiddlewareFunc 通用中间件函数签名。
-// 与根包 Middleware[R] 签名兼容，builder 参数满足 core.QuerierMeta 接口。
-type MiddlewareFunc[R any] func(
-	ctx context.Context,
-	builder core.QuerierMeta,
-	next func(context.Context) ([]*R, int64, error),
-) ([]*R, int64, error)
 
 // CacheProvider 缓存提供者接口
 // 用户可自定义缓存后端实现（如 Redis、内存缓存等）
@@ -33,11 +25,11 @@ type cacheResult[R any] struct {
 
 // CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
 // 中间件内部通过 builder.GetQueryMeta() 获取查询元信息，传递给 keyBuilder.Build
-func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) MiddlewareFunc[R] {
+func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) builder.Middleware[R] {
 	if keyBuilder == nil {
 		keyBuilder = DefaultCacheKeyBuilder{Prefix: "default"}
 	}
-	return CacheMiddleware[R](cache, ttl, func(ctx context.Context, b core.QuerierMeta) string {
+	return CacheMiddleware[R](cache, ttl, func(ctx context.Context, b builder.Querier[R]) string {
 		return keyBuilder.Build(ctx, b.GetQueryMeta())
 	})
 }
@@ -48,14 +40,14 @@ func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration
 //
 //	cache - 缓存提供者实例，实现 CacheProvider 接口
 //	ttl   - 缓存过期时间
-//	keyFn - 缓存 key 生成函数，接收 ctx 和 core.QuerierMeta 参数
+//	keyFn - 缓存 key 生成函数，接收 ctx 和 builder.Querier[R] 参数（可通过 GetQueryMeta() 获取元信息）
 //
 // 返回:
 //
-//	MiddlewareFunc[R] - 可直接通过 Use 方法添加到构建器的中间件
-func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context, b core.QuerierMeta) string) MiddlewareFunc[R] {
-	return func(ctx context.Context, builder core.QuerierMeta, next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
-		key := keyFn(ctx, builder)
+//	builder.Middleware[R] - 可直接通过 Use 方法添加到构建器的中间件
+func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context, b builder.Querier[R]) string) builder.Middleware[R] {
+	return func(ctx context.Context, b builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+		key := keyFn(ctx, b)
 
 		// 尝试从缓存获取
 		if data, ok := cache.Get(ctx, key); ok {

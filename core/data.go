@@ -11,3 +11,17 @@ const (
 	// ElasticSearch 数据源
 	ElasticSearch
 )
+
+// String 返回 DataSource 枚举值的字符串表示
+func (ds DataSource) String() string {
+	switch ds {
+	case Gorm:
+		return "Gorm"
+	case MongoDB:
+		return "MongoDB"
+	case ElasticSearch:
+		return "ElasticSearch"
+	default:
+		return "Unknown"
+	}
+}

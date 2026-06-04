@@ -11,20 +11,13 @@ import (
 type mockCache struct{ store map[string][]byte }
 
 func newMockCache() *mockCache { return &mockCache{store: map[string][]byte{}} }
-func (m *mockCache) Get(ctx context.Context, key string) ([]byte, bool) {
+func (m *mockCache) Get(_ context.Context, key string) ([]byte, bool) {
 	v, ok := m.store[key]
 	return v, ok
 }
-func (m *mockCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) {
+func (m *mockCache) Set(_ context.Context, key string, value []byte, _ time.Duration) {
 	m.store[key] = value
 }
-
-// mockQuerier 实现 core.QuerierMeta 接口
-type mockQuerier struct {
-	meta core.QueryMeta
-}
-
-func (m *mockQuerier) GetQueryMeta() core.QueryMeta { return m.meta }
 
 func baseMeta() core.QueryMeta {
 	return core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
@@ -100,7 +93,7 @@ type testUser struct {
 
 func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	cache := newMockCache()
-	mq := &mockQuerier{meta: core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}}
+	mq := &mockQuerier[testUser]{meta: core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 10, NeedTotal: true, NeedPagination: true, Fields: []string{"id"}}}
 
 	ctx := context.Background()
 	calls := 0
@@ -116,7 +109,7 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 
 func TestCacheMiddlewareWithNilKeyBuilder(t *testing.T) {
 	cache := newMockCache()
-	mq := &mockQuerier{meta: baseMeta()}
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
 
 	ctx := context.Background()
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, nil)
