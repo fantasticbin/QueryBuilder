@@ -2,11 +2,15 @@ package middleware
 
 import (
 	"context"
+	"iter"
 	"testing"
 	"time"
 
+	builder "github.com/fantasticbin/QueryBuilder"
 	"github.com/fantasticbin/QueryBuilder/core"
 )
+
+// --- mockCache 实现 CacheProvider ---
 
 type mockCache struct{ store map[string][]byte }
 
@@ -19,9 +23,46 @@ func (m *mockCache) Set(_ context.Context, key string, value []byte, _ time.Dura
 	m.store[key] = value
 }
 
+// --- mockQuerier 实现 builder.Querier[R]，仅 GetQueryMeta() 返回可配置元信息 ---
+
+type mockQuerier[R any] struct {
+	meta core.QueryMeta
+}
+
+func (m *mockQuerier[R]) GetQueryMeta() core.QueryMeta { return m.meta }
+
+// setter 桩（均返回自身，满足 Querier[R] 链式调用）
+func (m *mockQuerier[R]) Use(_ builder.Middleware[R]) builder.Querier[R]             { return m }
+func (m *mockQuerier[R]) SetStart(_ uint32) builder.Querier[R]                       { return m }
+func (m *mockQuerier[R]) SetLimit(_ uint32) builder.Querier[R]                       { return m }
+func (m *mockQuerier[R]) SetNeedTotal(_ bool) builder.Querier[R]                     { return m }
+func (m *mockQuerier[R]) SetNeedPagination(_ bool) builder.Querier[R]                { return m }
+func (m *mockQuerier[R]) SetFields(_ ...string) builder.Querier[R]                   { return m }
+func (m *mockQuerier[R]) SetBeforeQueryHook(_ builder.BeforeQueryHook) builder.Querier[R] { return m }
+func (m *mockQuerier[R]) SetAfterQueryHook(_ builder.AfterQueryHook[R]) builder.Querier[R] { return m }
+func (m *mockQuerier[R]) SetCursorField(_ ...string) builder.Querier[R]              { return m }
+func (m *mockQuerier[R]) SetCursorValue(_ ...any) builder.Querier[R]                 { return m }
+
+// 查询方法桩
+func (m *mockQuerier[R]) QueryList(_ context.Context) ([]*R, int64, error)                     { return nil, 0, nil }
+func (m *mockQuerier[R]) QueryCursor(_ context.Context) iter.Seq2[*R, error]                    { return nil }
+func (m *mockQuerier[R]) QueryPage(_ context.Context) (*builder.CursorPageResult[R], error)     { return nil, nil }
+func (m *mockQuerier[R]) Explain(_ context.Context) (string, error)                             { return "", nil }
+
+// --- 测试辅助 ---
+
 func baseMeta() core.QueryMeta {
 	return core.QueryMeta{DataSource: core.Gorm, Start: 0, Limit: 20, NeedTotal: true, NeedPagination: true, Fields: []string{"id", "name"}}
 }
+
+type testUser struct {
+	ID   int
+	Name string
+}
+
+// ============================================================================
+// CacheKeyBuilder 测试
+// ============================================================================
 
 func TestDefaultCacheKeyBuilderStability(t *testing.T) {
 	ctx := context.Background()
@@ -86,10 +127,9 @@ func TestDefaultCacheKeyBuilderHintsProvider(t *testing.T) {
 	}
 }
 
-type testUser struct {
-	ID   int
-	Name string
-}
+// ============================================================================
+// CacheMiddleware 集成测试
+// ============================================================================
 
 func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	cache := newMockCache()
