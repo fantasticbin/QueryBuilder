@@ -255,11 +255,6 @@ func (b *builder[B, R]) getMiddlewares() []Middleware[R] { return b.middlewares 
 func (b *builder[B, R]) getQuerierRef() Querier[R]       { return b.querierRef }
 func (b *builder[B, R]) getBeforeHook() BeforeQueryHook  { return b.beforeHook }
 func (b *builder[B, R]) getAfterHook() AfterQueryHook[R] { return b.afterHook }
-func (b *builder[B, R]) getNeedTotal() bool              { return b.needTotal }
-func (b *builder[B, R]) getNeedPagination() bool         { return b.needPagination }
-func (b *builder[B, R]) getLimit() uint32                { return b.limit }
-func (b *builder[B, R]) getCursorValues() []any          { return b.cursorValues }
-func (b *builder[B, R]) getStart() uint32                { return b.start }
 func (b *builder[B, R]) setStartTime(t time.Time)        { b.startTime = t }
 
 // GetQueryMeta 返回当前查询元信息的只读快照
@@ -282,6 +277,10 @@ func (b *builder[B, R]) GetQueryMeta() QueryMeta {
 	if b.cursorFields != nil {
 		meta.CursorFields = make([]string, len(b.cursorFields))
 		copy(meta.CursorFields, b.cursorFields)
+	}
+	if b.cursorValues != nil {
+		meta.CursorValues = make([]any, len(b.cursorValues))
+		copy(meta.CursorValues, b.cursorValues)
 	}
 	return meta
 }
@@ -425,7 +424,6 @@ func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
 func (b *builder[B, R]) SetCursorField(fields ...string) B {
 	b.cursorFields = fields
 	b.parsedCursorFields = parseCursorSortFields(fields)
-	b.isCursorQuery = true
 	return b.selfRef
 }
 
@@ -434,8 +432,17 @@ func (b *builder[B, R]) SetCursorField(fields ...string) B {
 // 如果同时设置了 start > 0 且未设置 cursorValues，start 将作为单字段数值游标的初始值
 func (b *builder[B, R]) SetCursorValue(values ...any) B {
 	b.cursorValues = values
-	b.isCursorQuery = true
 	return b.selfRef
+}
+
+// beginQueryMode 标记当前执行入口是否为游标查询。
+func (b *builder[B, R]) beginQueryMode(isCursorQuery bool) {
+	b.isCursorQuery = isCursorQuery
+}
+
+// finishCursorQuery 结束游标查询模式，避免复用 builder 时污染后续普通查询。
+func (b *builder[B, R]) finishCursorQuery() {
+	b.isCursorQuery = false
 }
 
 // ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker。

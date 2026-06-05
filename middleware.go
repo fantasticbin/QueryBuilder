@@ -57,15 +57,11 @@ type middlewareRunner[R any] func(ctx context.Context, queryFn func(context.Cont
 //
 //	R: 查询结果的实体类型
 type middlewareProvider[R any] interface {
+	GetQueryMeta() QueryMeta
 	getMiddlewares() []Middleware[R]
 	getQuerierRef() Querier[R]
 	getBeforeHook() BeforeQueryHook
 	getAfterHook() AfterQueryHook[R]
-	getNeedTotal() bool
-	getNeedPagination() bool
-	getLimit() uint32
-	getCursorValues() []any
-	getStart() uint32
 	setStartTime(t time.Time)
 }
 
@@ -89,16 +85,17 @@ type middlewareContext[R any] struct {
 
 // newMiddlewareContext 通过 middlewareProvider 接口提取中间件执行所需的状态快照
 func newMiddlewareContext[R any](p middlewareProvider[R]) *middlewareContext[R] {
+	meta := p.GetQueryMeta()
 	return &middlewareContext[R]{
 		middlewares:    p.getMiddlewares(),
 		querierRef:     p.getQuerierRef(),
 		beforeHook:     p.getBeforeHook(),
 		afterHook:      p.getAfterHook(),
-		needTotal:      p.getNeedTotal(),
-		needPagination: p.getNeedPagination(),
-		limit:          p.getLimit(),
-		cursorValues:   p.getCursorValues(),
-		start:          p.getStart(),
+		needTotal:      meta.NeedTotal,
+		needPagination: meta.NeedPagination,
+		limit:          meta.Limit,
+		cursorValues:   meta.CursorValues,
+		start:          meta.Start,
 		onStartTime:    p.setStartTime,
 	}
 }

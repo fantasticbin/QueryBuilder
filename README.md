@@ -19,7 +19,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Built-in Cache Middleware**: Out-of-the-box `CacheMiddleware` with a pluggable `CacheProvider` interface — bring your own cache backend (Redis, in-memory, etc.).
 - **Field Selection**: Use `SetFields` to select only specific fields, reducing bandwidth and memory usage across all data sources.
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
-- **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination info, and query start time are available without context injection.
+- **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination/cursor info, and query start time are available without context injection.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
 - **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Also provides `QueryPage` for single-batch cursor pagination, returning a structured `CursorPageResult` (items + has_more + next_cursor) — ideal for App "load more" or API-driven pagination. Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
@@ -651,6 +651,7 @@ This approach is safe for `Clone` scenarios because each clone's middleware pipe
 | `Fields` | `[]string` | Field projection list |
 | `IsCursorQuery` | `bool` | Whether this is a cursor query |
 | `CursorFields` | `[]string` | Cursor pagination sort fields |
+| `CursorValues` | `[]any` | Initial cursor values passed by the caller for resume/app pagination scenarios |
 | `StartTime` | `time.Time` | Query start timestamp |
 
 ### Dry Run / Explain

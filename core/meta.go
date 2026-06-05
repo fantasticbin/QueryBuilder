@@ -13,6 +13,7 @@ type QueryMeta struct {
 	Fields         []string   // 查询字段投影
 	IsCursorQuery  bool       // 是否为游标查询模式
 	CursorFields   []string   // 游标分页排序字段列表
+	CursorValues   []any      // 游标初始值（外部传入，用于断点续查/App分页场景）
 	StartTime      time.Time  // 查询开始时间
 }
 

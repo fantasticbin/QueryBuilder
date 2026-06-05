@@ -133,6 +133,7 @@ func (g *GormBuilder[R]) GetQueryMeta() QueryMeta {
 
 // QueryList 执行 GORM 查询列表操作
 func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+	g.builder.beginQueryMode(false)
 	if err := g.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
@@ -147,23 +148,19 @@ func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
 
 // QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
 func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	if err := g.builder.prepareAndValidate(); err != nil {
-		return func(yield func(*R, error) bool) {
-			yield(nil, err)
-		}
-	}
-	return executeCursorWithMiddlewares(
+	return executeBuilderCursorQuery(
 		ctx,
-		newMiddlewareContext[R](&g.builder),
+		&g.builder,
 		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			list, nextCV, total, _, err := g.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
-			return list, nextCV, total, false, err
+			return g.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
 		},
 	)
 }
 
 // QueryPage 执行 GORM 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
 func (g *GormBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+	g.builder.beginQueryMode(true)
+	defer g.builder.finishCursorQuery()
 	if err := g.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}

@@ -171,6 +171,7 @@ func (e *ElasticSearchBuilder[R]) GetQueryMeta() QueryMeta {
 
 // QueryList 执行 ElasticSearch 查询列表操作
 func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+	e.builder.beginQueryMode(false)
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, 0, err
 	}
@@ -186,39 +187,26 @@ func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, e
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
 // 使用 ES 的 search_after API 进行分批查询
 func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	if err := e.builder.prepareAndValidate(); err != nil {
-		return func(yield func(*R, error) bool) {
-			yield(nil, err)
-		}
-	}
-	// ES 的 search_after 不使用通用的 buildCursorIterator，因为它需要直接使用 sort values
+	// ES 的 search_after 需要在迭代结束后关闭当前查询打开的 PIT。
 	var pitID string
-	wrappedCursorQuery := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-		list, nextCursorValues, total, _, err := e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
-		return list, nextCursorValues, total, false, err
-	}
-	innerIter := executeCursorWithMiddlewares(
+	return executeBuilderCursorQueryWithCleanup(
 		ctx,
-		newMiddlewareContext[R](&e.builder),
-		wrappedCursorQuery,
-	)
-	return func(yield func(*R, error) bool) {
-		defer func() {
+		&e.builder,
+		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+			return e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
+		},
+		func() {
 			e.closePIT(pitID)
-		}()
-
-		for item, err := range innerIter {
-			if !yield(item, err) {
-				return
-			}
-		}
-	}
+		},
+	)
 }
 
 // QueryPage 执行 ElasticSearch 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
 // 内部自动管理 PIT 生命周期：自动打开 PIT，HasMore=false 时自动关闭
 // 不暴露 PIT ID 给调用方（与 QueryPageWithPIT 的区别）
 func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+	e.builder.beginQueryMode(true)
+	defer e.builder.finishCursorQuery()
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
@@ -256,6 +244,8 @@ func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageRes
 // QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
 // 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议。
 func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error) {
+	e.builder.beginQueryMode(true)
+	defer e.builder.finishCursorQuery()
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
@@ -267,17 +257,14 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 	}
 
 	oldNeedPagination := e.builder.needPagination
-	oldIsCursorQuery := e.builder.isCursorQuery
 	oldPitID := e.pitID
 	defer func() {
 		e.builder.needPagination = oldNeedPagination
-		e.builder.isCursorQuery = oldIsCursorQuery
 		e.pitID = oldPitID
 	}()
 
 	// PIT + search_after 本质是分页查询，确保 QueryMeta 和执行语义一致
 	e.builder.needPagination = true
-	e.builder.isCursorQuery = true
 
 	isFirstBatch := len(e.builder.cursorValues) == 0
 

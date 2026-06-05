@@ -161,6 +161,50 @@ func buildCursorIterator[R any](
 	}
 }
 
+// executeBuilderCursorQuery 封装各专属构建器 QueryCursor 的公共入口生命周期。
+func executeBuilderCursorQuery[B queryBuilder[B, R], R any](
+	ctx context.Context,
+	b *builder[B, R],
+	fetchBatch cursorFetchBatch[R],
+) iter.Seq2[*R, error] {
+	return executeBuilderCursorQueryWithCleanup(ctx, b, fetchBatch, nil)
+}
+
+// executeBuilderCursorQueryWithCleanup 在公共 QueryCursor 生命周期结束时执行额外清理。
+func executeBuilderCursorQueryWithCleanup[B queryBuilder[B, R], R any](
+	ctx context.Context,
+	b *builder[B, R],
+	fetchBatch cursorFetchBatch[R],
+	cleanup func(),
+) iter.Seq2[*R, error] {
+	b.beginQueryMode(true)
+	if err := b.prepareAndValidate(); err != nil {
+		defer b.finishCursorQuery()
+		return func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	innerIter := executeCursorWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](b),
+		fetchBatch,
+	)
+	return func(yield func(*R, error) bool) {
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+			b.finishCursorQuery()
+		}()
+		for item, err := range innerIter {
+			if !yield(item, err) {
+				return
+			}
+		}
+	}
+}
+
 // resolveInitialCursorValues 解析初始游标值
 // 优先级：cursorValues（方案B：显式设置）> start（方案A：复用 start 作为单字段数值游标）
 // 返回 nil 表示从数据集起始位置开始查询
