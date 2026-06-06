@@ -8,18 +8,6 @@ import (
 	"time"
 )
 
-// CursorPageResult 游标分页查询结果结构体
-// 用于 QueryPage 方法的返回值，提供单批次分页查询的结构化结果
-// 泛型参数:
-//
-//	R: 查询结果的实体类型
-type CursorPageResult[R any] struct {
-	Items            []*R  // 当前页的数据列表
-	Total            int64 // 总数（仅在 needTotal=true 时有效）
-	HasMore          bool  // 是否还有下一页数据
-	NextCursorValues []any // 下一页的游标值（用于传入下次查询的 SetCursorValue），HasMore=false 时为 nil
-}
-
 // cursorFetchBatch 游标分批获取函数类型
 // 参数:
 //

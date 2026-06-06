@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -32,8 +33,8 @@ func TestSetScopeWithGorm(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if gb, ok := b.(*GormBuilder[TestEntity]); ok {
 				if gb.filter == nil {
 					t.Error("expected filter to be set via SetScope + NewGormScope")
@@ -44,18 +45,18 @@ func TestSetScopeWithGorm(t *testing.T) {
 			} else {
 				t.Error("expected builder to be *GormBuilder[TestEntity]")
 			}
-			return []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, 1, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, Total: 1}, nil
 		})
 
-		result, total, err := list.Query(ctx)
+		result, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if total != 1 {
-			t.Errorf("expected total 1, got %d", total)
+		if result.Total != 1 {
+			t.Errorf("expected total 1, got %d", result.Total)
 		}
-		if len(result) != 1 {
-			t.Errorf("expected 1 result, got %d", len(result))
+		if len(result.Items) != 1 {
+			t.Errorf("expected 1 result, got %d", len(result.Items))
 		}
 	})
 
@@ -75,8 +76,8 @@ func TestSetScopeWithGorm(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if gb, ok := b.(*GormBuilder[TestEntity]); ok {
 				if gb.filter != nil {
 					t.Error("expected filter to be nil")
@@ -85,10 +86,10 @@ func TestSetScopeWithGorm(t *testing.T) {
 					t.Error("expected sort to be set")
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -110,8 +111,8 @@ func TestSetScopeWithGorm(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if gb, ok := b.(*GormBuilder[TestEntity]); ok {
 				if gb.filter == nil {
 					t.Error("expected filter to be set")
@@ -120,10 +121,10 @@ func TestSetScopeWithGorm(t *testing.T) {
 					t.Error("expected sort to be nil")
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -148,8 +149,8 @@ func TestSetScopeWithMongo(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if mb, ok := b.(*MongoBuilder[TestEntity]); ok {
 				if mb.filter == nil {
 					t.Error("expected filter to be set")
@@ -166,18 +167,18 @@ func TestSetScopeWithMongo(t *testing.T) {
 			} else {
 				t.Error("expected builder to be *MongoBuilder[TestEntity]")
 			}
-			return []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, 1, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, Total: 1}, nil
 		})
 
-		result, total, err := list.Query(ctx)
+		result, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if total != 1 {
-			t.Errorf("expected total 1, got %d", total)
+		if result.Total != 1 {
+			t.Errorf("expected total 1, got %d", result.Total)
 		}
-		if len(result) != 1 {
-			t.Errorf("expected 1 result, got %d", len(result))
+		if len(result.Items) != 1 {
+			t.Errorf("expected 1 result, got %d", len(result.Items))
 		}
 	})
 
@@ -195,8 +196,8 @@ func TestSetScopeWithMongo(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if mb, ok := b.(*MongoBuilder[TestEntity]); ok {
 				if mb.filter != nil {
 					t.Error("expected filter to be nil")
@@ -205,10 +206,10 @@ func TestSetScopeWithMongo(t *testing.T) {
 					t.Error("expected sort to be set")
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -228,8 +229,8 @@ func TestSetScopeWithMongo(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if mb, ok := b.(*MongoBuilder[TestEntity]); ok {
 				if mb.filter == nil {
 					t.Error("expected filter to be set")
@@ -238,10 +239,10 @@ func TestSetScopeWithMongo(t *testing.T) {
 					t.Error("expected sort to be nil")
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -266,8 +267,8 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if eb, ok := b.(*ElasticSearchBuilder[TestEntity]); ok {
 				if eb.filter == nil {
 					t.Error("expected filter to be set")
@@ -278,18 +279,18 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 			} else {
 				t.Error("expected builder to be *ElasticSearchBuilder[TestEntity]")
 			}
-			return []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, 1, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Alice", Age: 25}}, Total: 1}, nil
 		})
 
-		result, total, err := list.Query(ctx)
+		result, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if total != 1 {
-			t.Errorf("expected total 1, got %d", total)
+		if result.Total != 1 {
+			t.Errorf("expected total 1, got %d", result.Total)
 		}
-		if len(result) != 1 {
-			t.Errorf("expected 1 result, got %d", len(result))
+		if len(result.Items) != 1 {
+			t.Errorf("expected 1 result, got %d", len(result.Items))
 		}
 	})
 
@@ -307,8 +308,8 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if eb, ok := b.(*ElasticSearchBuilder[TestEntity]); ok {
 				if eb.filter != nil {
 					t.Error("expected filter to be nil")
@@ -317,10 +318,10 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 					t.Errorf("expected 1 sort, got %d", len(eb.sort))
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -339,8 +340,8 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if eb, ok := b.(*ElasticSearchBuilder[TestEntity]); ok {
 				if eb.filter == nil {
 					t.Error("expected filter to be set")
@@ -349,10 +350,10 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 					t.Errorf("expected 0 sort, got %d", len(eb.sort))
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -373,8 +374,8 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 		list.Use(func(
 			ctx context.Context,
 			b Querier[TestEntity],
-			next func(context.Context) ([]*TestEntity, int64, error),
-		) ([]*TestEntity, int64, error) {
+			next func(context.Context) (core.Result[TestEntity], error),
+		) (core.Result[TestEntity], error) {
 			if eb, ok := b.(*ElasticSearchBuilder[TestEntity]); ok {
 				if eb.filter == nil {
 					t.Error("expected filter to be set")
@@ -383,10 +384,10 @@ func TestSetScopeWithElasticSearch(t *testing.T) {
 					t.Errorf("expected 2 sorts, got %d", len(eb.sort))
 				}
 			}
-			return []*TestEntity{}, 0, nil
+			return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 		})
 
-		_, _, err := list.Query(ctx)
+		_, err := list.Query(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -406,8 +407,8 @@ func TestSetScopeNil(t *testing.T) {
 	list.Use(func(
 		ctx context.Context,
 		b Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		if gb, ok := b.(*GormBuilder[TestEntity]); ok {
 			if gb.filter != nil {
 				t.Error("expected filter to be nil when no scope is set")
@@ -416,10 +417,10 @@ func TestSetScopeNil(t *testing.T) {
 				t.Error("expected sort to be nil when no scope is set")
 			}
 		}
-		return []*TestEntity{}, 0, nil
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 	})
 
-	_, _, err := list.Query(ctx)
+	_, err := list.Query(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -446,17 +447,17 @@ func TestSetScopeBeforeMiddleware(t *testing.T) {
 	list.Use(func(
 		ctx context.Context,
 		b Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		if gb, ok := b.(*GormBuilder[TestEntity]); ok {
 			if gb.filter == nil {
 				t.Error("expected filter to be set before middleware execution")
 			}
 		}
-		return []*TestEntity{}, 0, nil
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
 	})
 
-	_, _, err := list.Query(ctx)
+	_, err := list.Query(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

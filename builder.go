@@ -101,7 +101,7 @@ type queryBuilder[B any, R any] interface {
 //	R: 查询结果的实体类型
 type QuerierList[R any] interface {
 	// QueryList 执行查询列表操作
-	QueryList(ctx context.Context) ([]*R, int64, error)
+	QueryList(ctx context.Context) (*core.ListResult[R], error)
 }
 
 // QuerierCursor 游标查询执行能力接口
@@ -113,7 +113,7 @@ type QuerierCursor[R any] interface {
 	QueryCursor(ctx context.Context) iter.Seq2[*R, error]
 	// QueryPage 执行单批次游标分页查询，返回结构化的分页结果
 	// 包含当前页数据、是否有下一页、下一页游标值等信息
-	QueryPage(ctx context.Context) (*CursorPageResult[R], error)
+	QueryPage(ctx context.Context) (*core.CursorPageResult[R], error)
 }
 
 // QuerierExplain 查询预览能力接口

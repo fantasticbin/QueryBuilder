@@ -21,7 +21,7 @@
 - **查询钩子**：`BeforeQueryHook` 和 `AfterQueryHook`，用于轻量级的查询前后置逻辑（上下文注入、日志记录、指标统计等）。
 - **查询元信息**：中间件可通过 `builder.GetQueryMeta()` 直接获取查询元数据——数据源类型、分页/游标信息和查询开始时间无需通过 context 注入即可获取。
 - **Dry Run / Explain**：每个构建器提供 `Explain` 方法，预览生成的查询语句（SQL、MongoDB filter、ES DSL），无需实际执行。
-- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。同时提供 `QueryPage` 单批次游标分页 API，返回结构化的 `CursorPageResult`（items + has_more + next_cursor），适用于 App "加载更多" 或 API 驱动的分页场景。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
+- **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。同时提供 `QueryPage` 单批次游标分页 API，返回结构化的 `core.CursorPageResult`（items + has_more + next_cursor），适用于 App "加载更多" 或 API 驱动的分页场景。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
 - **选项模式**：通过函数式选项灵活配置查询参数。
@@ -101,13 +101,13 @@ func main() {
     b.SetNeedPagination(true)
 
     // 执行查询
-    users, total, err := b.QueryList(ctx)
+    result, err := b.QueryList(ctx)
     if err != nil {
         panic(err)
     }
 
-    _ = users
-    _ = total
+    _ = result.Items
+    _ = result.Total
 }
 
 type User struct {
@@ -128,9 +128,10 @@ import (
     pb "demo/api/user/v1"
     "demo/internal/model"
     builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/core"
 )
 
-func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
+func ListUser(ctx context.Context, req *pb.ListUserRequest) (*core.ListResult[model.User], error) {
     list := builder.NewList[model.User]()
     list.SetDataSource(builder.Gorm)
 
@@ -144,17 +145,17 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
         },
     ))
 
-    result, total, err := list.Query(
+    result, err := list.Query(
         ctx,
         builder.WithData(builder.NewDBProxy(model.DB, nil, nil)),
         builder.WithStart(req.Start),
         builder.WithLimit(req.Limit),
     )
     if err != nil {
-        return nil, 0, err
+        return nil, err
     }
 
-    return result, total, nil
+    return result, nil
 }
 ```
 
@@ -174,15 +175,15 @@ list.SetDataSource(builder.Gorm)
 list.Use(func(
     ctx context.Context,
     b builder.Querier[model.User], // 底层构建器实例
-    next func(context.Context) ([]*model.User, int64, error),
-) ([]*model.User, int64, error) {
+    next func(context.Context) (core.Result[model.User], error),
+) (core.Result[model.User], error) {
     start := time.Now()
-    result, total, err := next(ctx)
+    result, err := next(ctx)
     fmt.Printf("查询耗时 %v\n", time.Since(start))
-    return result, total, err
+    return result, err
 })
 
-result, total, err := list.Query(ctx, opts...)
+result, err := list.Query(ctx, opts...)
 ```
 
 ### 指定字段
@@ -193,10 +194,10 @@ result, total, err := list.Query(ctx, opts...)
 // 直接使用构建器
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
 b.SetFields("id", "name", "email")
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 
 // 通过 List 选项
-result, total, err := list.Query(ctx,
+result, err := list.Query(ctx,
     builder.WithData(builder.NewDBProxy(db, nil, nil)),
     builder.WithFields("id", "name", "email"),
 )
@@ -223,15 +224,15 @@ b.SetBeforeQueryHook(func(ctx context.Context) context.Context {
 })
 
 // 后置钩子：记录查询结果日志
-b.SetAfterQueryHook(func(ctx context.Context, list []*User, total int64, err error) {
+b.SetAfterQueryHook(func(ctx context.Context, result core.Result[User], err error) {
     if err != nil {
         log.Printf("查询失败: %v", err)
     } else {
-        log.Printf("查询返回 %d 条记录, 总数: %d", len(list), total)
+        log.Printf("查询返回 %d 条记录, 总数: %d", len(result.GetItems()), result.GetTotal())
     }
 })
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 ### 超时控制
@@ -248,7 +249,7 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 if err != nil {
     // 超时时 err 可能为 context.DeadlineExceeded
     log.Printf("查询错误: %v", err)
@@ -258,13 +259,13 @@ if err != nil {
 该方式在所有数据源中表现一致——GORM、MongoDB 和 ElasticSearch 均原生支持 context 的取消和超时机制。你还可以结合中间件来记录慢查询：
 
 ```go
-b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Context) ([]*User, int64, error)) ([]*User, int64, error) {
+b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Context) (core.Result[User], error)) (core.Result[User], error) {
     start := time.Now()
-    list, total, err := next(ctx)
+    result, err := next(ctx)
     if duration := time.Since(start); duration > 2*time.Second {
         log.Printf("检测到慢查询: %v", duration)
     }
-    return list, total, err
+    return result, err
 })
 ```
 
@@ -312,12 +313,12 @@ for i, page := range pages {
     go func(idx int, p struct{ start, limit uint32 }) {
         defer wg.Done()
         q := base.Clone().SetStart(p.start).SetLimit(p.limit)
-        list, _, err := q.QueryList(ctx)
+        result, err := q.QueryList(ctx)
         if err != nil {
             log.Printf("page %d error: %v", idx, err)
             return
         }
-        results[idx] = list
+        results[idx] = result.Items
     }(i, page)
 }
 wg.Wait()
@@ -333,8 +334,8 @@ base.SetFields("id", "user_id", "amount").SetLimit(20)
 pending := base.Clone().SetFilter(bson.D{{Key: "status", Value: "pending"}})
 completed := base.Clone().SetFilter(bson.D{{Key: "status", Value: "completed"}})
 
-go func() { pendingOrders, _, _ := pending.QueryList(ctx) }()
-go func() { completedOrders, _, _ := completed.QueryList(ctx) }()
+go func() { pendingOrders, _ := pending.QueryList(ctx) }()
+go func() { completedOrders, _ := completed.QueryList(ctx) }()
 ```
 
 #### Clone 后追加不同中间件
@@ -347,13 +348,13 @@ base.SetFilter(filterScope).SetLimit(100)
 go func() {
     q := base.Clone()
     q.Use(cacheMiddleware)  // 此副本走缓存
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 
 go func() {
     q := base.Clone()
     q.Use(metricsMiddleware) // 此副本收集指标
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 ```
 
@@ -426,7 +427,7 @@ b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Co
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 ### 缓存键生成策略
@@ -501,7 +502,7 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     },
 ))
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 #### HintsProvider（动态 Hints 提供者）
@@ -544,7 +545,7 @@ go func() {
             Filter: map[string]any{"status": "active"},
         }},
     ))
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 
 go func() {
@@ -555,7 +556,7 @@ go func() {
             Filter: map[string]any{"status": "inactive"},
         }},
     ))
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 ```
 
@@ -592,7 +593,7 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCac
 ```go
 // 在中间件中——直接从 builder 获取 meta
 func MyMiddleware[R any]() builder.Middleware[R] {
-    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
         meta := q.GetQueryMeta()
         log.Printf("数据源: %v, 起始: %d, 每页: %d, 字段: %v",
             meta.DataSource, meta.Start, meta.Limit, meta.Fields)
@@ -619,7 +620,7 @@ var queryMetaKey = queryMetaKeyType{}
 
 // 将 QueryMeta 注入到 context 的中间件
 func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
-    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
         ctx = context.WithValue(ctx, queryMetaKey, q.GetQueryMeta())
         return next(ctx)
     }
@@ -695,13 +696,13 @@ func TestListUser(t *testing.T) {
     mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
     mockQuerier.EXPECT().
         QueryList(gomock.Any()).
-        Return([]*model.User{{ID: 1, Name: "Alice"}}, int64(1), nil)
+        Return(&core.ListResult[model.User]{Items: []*model.User{{ID: 1, Name: "Alice"}}, Total: 1}, nil)
 
     // 注入 Mock
     list := builder.NewList[model.User]()
     list.SetQuerier(mockQuerier)
 
-    result, total, err := list.Query(ctx, opts...)
+    result, err := list.Query(ctx, opts...)
     // 断言结果...
 }
 ```
@@ -948,7 +949,7 @@ for user, err := range list.QueryCursor(ctx,
 }
 ```
 
-> **提示：** 对于单页游标分页场景（如 API 驱动的"加载更多"），建议使用 [`QueryPage`](#querypage单批次游标分页) —— 它返回结构化的 `CursorPageResult`，包含 `HasMore` 和 `NextCursorValues`，更适合构建分页 API 响应。
+> **提示：** 对于单页游标分页场景（如 API 驱动的"加载更多"），建议使用 [`QueryPage`](#querypage单批次游标分页) —— 它返回结构化的 `core.CursorPageResult`，包含 `HasMore` 和 `NextCursorValues`，更适合构建分页 API 响应。
 
 **全量遍历不查总数**（数据导出场景）：
 
@@ -972,18 +973,18 @@ for user, err := range list.QueryCursor(ctx,
 
 #### QueryPage（单批次游标分页）
 
-`QueryPage` 是专为单批次游标分页设计的 API，返回结构化的 `CursorPageResult` —— 适用于 App "加载更多" 或 API 驱动的分页场景，一次调用即可获得 `items + next_cursor + has_more`。
+`QueryPage` 是专为单批次游标分页设计的 API，返回结构化的 `core.CursorPageResult` —— 适用于 App "加载更多" 或 API 驱动的分页场景，一次调用即可获得 `items + next_cursor + has_more`。
 
 **与 `QueryCursor` 的核心区别：**
 
 | 维度 | `QueryCursor` | `QueryPage` |
 |------|--------------|-------------|
-| 返回类型 | `iter.Seq2[*R, error]`（迭代器） | `*CursorPageResult[R]`（结构体） |
+| 返回类型 | `iter.Seq2[*R, error]`（迭代器） | `*core.CursorPageResult[R]`（结构体） |
 | 使用场景 | 全量遍历 / 流式处理 | 单页获取 |
 | HasMore 检测 | 隐式（空批次 = 结束） | 显式（`limit+1` 探测） |
 | 游标管理 | 自动（内部维护） | 手动（调用方持久化 `NextCursorValues`） |
 
-**`CursorPageResult` 结构：**
+**`core.CursorPageResult` 结构：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -1124,13 +1125,13 @@ sql, err := b.Explain(ctx)
 
 - `SetPITID(pitID)`：续用上一次 PIT 会话。
 - `SetCursorValue(...)`：设置上一页返回的游标值。
-- `QueryPageWithPIT(ctx)`：查询一页并返回 `ESPITPageResult`。
+- `QueryPageWithPIT(ctx)`：查询一页并返回 `core.ESPITPageResult`。
 
-**`ESPITPageResult` 结构**（内嵌 `CursorPageResult`，继承其所有字段：`Items`、`Total`、`HasMore`、`NextCursorValues`）：
+**`core.ESPITPageResult` 结构**（内嵌 `core.CursorPageResult`，继承其所有字段：`Items`、`Total`、`HasMore`、`NextCursorValues`）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| *（继承）* | | `CursorPageResult` 的所有字段（参见[上方](#querypage单批次游标分页)） |
+| *（继承）* | | `core.CursorPageResult` 的所有字段（参见[上方](#querypage单批次游标分页)） |
 | `PitID` | `string` | Point-in-Time ID，用于下一次请求（`HasMore=false` 时为空） |
 
 ```go
@@ -1222,9 +1223,9 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetAfterQueryHook(hook)` | 设置查询后置钩子 |
 | `SetCursorField(fields...)` | 设置游标分页排序字段 |
 | `SetCursorValue(values...)` | 设置游标初始值（用于从指定位置恢复遍历） |
-| `QueryList(ctx)` | 执行查询 |
+| `QueryList(ctx)` | 执行查询，返回 `*core.ListResult` |
 | `QueryCursor(ctx)` | 执行游标分页查询，返回 `iter.Seq2` 迭代器 |
-| `QueryPage(ctx)` | 执行单批次游标分页查询，返回 `*CursorPageResult`（items + has_more + next_cursor） |
+| `QueryPage(ctx)` | 执行单批次游标分页查询，返回 `*core.CursorPageResult`（items + has_more + next_cursor） |
 
 ### 构建器专属方法
 
@@ -1236,7 +1237,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetESIndex(index)` | `ElasticSearchBuilder` | 设置/修改 ES 索引名 |
 | `SetPitKeepAlive(keepAlive)` | `ElasticSearchBuilder` | 设置 PIT（Point-in-Time）保活时长 |
 | `SetPITID(pitID)` | `ElasticSearchBuilder` | 设置 PIT ID，用于跨请求分页续查 |
-| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | 执行基于 PIT 的单批次分页查询，返回 `*ESPITPageResult` |
+| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | 执行基于 PIT 的单批次分页查询，返回 `*core.ESPITPageResult` |
 | `Explain(ctx)` | 所有构建器 | 预览生成的查询语句（Dry Run） |
 
 ---

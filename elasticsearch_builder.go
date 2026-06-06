@@ -8,6 +8,7 @@ import (
 	"iter"
 	"time"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/fantasticbin/QueryBuilder/util"
 	"github.com/olivere/elastic/v7"
 )
@@ -25,13 +26,6 @@ type ElasticSearchBuilder[R any] struct {
 	sort         []elastic.Sorter // ES 专属排序条件
 	pitKeepAlive time.Duration    // Point-in-Time 保持时间
 	pitID        string           // 外部传入/内部更新的 PIT ID（用于跨请求分页）
-}
-
-// ESPITPageResult ES PIT 分页查询结果。
-// 内嵌 CursorPageResult 复用通用游标分页字段，额外提供 PitID 用于跨请求续查。
-type ESPITPageResult[R any] struct {
-	CursorPageResult[R]
-	PitID string // Point-in-Time ID，用于下一批查询（HasMore=false 时为空）
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -170,18 +164,23 @@ func (e *ElasticSearchBuilder[R]) GetQueryMeta() QueryMeta {
 }
 
 // QueryList 执行 ElasticSearch 查询列表操作
-func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
 	e.builder.beginQueryMode(false)
 	if err := e.builder.prepareAndValidate(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return executeWithMiddlewares(
+	result, err := executeWithMiddlewares(
 		ctx,
 		newMiddlewareContext[R](&e.builder),
-		func(ctx context.Context) ([]*R, int64, error) {
-			return e.doQuery(ctx)
+		func(ctx context.Context) (core.Result[R], error) {
+			list, total, err := e.doQuery(ctx)
+			return &core.ListResult[R]{Items: list, Total: total}, err
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+	return listResultFromResult(result), nil
 }
 
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -204,7 +203,7 @@ func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R,
 // QueryPage 执行 ElasticSearch 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
 // 内部自动管理 PIT 生命周期：自动打开 PIT，HasMore=false 时自动关闭
 // 不暴露 PIT ID 给调用方（与 QueryPageWithPIT 的区别）
-func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
 	e.builder.beginQueryMode(true)
 	defer e.builder.finishCursorQuery()
 	if err := e.builder.prepareAndValidate(); err != nil {
@@ -243,7 +242,7 @@ func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*CursorPageRes
 
 // QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
 // 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议。
-func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITPageResult[R], error) {
+func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.ESPITPageResult[R], error) {
 	e.builder.beginQueryMode(true)
 	defer e.builder.finishCursorQuery()
 	if err := e.builder.prepareAndValidate(); err != nil {
@@ -274,7 +273,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 		resultPitID      string
 	)
 
-	list, total, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) ([]*R, int64, error) {
+	chainResult, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) (core.Result[R], error) {
 		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
 			ctx,
 			e.builder.cursorValues,
@@ -283,23 +282,24 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*ESPITP
 			&e.pitID,
 		)
 		if queryErr != nil {
-			return nil, 0, queryErr
+			return nil, queryErr
 		}
 
 		nextCursorValues = batchNextCursorValues
 		hasMore = batchHasMore
 		resultPitID = e.pitID
 
-		return batchList, batchTotal, nil
+		return &core.ListResult[R]{Items: batchList, Total: batchTotal}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	listResult := listResultFromResult(chainResult)
 
-	result := &ESPITPageResult[R]{
-		CursorPageResult: CursorPageResult[R]{
-			Items:            list,
-			Total:            total,
+	result := &core.ESPITPageResult[R]{
+		CursorPageResult: core.CursorPageResult[R]{
+			Items:            listResult.Items,
+			Total:            listResult.Total,
 			HasMore:          hasMore,
 			NextCursorValues: nextCursorValues,
 		},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/fantasticbin/QueryBuilder/util"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
@@ -132,18 +133,23 @@ func (g *GormBuilder[R]) GetQueryMeta() QueryMeta {
 }
 
 // QueryList 执行 GORM 查询列表操作
-func (g *GormBuilder[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+func (g *GormBuilder[R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
 	g.builder.beginQueryMode(false)
 	if err := g.builder.prepareAndValidate(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return executeWithMiddlewares(
+	result, err := executeWithMiddlewares(
 		ctx,
 		newMiddlewareContext[R](&g.builder),
-		func(ctx context.Context) ([]*R, int64, error) {
-			return g.doQuery(ctx)
+		func(ctx context.Context) (core.Result[R], error) {
+			list, total, err := g.doQuery(ctx)
+			return &core.ListResult[R]{Items: list, Total: total}, err
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+	return listResultFromResult(result), nil
 }
 
 // QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -158,7 +164,7 @@ func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 }
 
 // QueryPage 执行 GORM 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
-func (g *GormBuilder[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+func (g *GormBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
 	g.builder.beginQueryMode(true)
 	defer g.builder.finishCursorQuery()
 	if err := g.builder.prepareAndValidate(); err != nil {

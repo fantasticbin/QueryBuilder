@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"go.uber.org/mock/gomock"
 )
 
@@ -38,10 +39,10 @@ func TestMongoDBQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(gomock.Any()).
-					Return([]*MongoTestEntity{
+					Return(&core.ListResult[MongoTestEntity]{Items: []*MongoTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 						{ID: 2, Name: "Bob", Age: 30},
-					}, int64(2), nil)
+					}, Total: 2}, nil)
 			},
 			expectedResult: []*MongoTestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
@@ -60,9 +61,9 @@ func TestMongoDBQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(gomock.Any()).
-					Return([]*MongoTestEntity{
+					Return(&core.ListResult[MongoTestEntity]{Items: []*MongoTestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
-					}, int64(1), nil)
+					}, Total: 1}, nil)
 			},
 			expectedResult: []*MongoTestEntity{
 				{ID: 1, Name: "Alice", Age: 25},
@@ -80,7 +81,7 @@ func TestMongoDBQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(gomock.Any()).
-					Return(nil, int64(0), nil)
+					Return(&core.ListResult[MongoTestEntity]{Total: 0}, nil)
 			},
 			expectedResult: nil,
 			expectedTotal:  0,
@@ -102,8 +103,8 @@ func TestMongoDBQueryList(t *testing.T) {
 			list.Use(func(
 				ctx context.Context,
 				builder Querier[MongoTestEntity],
-				next func(context.Context) ([]*MongoTestEntity, int64, error),
-			) ([]*MongoTestEntity, int64, error) {
+				next func(context.Context) (core.Result[MongoTestEntity], error),
+			) (core.Result[MongoTestEntity], error) {
 				return next(ctx)
 			})
 
@@ -112,7 +113,7 @@ func TestMongoDBQueryList(t *testing.T) {
 				WithData(NewDBProxy(nil, nil, nil)),
 			}
 
-			result, total, err := list.Query(ctx, opts...)
+			result, err := list.Query(ctx, opts...)
 
 			if tt.expectedErr != nil {
 				if err == nil || err.Error() != tt.expectedErr.Error() {
@@ -123,15 +124,15 @@ func TestMongoDBQueryList(t *testing.T) {
 					t.Errorf("unexpected error: %v", err)
 				}
 
-				if total != tt.expectedTotal {
-					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, total)
+				if result.Total != tt.expectedTotal {
+					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, result.Total)
 				}
 
-				if len(result) != len(tt.expectedResult) {
-					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result))
+				if len(result.Items) != len(tt.expectedResult) {
+					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result.Items))
 				}
 
-				for i, item := range result {
+				for i, item := range result.Items {
 					if item.ID != tt.expectedResult[i].ID || item.Name != tt.expectedResult[i].Name || item.Age != tt.expectedResult[i].Age {
 						t.Errorf("expected result[%d]: %+v, got: %+v", i, tt.expectedResult[i], item)
 					}

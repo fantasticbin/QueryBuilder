@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/olivere/elastic/v7"
 	"go.uber.org/mock/gomock"
 )
@@ -53,10 +54,13 @@ func TestElasticsearchQueryList(t *testing.T) {
 				mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(gomock.Any()).
-					Return([]*ElasticTestEntity{
-						{ID: 1, Name: "Alice", Age: 25},
-						{ID: 2, Name: "Bob", Age: 30},
-					}, int64(2), nil)
+					Return(&core.ListResult[ElasticTestEntity]{
+						Items: []*ElasticTestEntity{
+							{ID: 1, Name: "Alice", Age: 25},
+							{ID: 2, Name: "Bob", Age: 30},
+						},
+						Total: 2,
+					}, nil)
 			},
 			filter: ElasticTestFilter{},
 			sort:   ElasticTestSort{Field: "id", Direction: "asc"},
@@ -76,9 +80,12 @@ func TestElasticsearchQueryList(t *testing.T) {
 				mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(gomock.Any()).
-					Return([]*ElasticTestEntity{
-						{ID: 1, Name: "Alice", Age: 25},
-					}, int64(1), nil)
+					Return(&core.ListResult[ElasticTestEntity]{
+						Items: []*ElasticTestEntity{
+							{ID: 1, Name: "Alice", Age: 25},
+						},
+						Total: 1,
+					}, nil)
 			},
 			filter: ElasticTestFilter{Name: "Alice"},
 			sort:   ElasticTestSort{Field: "id", Direction: "desc"},
@@ -105,7 +112,7 @@ func TestElasticsearchQueryList(t *testing.T) {
 				WithData(NewDBProxy(nil, nil, &elastic.Client{})),
 			}
 
-			result, total, err := list.Query(ctx, opts...)
+			result, err := list.Query(ctx, opts...)
 
 			if tt.expectedErr != nil {
 				if err == nil || err.Error() != tt.expectedErr.Error() {
@@ -116,15 +123,15 @@ func TestElasticsearchQueryList(t *testing.T) {
 					t.Errorf("unexpected error: %v", err)
 				}
 
-				if total != tt.expectedTotal {
-					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, total)
+				if result.Total != tt.expectedTotal {
+					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, result.Total)
 				}
 
-				if len(result) != len(tt.expectedResult) {
-					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result))
+				if len(result.Items) != len(tt.expectedResult) {
+					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result.Items))
 				}
 
-				for i, item := range result {
+				for i, item := range result.Items {
 					if item.ID != tt.expectedResult[i].ID || item.Name != tt.expectedResult[i].Name || item.Age != tt.expectedResult[i].Age {
 						t.Errorf("expected result[%d]: %+v, got: %+v", i, tt.expectedResult[i], item)
 					}
@@ -167,7 +174,7 @@ func TestElasticsearchIndexValidation(t *testing.T) {
 	)
 	esBuilder.SetFilter(elastic.NewMatchAllQuery())
 
-	_, _, err := esBuilder.QueryList(ctx)
+	_, err := esBuilder.QueryList(ctx)
 	if err == nil {
 		t.Error("expected error when index is not configured, got nil")
 	}

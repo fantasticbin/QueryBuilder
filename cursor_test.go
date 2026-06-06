@@ -5,7 +5,9 @@ import (
 	"errors"
 	"iter"
 	"testing"
+	"time"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"go.uber.org/mock/gomock"
 )
 
@@ -15,7 +17,6 @@ type CursorTestEntity struct {
 	Name      string `json:"name" gorm:"column:name"`
 	CreatedAt int64  `json:"created_at" bson:"created_at" gorm:"column:created_at"`
 }
-
 
 // TestBuildCursorIterator_NormalIteration 测试正常分批遍历
 func TestBuildCursorIterator_NormalIteration(t *testing.T) {
@@ -350,7 +351,7 @@ func TestListQueryCursor_WithMockQuerier(t *testing.T) {
 	mockQuerier.EXPECT().QueryCursor(ctx).Return(iter.Seq2[*CursorTestEntity, error](mockSeq))
 
 	// 创建一个简单的日志中间件
-	logMiddleware := func(ctx context.Context, builder Querier[CursorTestEntity], next func(context.Context) ([]*CursorTestEntity, int64, error)) ([]*CursorTestEntity, int64, error) {
+	logMiddleware := func(ctx context.Context, builder Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
 		return next(ctx)
 	}
 
@@ -1045,7 +1046,7 @@ func TestListQueryPage_Basic(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	expectedResult := &CursorPageResult[CursorTestEntity]{
+	expectedResult := &core.CursorPageResult[CursorTestEntity]{
 		Items: []*CursorTestEntity{
 			{ID: 1, Name: "Alice", CreatedAt: 100},
 			{ID: 2, Name: "Bob", CreatedAt: 200},
@@ -1099,7 +1100,7 @@ func TestListQueryPage_NoMore(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	expectedResult := &CursorPageResult[CursorTestEntity]{
+	expectedResult := &core.CursorPageResult[CursorTestEntity]{
 		Items:            []*CursorTestEntity{{ID: 1, Name: "Alice"}},
 		Total:            1,
 		HasMore:          false,
@@ -1137,7 +1138,7 @@ func TestListQueryPage_WithCursorValue(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	expectedResult := &CursorPageResult[CursorTestEntity]{
+	expectedResult := &core.CursorPageResult[CursorTestEntity]{
 		Items:            []*CursorTestEntity{{ID: 11, Name: "Alice", CreatedAt: 600}},
 		Total:            0,
 		HasMore:          false,
@@ -1233,7 +1234,6 @@ func TestMongoBuildCursorSort_MixedDirections(t *testing.T) {
 	}
 }
 
-
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {
 	ctx := context.Background()
@@ -1242,7 +1242,7 @@ func TestListQueryPage_WithMiddleware(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	expectedResult := &CursorPageResult[CursorTestEntity]{
+	expectedResult := &core.CursorPageResult[CursorTestEntity]{
 		Items:   []*CursorTestEntity{{ID: 1, Name: "Alice"}},
 		HasMore: false,
 	}
@@ -1255,7 +1255,7 @@ func TestListQueryPage_WithMiddleware(t *testing.T) {
 	mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().QueryPage(ctx).Return(expectedResult, nil)
 
-	logMiddleware := func(ctx context.Context, builder Querier[CursorTestEntity], next func(context.Context) ([]*CursorTestEntity, int64, error)) ([]*CursorTestEntity, int64, error) {
+	logMiddleware := func(ctx context.Context, builder Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
 		return next(ctx)
 	}
 
@@ -1273,6 +1273,63 @@ func TestListQueryPage_WithMiddleware(t *testing.T) {
 	}
 }
 
+func TestExecutePageWithMiddlewaresUsesCursorPageResult(t *testing.T) {
+	ctx := context.Background()
+	var middlewareSawPage bool
+	var hookSawPage bool
+
+	mc := &middlewareContext[CursorTestEntity]{
+		limit:     2,
+		needTotal: true,
+		onStartTime: func(time.Time) {
+		},
+		middlewares: []Middleware[CursorTestEntity]{
+			func(ctx context.Context, builder Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
+				result, err := next(ctx)
+				page, ok := result.(*core.CursorPageResult[CursorTestEntity])
+				if !ok {
+					t.Fatalf("expected middleware to receive CursorPageResult, got %T", result)
+				}
+				if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0] != uint32(2) {
+					t.Fatalf("middleware received incomplete page metadata: %+v", page)
+				}
+				middlewareSawPage = true
+				return result, err
+			},
+		},
+		afterHook: func(ctx context.Context, result core.Result[CursorTestEntity], err error) {
+			page, ok := result.(*core.CursorPageResult[CursorTestEntity])
+			if !ok {
+				t.Fatalf("expected hook to receive CursorPageResult, got %T", result)
+			}
+			if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0] != uint32(2) {
+				t.Fatalf("hook received incomplete page metadata: %+v", page)
+			}
+			hookSawPage = true
+		},
+	}
+
+	result, err := executePageWithMiddlewares(ctx, mc, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		return []*CursorTestEntity{
+			{ID: 1, Name: "Alice"},
+			{ID: 2, Name: "Bob"},
+		}, []any{uint32(2)}, 10, true, nil
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !middlewareSawPage {
+		t.Fatal("expected middleware to inspect page result")
+	}
+	if !hookSawPage {
+		t.Fatal("expected after hook to inspect page result")
+	}
+	if result.Total != 10 || !result.HasMore || len(result.NextCursorValues) != 1 {
+		t.Fatalf("unexpected page result: %+v", result)
+	}
+}
+
 // TestListQueryPage_WithHooks 测试 List.QueryPage 钩子传递
 func TestListQueryPage_WithHooks(t *testing.T) {
 	ctx := context.Background()
@@ -1281,13 +1338,13 @@ func TestListQueryPage_WithHooks(t *testing.T) {
 
 	mockQuerier := NewMockQuerier[CursorTestEntity](ctrl)
 
-	expectedResult := &CursorPageResult[CursorTestEntity]{
+	expectedResult := &core.CursorPageResult[CursorTestEntity]{
 		Items:   []*CursorTestEntity{{ID: 1, Name: "Alice"}},
 		HasMore: false,
 	}
 
 	beforeHook := func(ctx context.Context) context.Context { return ctx }
-	afterHook := func(ctx context.Context, list []*CursorTestEntity, total int64, err error) {}
+	afterHook := func(ctx context.Context, result core.Result[CursorTestEntity], err error) {}
 
 	mockQuerier.EXPECT().SetStart(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)

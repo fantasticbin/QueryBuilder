@@ -4,6 +4,8 @@ import (
 	"context"
 	"iter"
 	"time"
+
+	"github.com/fantasticbin/QueryBuilder/core"
 )
 
 // Middleware 查询中间件类型定义
@@ -15,14 +17,13 @@ import (
 //
 // 返回:
 //
-//	[]*R: 查询结果列表
-//	int64: 总数
+//	Result[R]: 查询结果
 //	error: 错误信息
 type Middleware[R any] func(
 	ctx context.Context,
 	builder Querier[R],
-	next func(context.Context) ([]*R, int64, error),
-) ([]*R, int64, error)
+	next func(context.Context) (core.Result[R], error),
+) (core.Result[R], error)
 
 // BeforeQueryHook 查询前置钩子函数类型
 // 参数:
@@ -42,14 +43,13 @@ type BeforeQueryHook func(ctx context.Context) context.Context
 // 参数:
 //
 //	ctx: 上下文
-//	list: 查询结果列表
-//	total: 总数
+//	result: 查询结果
 //	err: 错误信息
-type AfterQueryHook[R any] func(ctx context.Context, list []*R, total int64, err error)
+type AfterQueryHook[R any] func(ctx context.Context, result core.Result[R], err error)
 
 // middlewareRunner 中间件链执行器类型
 // 接收 ctx 和查询函数，返回经过中间件链处理后的结果
-type middlewareRunner[R any] func(ctx context.Context, queryFn func(context.Context) ([]*R, int64, error)) ([]*R, int64, error)
+type middlewareRunner[R any] func(ctx context.Context, queryFn func(context.Context) (core.Result[R], error)) (core.Result[R], error)
 
 // middlewareProvider 中间件执行层数据提供者接口
 // 由 builder 实现，供 newMiddlewareContext 通过接口约束获取数据，彻底解耦对 builder 实例的直接依赖
@@ -103,11 +103,11 @@ func newMiddlewareContext[R any](p middlewareProvider[R]) *middlewareContext[R] 
 // buildRunner 构建中间件链执行器
 // 将中间件按逆序包装，返回 middlewareRunner，调用时传入 queryFn 即可执行完整中间件链
 func buildRunner[R any](mc *middlewareContext[R]) middlewareRunner[R] {
-	return func(ctx context.Context, queryFn func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+	return func(ctx context.Context, queryFn func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
 		next := queryFn
 		for i := len(mc.middlewares) - 1; i >= 0; i-- {
-			next = func(mw Middleware[R], fn func(context.Context) ([]*R, int64, error)) func(context.Context) ([]*R, int64, error) {
-				return func(ctx context.Context) ([]*R, int64, error) {
+			next = func(mw Middleware[R], fn func(context.Context) (core.Result[R], error)) func(context.Context) (core.Result[R], error) {
+				return func(ctx context.Context) (core.Result[R], error) {
 					return mw(ctx, mc.querierRef, fn)
 				}
 			}(mc.middlewares[i], next)
@@ -127,8 +127,8 @@ func buildRunner[R any](mc *middlewareContext[R]) middlewareRunner[R] {
 func executeWithMiddlewares[R any](
 	ctx context.Context,
 	mc *middlewareContext[R],
-	queryFn func(context.Context) ([]*R, int64, error),
-) ([]*R, int64, error) {
+	queryFn func(context.Context) (core.Result[R], error),
+) (core.Result[R], error) {
 	// 设置查询开始时间
 	mc.onStartTime(time.Now())
 
@@ -137,14 +137,9 @@ func executeWithMiddlewares[R any](
 		ctx = mc.beforeHook(ctx)
 	}
 
-	list, total, err := buildRunner[R](mc)(ctx, queryFn)
-
-	// 执行后置钩子
-	if mc.afterHook != nil {
-		mc.afterHook(ctx, list, total, err)
-	}
-
-	return list, total, err
+	result, err := buildRunner[R](mc)(ctx, queryFn)
+	invokeAfterHook[R](ctx, mc, result, err)
+	return result, err
 }
 
 // executeCursorWithMiddlewares 执行游标查询模式下的中间件链和钩子
@@ -170,14 +165,21 @@ func executeCursorWithMiddlewares[R any](
 	wrappedFetch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
 		var nextCursorValues []any
 		var batchTotal int64
-		queryFn := func(ctx context.Context) ([]*R, int64, error) {
+		queryFn := func(ctx context.Context) (core.Result[R], error) {
 			batch, nextCV, total, _, err := cursorQueryFn(ctx, cursorValues, isFirstBatch)
 			nextCursorValues = nextCV
 			batchTotal = total
-			return batch, int64(len(batch)), err
+			return &core.ListResult[R]{
+				Items: batch,
+				Total: resolveResultTotal(mc, batch, total),
+			}, err
 		}
 
-		list, _, err := runChain(ctx, queryFn)
+		result, err := runChain(ctx, queryFn)
+		if result == nil {
+			return nil, nextCursorValues, batchTotal, false, err
+		}
+		list := result.GetItems()
 		return list, nextCursorValues, batchTotal, false, err
 	}
 
@@ -213,7 +215,10 @@ func executeCursorWithMiddlewares[R any](
 		}
 
 		// 执行后置钩子
-		invokeAfterHook[R](ctx, mc, allResults, cursorTotal, lastErr)
+		invokeAfterHook[R](ctx, mc, &core.ListResult[R]{
+			Items: allResults,
+			Total: resolveResultTotal(mc, allResults, cursorTotal),
+		}, lastErr)
 	}
 }
 
@@ -233,60 +238,81 @@ func executePageWithMiddlewares[R any](
 	ctx context.Context,
 	mc *middlewareContext[R],
 	pageFetchFn cursorFetchBatch[R],
-) (*CursorPageResult[R], error) {
+) (*core.CursorPageResult[R], error) {
 	ctx, batchSize, initialCursorValues, runChain := prepareCursorPipeline[R](ctx, mc)
 
-	// 单批次查询：直接包装 pageFetchFn 经过中间件链执行一次
-	var nextCursorValues []any
-	var batchTotal int64
-	var hasMore bool
-	queryFn := func(ctx context.Context) ([]*R, int64, error) {
+	// 单批次查询：先组装完整 CursorPageResult，再交给中间件链
+	queryFn := func(ctx context.Context) (core.Result[R], error) {
 		batch, nextCV, total, more, err := pageFetchFn(ctx, initialCursorValues, true)
-		nextCursorValues = nextCV
-		batchTotal = total
-		hasMore = more
-		return batch, int64(len(batch)), err
+		result := &core.CursorPageResult[R]{
+			Items:            batch,
+			Total:            resolveResultTotal(mc, batch, total),
+			HasMore:          more,
+			NextCursorValues: nextCV,
+		}
+		return result, err
 	}
 
-	list, _, err := runChain(ctx, queryFn)
+	result, err := runChain(ctx, queryFn)
+	pageResult := cursorPageResultFromResult(result)
+	normalizeCursorPageResult(pageResult, batchSize)
 	// 执行后置钩子
-	invokeAfterHook[R](ctx, mc, list, batchTotal, err)
+	invokeAfterHook[R](ctx, mc, pageResult, err)
 	if err != nil {
 		return nil, err
 	}
 
-	// 组装结果
-	result := &CursorPageResult[R]{
-		Items: list,
-		Total: batchTotal,
-	}
-
-	// 使用各构建器通过 limit+1 探测精确返回的 hasMore
-	// HasMore=false 时 NextCursorValues 保持 nil（零值）
-	if hasMore {
-		result.HasMore = true
-		result.NextCursorValues = nextCursorValues
-	}
-
-	// 兜底：如果返回条数小于 batchSize，强制 HasMore=false
-	if len(list) < batchSize {
-		result.HasMore = false
-		result.NextCursorValues = nil
-	}
-
-	return result, nil
+	return pageResult, nil
 }
 
 // invokeAfterHook 执行后置钩子的统一逻辑
-// 当 needTotal 为 true 且 batchTotal > 0 时使用 batchTotal 作为总数；否则使用 list 长度
-func invokeAfterHook[R any](ctx context.Context, mc *middlewareContext[R], list []*R, batchTotal int64, err error) {
+func invokeAfterHook[R any](ctx context.Context, mc *middlewareContext[R], result core.Result[R], err error) {
 	if mc.afterHook == nil {
 		return
 	}
-	total := int64(len(list))
-	if mc.needTotal && batchTotal > 0 {
-		total = batchTotal
-	}
 
-	mc.afterHook(ctx, list, total, err)
+	mc.afterHook(ctx, result, err)
+}
+
+// resolveResultTotal 根据中间件上下文的 needTotal 和实际查询结果决定最终的 Total 值
+func resolveResultTotal[R any](mc *middlewareContext[R], list []*R, queryTotal int64) int64 {
+	if mc.needTotal && queryTotal > 0 {
+		return queryTotal
+	}
+	return int64(len(list))
+}
+
+// normalizeCursorPageResult 根据 batchSize 和实际返回的 Items 数量调整 HasMore 和 NextCursorValues 字段
+func normalizeCursorPageResult[R any](result *core.CursorPageResult[R], batchSize int) {
+	if result == nil {
+		return
+	}
+	if !result.HasMore || len(result.Items) < batchSize {
+		result.HasMore = false
+		result.NextCursorValues = nil
+	}
+}
+
+// cursorPageResultFromResult 根据通用 Result[R] 组装 *CursorPageResult[R]
+func cursorPageResultFromResult[R any](result core.Result[R]) *core.CursorPageResult[R] {
+	if result == nil {
+		return nil
+	}
+	return &core.CursorPageResult[R]{
+		Items:            result.GetItems(),
+		Total:            result.GetTotal(),
+		HasMore:          result.GetHasMore(),
+		NextCursorValues: result.GetNextCursorValues(),
+	}
+}
+
+// listResultFromResult 根据通用 Result[R] 组装 *ListResult[R]
+func listResultFromResult[R any](result core.Result[R]) *core.ListResult[R] {
+	if result == nil {
+		return nil
+	}
+	return &core.ListResult[R]{
+		Items: result.GetItems(),
+		Total: result.GetTotal(),
+	}
 }

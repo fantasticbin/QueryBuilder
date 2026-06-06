@@ -32,22 +32,26 @@ type mockQuerier[R any] struct {
 func (m *mockQuerier[R]) GetQueryMeta() core.QueryMeta { return m.meta }
 
 // setter 桩（均返回自身，满足 Querier[R] 链式调用）
-func (m *mockQuerier[R]) Use(_ builder.Middleware[R]) builder.Querier[R]             { return m }
-func (m *mockQuerier[R]) SetStart(_ uint32) builder.Querier[R]                       { return m }
-func (m *mockQuerier[R]) SetLimit(_ uint32) builder.Querier[R]                       { return m }
-func (m *mockQuerier[R]) SetNeedTotal(_ bool) builder.Querier[R]                     { return m }
-func (m *mockQuerier[R]) SetNeedPagination(_ bool) builder.Querier[R]                { return m }
-func (m *mockQuerier[R]) SetFields(_ ...string) builder.Querier[R]                   { return m }
-func (m *mockQuerier[R]) SetBeforeQueryHook(_ builder.BeforeQueryHook) builder.Querier[R] { return m }
+func (m *mockQuerier[R]) Use(_ builder.Middleware[R]) builder.Querier[R]                   { return m }
+func (m *mockQuerier[R]) SetStart(_ uint32) builder.Querier[R]                             { return m }
+func (m *mockQuerier[R]) SetLimit(_ uint32) builder.Querier[R]                             { return m }
+func (m *mockQuerier[R]) SetNeedTotal(_ bool) builder.Querier[R]                           { return m }
+func (m *mockQuerier[R]) SetNeedPagination(_ bool) builder.Querier[R]                      { return m }
+func (m *mockQuerier[R]) SetFields(_ ...string) builder.Querier[R]                         { return m }
+func (m *mockQuerier[R]) SetBeforeQueryHook(_ builder.BeforeQueryHook) builder.Querier[R]  { return m }
 func (m *mockQuerier[R]) SetAfterQueryHook(_ builder.AfterQueryHook[R]) builder.Querier[R] { return m }
-func (m *mockQuerier[R]) SetCursorField(_ ...string) builder.Querier[R]              { return m }
-func (m *mockQuerier[R]) SetCursorValue(_ ...any) builder.Querier[R]                 { return m }
+func (m *mockQuerier[R]) SetCursorField(_ ...string) builder.Querier[R]                    { return m }
+func (m *mockQuerier[R]) SetCursorValue(_ ...any) builder.Querier[R]                       { return m }
 
 // 查询方法桩
-func (m *mockQuerier[R]) QueryList(_ context.Context) ([]*R, int64, error)                     { return nil, 0, nil }
-func (m *mockQuerier[R]) QueryCursor(_ context.Context) iter.Seq2[*R, error]                    { return nil }
-func (m *mockQuerier[R]) QueryPage(_ context.Context) (*builder.CursorPageResult[R], error)     { return nil, nil }
-func (m *mockQuerier[R]) Explain(_ context.Context) (string, error)                             { return "", nil }
+func (m *mockQuerier[R]) QueryList(_ context.Context) (*core.ListResult[R], error) {
+	return nil, nil
+}
+func (m *mockQuerier[R]) QueryCursor(_ context.Context) iter.Seq2[*R, error] { return nil }
+func (m *mockQuerier[R]) QueryPage(_ context.Context) (*core.CursorPageResult[R], error) {
+	return nil, nil
+}
+func (m *mockQuerier[R]) Explain(_ context.Context) (string, error) { return "", nil }
 
 // --- 测试辅助 ---
 
@@ -139,9 +143,12 @@ func TestCacheMiddlewareWithDefaultKeyBuilderHit(t *testing.T) {
 	calls := 0
 	keyBuilder := DefaultCacheKeyBuilder{Prefix: "user-list", Hints: CacheKeyHints{Extra: map[string]any{"tenant_id": "tenant-a"}}}
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, keyBuilder)
-	next := func(ctx context.Context) ([]*testUser, int64, error) { calls++; return []*testUser{{ID: 1, Name: "A"}}, 1, nil }
-	_, _, _ = mw(ctx, mq, next)
-	_, _, _ = mw(ctx, mq, next)
+	next := func(ctx context.Context) (core.Result[testUser], error) {
+		calls++
+		return &core.ListResult[testUser]{Items: []*testUser{{ID: 1, Name: "A"}}, Total: 1}, nil
+	}
+	_, _ = mw(ctx, mq, next)
+	_, _ = mw(ctx, mq, next)
 	if calls != 1 {
 		t.Fatalf("expected backend called once due to cache hit, got %d", calls)
 	}
@@ -153,9 +160,45 @@ func TestCacheMiddlewareWithNilKeyBuilder(t *testing.T) {
 
 	ctx := context.Background()
 	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, nil)
-	_, _, err := mw(ctx, mq, func(ctx context.Context) ([]*testUser, int64, error) { return []*testUser{{ID: 1}}, 1, nil })
+	_, err := mw(ctx, mq, func(ctx context.Context) (core.Result[testUser], error) {
+		return &core.ListResult[testUser]{Items: []*testUser{{ID: 1}}, Total: 1}, nil
+	})
 	if err != nil {
 		t.Fatalf("nil keyBuilder should not cause error: %v", err)
+	}
+}
+
+func TestCacheMiddlewarePreservesCursorPageResult(t *testing.T) {
+	cache := newMockCache()
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+
+	ctx := context.Background()
+	calls := 0
+	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, DefaultCacheKeyBuilder{Prefix: "user-page"})
+	next := func(ctx context.Context) (core.Result[testUser], error) {
+		calls++
+		return &core.CursorPageResult[testUser]{
+			Items:            []*testUser{{ID: 1, Name: "A"}},
+			Total:            3,
+			HasMore:          true,
+			NextCursorValues: []any{1},
+		}, nil
+	}
+
+	_, _ = mw(ctx, mq, next)
+	result, err := mw(ctx, mq, next)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected backend called once due to cache hit, got %d", calls)
+	}
+	page, ok := result.(*core.CursorPageResult[testUser])
+	if !ok {
+		t.Fatalf("expected cursor page result from cache, got %T", result)
+	}
+	if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0].(float64) != 1 {
+		t.Fatalf("cursor page metadata was not preserved: %+v", page)
 	}
 }
 

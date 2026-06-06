@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+
+	"github.com/fantasticbin/QueryBuilder/core"
 )
 
 // List 查询列表功能结构
@@ -127,12 +129,11 @@ func (l *List[R]) passQueryOption(options BaseQueryListOptions, cursorMode, hand
 func (l *List[R]) Query(
 	ctx context.Context,
 	opts ...QueryOption,
-) (result []*R, total int64, err error) {
+) (result *core.ListResult[R], err error) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
-			total = 0
 			err = fmt.Errorf("query panic recovered: %v", r)
 		}
 	}()
@@ -193,7 +194,7 @@ func (l *List[R]) QueryCursor(
 func (l *List[R]) QueryPage(
 	ctx context.Context,
 	opts ...QueryOption,
-) (result *CursorPageResult[R], err error) {
+) (result *core.CursorPageResult[R], err error) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
 	defer func() {
 		if r := recover(); r != nil {

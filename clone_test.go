@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -153,14 +154,14 @@ func TestElasticSearchBuilder_Clone_StateIsolation(t *testing.T) {
 
 func TestGormBuilder_Clone_MiddlewareIsolation(t *testing.T) {
 	original := NewGormBuilder[CloneTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
-	original.Use(func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) ([]*CloneTestEntity, int64, error)) ([]*CloneTestEntity, int64, error) {
+	original.Use(func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) (core.Result[CloneTestEntity], error)) (core.Result[CloneTestEntity], error) {
 		return next(ctx)
 	})
 
 	cloned := original.Clone()
 
 	// 向 clone 添加额外中间件
-	cloned.Use(func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) ([]*CloneTestEntity, int64, error)) ([]*CloneTestEntity, int64, error) {
+	cloned.Use(func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) (core.Result[CloneTestEntity], error)) (core.Result[CloneTestEntity], error) {
 		return next(ctx)
 	})
 
@@ -206,8 +207,8 @@ func TestGormBuilder_Clone_ConcurrentSafety(t *testing.T) {
 	})
 
 	// 使用中间件短路，避免真实数据库查询
-	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) ([]*CloneTestEntity, int64, error)) ([]*CloneTestEntity, int64, error) {
-		return []*CloneTestEntity{{ID: 1, Name: "test"}}, 1, nil
+	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) (core.Result[CloneTestEntity], error)) (core.Result[CloneTestEntity], error) {
+		return &core.ListResult[CloneTestEntity]{Items: []*CloneTestEntity{{ID: 1, Name: "test"}}, Total: 1}, nil
 	}
 	original.Use(shortCircuit)
 
@@ -225,16 +226,16 @@ func TestGormBuilder_Clone_ConcurrentSafety(t *testing.T) {
 			cloned.SetStart(uint32(idx * 10))
 			cloned.SetFields("id")
 
-			result, total, err := cloned.QueryList(context.Background())
+			result, err := cloned.QueryList(context.Background())
 			if err != nil {
 				t.Errorf("goroutine %d: unexpected error: %v", idx, err)
 				return
 			}
-			if total != 1 {
-				t.Errorf("goroutine %d: expected total 1, got %d", idx, total)
+			if result.Total != 1 {
+				t.Errorf("goroutine %d: expected total 1, got %d", idx, result.Total)
 			}
-			if len(result) != 1 {
-				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result))
+			if len(result.Items) != 1 {
+				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result.Items))
 			}
 		}(i)
 	}
@@ -258,8 +259,8 @@ func TestMongoBuilder_Clone_ConcurrentSafety(t *testing.T) {
 	original.SetLimit(50)
 	original.SetFilter(bson.D{{Key: "status", Value: "active"}})
 
-	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) ([]*CloneTestEntity, int64, error)) ([]*CloneTestEntity, int64, error) {
-		return []*CloneTestEntity{{ID: 1, Name: "test"}}, 1, nil
+	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) (core.Result[CloneTestEntity], error)) (core.Result[CloneTestEntity], error) {
+		return &core.ListResult[CloneTestEntity]{Items: []*CloneTestEntity{{ID: 1, Name: "test"}}, Total: 1}, nil
 	}
 	original.Use(shortCircuit)
 
@@ -275,16 +276,16 @@ func TestMongoBuilder_Clone_ConcurrentSafety(t *testing.T) {
 			cloned.SetLimit(uint32(idx + 1))
 			cloned.SetFilter(bson.D{{Key: "type", Value: idx}})
 
-			result, total, err := cloned.QueryList(context.Background())
+			result, err := cloned.QueryList(context.Background())
 			if err != nil {
 				t.Errorf("goroutine %d: unexpected error: %v", idx, err)
 				return
 			}
-			if total != 1 {
-				t.Errorf("goroutine %d: expected total 1, got %d", idx, total)
+			if result.Total != 1 {
+				t.Errorf("goroutine %d: expected total 1, got %d", idx, result.Total)
 			}
-			if len(result) != 1 {
-				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result))
+			if len(result.Items) != 1 {
+				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result.Items))
 			}
 		}(i)
 	}
@@ -305,8 +306,8 @@ func TestElasticSearchBuilder_Clone_ConcurrentSafety(t *testing.T) {
 	original.SetLimit(30)
 	original.SetFilter(elastic.NewTermQuery("status", "active"))
 
-	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) ([]*CloneTestEntity, int64, error)) ([]*CloneTestEntity, int64, error) {
-		return []*CloneTestEntity{{ID: 1, Name: "test"}}, 1, nil
+	shortCircuit := func(ctx context.Context, builder Querier[CloneTestEntity], next func(context.Context) (core.Result[CloneTestEntity], error)) (core.Result[CloneTestEntity], error) {
+		return &core.ListResult[CloneTestEntity]{Items: []*CloneTestEntity{{ID: 1, Name: "test"}}, Total: 1}, nil
 	}
 	original.Use(shortCircuit)
 
@@ -322,16 +323,16 @@ func TestElasticSearchBuilder_Clone_ConcurrentSafety(t *testing.T) {
 			cloned.SetLimit(uint32(idx + 1))
 			cloned.SetESIndex("index_" + string(rune('a'+idx)))
 
-			result, total, err := cloned.QueryList(context.Background())
+			result, err := cloned.QueryList(context.Background())
 			if err != nil {
 				t.Errorf("goroutine %d: unexpected error: %v", idx, err)
 				return
 			}
-			if total != 1 {
-				t.Errorf("goroutine %d: expected total 1, got %d", idx, total)
+			if result.Total != 1 {
+				t.Errorf("goroutine %d: expected total 1, got %d", idx, result.Total)
 			}
-			if len(result) != 1 {
-				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result))
+			if len(result.Items) != 1 {
+				t.Errorf("goroutine %d: expected 1 result, got %d", idx, len(result.Items))
 			}
 		}(i)
 	}

@@ -8,6 +8,7 @@ import (
 	"iter"
 	reflect "reflect"
 
+	"github.com/fantasticbin/QueryBuilder/core"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -143,13 +144,12 @@ func (mr *MockQuerierMockRecorder[R]) SetAfterQueryHook(hook any) *gomock.Call {
 }
 
 // QueryList Mock 实现
-func (m *MockQuerier[R]) QueryList(ctx context.Context) ([]*R, int64, error) {
+func (m *MockQuerier[R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "QueryList", ctx)
-	ret0, _ := ret[0].([]*R)
-	ret1, _ := ret[1].(int64)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret0, _ := ret[0].(*core.ListResult[R])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // QueryList 记录预期调用
@@ -207,10 +207,10 @@ func (mr *MockQuerierMockRecorder[R]) QueryCursor(ctx any) *gomock.Call {
 }
 
 // QueryPage Mock 实现
-func (m *MockQuerier[R]) QueryPage(ctx context.Context) (*CursorPageResult[R], error) {
+func (m *MockQuerier[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "QueryPage", ctx)
-	ret0, _ := ret[0].(*CursorPageResult[R])
+	ret0, _ := ret[0].(*core.CursorPageResult[R])
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

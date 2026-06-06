@@ -21,7 +21,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Query Hooks**: `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic (context injection, logging, metrics, etc.).
 - **Query Meta**: Middleware can access `QueryMeta` directly via `builder.GetQueryMeta()` — data source type, pagination/cursor info, and query start time are available without context injection.
 - **Dry Run / Explain**: Each builder provides an `Explain` method to preview the generated query (SQL, MongoDB filter, ES DSL) without executing it.
-- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Also provides `QueryPage` for single-batch cursor pagination, returning a structured `CursorPageResult` (items + has_more + next_cursor) — ideal for App "load more" or API-driven pagination. Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
+- **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Also provides `QueryPage` for single-batch cursor pagination, returning a structured `core.CursorPageResult` (items + has_more + next_cursor) — ideal for App "load more" or API-driven pagination. Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
 - **Options Pattern**: Flexible query configuration via functional options.
@@ -101,13 +101,13 @@ func main() {
     b.SetNeedPagination(true)
 
     // Execute query
-    users, total, err := b.QueryList(ctx)
+    result, err := b.QueryList(ctx)
     if err != nil {
         panic(err)
     }
 
-    _ = users
-    _ = total
+    _ = result.Items
+    _ = result.Total
 }
 
 type User struct {
@@ -128,9 +128,10 @@ import (
     pb "demo/api/user/v1"
     "demo/internal/model"
     builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/core"
 )
 
-func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int64, error) {
+func ListUser(ctx context.Context, req *pb.ListUserRequest) (*core.ListResult[model.User], error) {
     list := builder.NewList[model.User]()
     list.SetDataSource(builder.Gorm)
 
@@ -144,17 +145,17 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) ([]*model.User, int6
         },
     ))
 
-    result, total, err := list.Query(
+    result, err := list.Query(
         ctx,
         builder.WithData(builder.NewDBProxy(model.DB, nil, nil)),
         builder.WithStart(req.Start),
         builder.WithLimit(req.Limit),
     )
     if err != nil {
-        return nil, 0, err
+        return nil, err
     }
 
-    return result, total, nil
+    return result, nil
 }
 ```
 
@@ -174,15 +175,15 @@ list.SetDataSource(builder.Gorm)
 list.Use(func(
     ctx context.Context,
     b builder.Querier[model.User], // the underlying builder instance
-    next func(context.Context) ([]*model.User, int64, error),
-) ([]*model.User, int64, error) {
+    next func(context.Context) (core.Result[model.User], error),
+) (core.Result[model.User], error) {
     start := time.Now()
-    result, total, err := next(ctx)
+    result, err := next(ctx)
     fmt.Printf("query took %v\n", time.Since(start))
-    return result, total, err
+    return result, err
 })
 
-result, total, err := list.Query(ctx, opts...)
+result, err := list.Query(ctx, opts...)
 ```
 
 ### Field Selection
@@ -193,10 +194,10 @@ Use `SetFields` to select only specific fields, reducing bandwidth and memory us
 // Direct builder usage
 b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
 b.SetFields("id", "name", "email")
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 
 // Via List options
-result, total, err := list.Query(ctx,
+result, err := list.Query(ctx,
     builder.WithData(builder.NewDBProxy(db, nil, nil)),
     builder.WithFields("id", "name", "email"),
 )
@@ -223,15 +224,15 @@ b.SetBeforeQueryHook(func(ctx context.Context) context.Context {
 })
 
 // After hook: log query results
-b.SetAfterQueryHook(func(ctx context.Context, list []*User, total int64, err error) {
+b.SetAfterQueryHook(func(ctx context.Context, result core.Result[User], err error) {
     if err != nil {
         log.Printf("query failed: %v", err)
     } else {
-        log.Printf("query returned %d items, total: %d", len(list), total)
+        log.Printf("query returned %d items, total: %d", len(result.GetItems()), result.GetTotal())
     }
 })
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 ### Timeout Control
@@ -248,7 +249,7 @@ b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 if err != nil {
     // err may be context.DeadlineExceeded if the query times out
     log.Printf("query error: %v", err)
@@ -258,13 +259,13 @@ if err != nil {
 This works consistently across all data sources — GORM, MongoDB, and ElasticSearch all respect context cancellation and deadlines natively. You can also combine it with middleware to log slow queries:
 
 ```go
-b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Context) ([]*User, int64, error)) ([]*User, int64, error) {
+b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Context) (core.Result[User], error)) (core.Result[User], error) {
     start := time.Now()
-    list, total, err := next(ctx)
+    result, err := next(ctx)
     if duration := time.Since(start); duration > 2*time.Second {
         log.Printf("slow query detected: %v", duration)
     }
-    return list, total, err
+    return result, err
 })
 ```
 
@@ -312,12 +313,12 @@ for i, page := range pages {
     go func(idx int, p struct{ start, limit uint32 }) {
         defer wg.Done()
         q := base.Clone().SetStart(p.start).SetLimit(p.limit)
-        list, _, err := q.QueryList(ctx)
+        result, err := q.QueryList(ctx)
         if err != nil {
             log.Printf("page %d error: %v", idx, err)
             return
         }
-        results[idx] = list
+        results[idx] = result.Items
     }(i, page)
 }
 wg.Wait()
@@ -333,8 +334,8 @@ base.SetFields("id", "user_id", "amount").SetLimit(20)
 pending := base.Clone().SetFilter(bson.D{{Key: "status", Value: "pending"}})
 completed := base.Clone().SetFilter(bson.D{{Key: "status", Value: "completed"}})
 
-go func() { pendingOrders, _, _ := pending.QueryList(ctx) }()
-go func() { completedOrders, _, _ := completed.QueryList(ctx) }()
+go func() { pendingOrders, _ := pending.QueryList(ctx) }()
+go func() { completedOrders, _ := completed.QueryList(ctx) }()
 ```
 
 #### Clone with Additional Middleware
@@ -347,13 +348,13 @@ base.SetFilter(filterScope).SetLimit(100)
 go func() {
     q := base.Clone()
     q.Use(cacheMiddleware)  // this clone uses cache
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 
 go func() {
     q := base.Clone()
     q.Use(metricsMiddleware) // this clone collects metrics
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 ```
 
@@ -426,7 +427,7 @@ b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Co
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 ### Cache Key Strategy
@@ -502,7 +503,7 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
     },
 ))
 
-users, total, err := b.QueryList(ctx)
+result, err := b.QueryList(ctx)
 ```
 
 #### HintsProvider (Dynamic Hints)
@@ -545,7 +546,7 @@ go func() {
             Filter: map[string]any{"status": "active"},
         }},
     ))
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 
 go func() {
@@ -556,7 +557,7 @@ go func() {
             Filter: map[string]any{"status": "inactive"},
         }},
     ))
-    list, _, _ := q.QueryList(ctx)
+    result, _ := q.QueryList(ctx)
 }()
 ```
 
@@ -594,7 +595,7 @@ Middleware can access query metadata directly via the `builder` parameter's `Get
 ```go
 // Inside a middleware — access meta directly from builder
 func MyMiddleware[R any]() builder.Middleware[R] {
-    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
         meta := q.GetQueryMeta()
         log.Printf("DataSource: %v, Start: %d, Limit: %d, Fields: %v",
             meta.DataSource, meta.Start, meta.Limit, meta.Fields)
@@ -621,7 +622,7 @@ var queryMetaKey = queryMetaKeyType{}
 
 // Middleware that injects QueryMeta into context
 func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
-    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+    return func(ctx context.Context, q builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
         ctx = context.WithValue(ctx, queryMetaKey, q.GetQueryMeta())
         return next(ctx)
     }
@@ -697,13 +698,13 @@ func TestListUser(t *testing.T) {
     mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
     mockQuerier.EXPECT().
         QueryList(gomock.Any()).
-        Return([]*model.User{{ID: 1, Name: "Alice"}}, int64(1), nil)
+        Return(&core.ListResult[model.User]{Items: []*model.User{{ID: 1, Name: "Alice"}}, Total: 1}, nil)
 
     // Inject mock
     list := builder.NewList[model.User]()
     list.SetQuerier(mockQuerier)
 
-    result, total, err := list.Query(ctx, opts...)
+    result, err := list.Query(ctx, opts...)
     // assert result...
 }
 ```
@@ -950,7 +951,7 @@ for user, err := range list.QueryCursor(ctx,
 }
 ```
 
-> **Tip:** For single-page cursor pagination scenarios (e.g., API-driven "load more"), consider using [`QueryPage`](#querypage-single-batch-cursor-pagination) instead — it returns a structured `CursorPageResult` with `HasMore` and `NextCursorValues`, which is more convenient for building paginated API responses.
+> **Tip:** For single-page cursor pagination scenarios (e.g., API-driven "load more"), consider using [`QueryPage`](#querypage-single-batch-cursor-pagination) instead — it returns a structured `core.CursorPageResult` with `HasMore` and `NextCursorValues`, which is more convenient for building paginated API responses.
 
 **Full traversal without counting** (data export):
 
@@ -974,18 +975,18 @@ for user, err := range list.QueryCursor(ctx,
 
 #### QueryPage (Single-Batch Cursor Pagination)
 
-`QueryPage` is a dedicated API for single-batch cursor pagination that returns a structured `CursorPageResult` — ideal for App-style "load more" or API-driven pagination where you need `items + next_cursor + has_more` in one call.
+`QueryPage` is a dedicated API for single-batch cursor pagination that returns a structured `core.CursorPageResult` — ideal for App-style "load more" or API-driven pagination where you need `items + next_cursor + has_more` in one call.
 
 **Key differences from `QueryCursor`:**
 
 | Aspect | `QueryCursor` | `QueryPage` |
 |--------|--------------|-------------|
-| Return type | `iter.Seq2[*R, error]` (iterator) | `*CursorPageResult[R]` (struct) |
+| Return type | `iter.Seq2[*R, error]` (iterator) | `*core.CursorPageResult[R]` (struct) |
 | Use case | Full traversal / streaming | Single-page fetch |
 | HasMore detection | Implicit (empty batch = done) | Explicit (`limit+1` probing) |
 | Cursor management | Automatic (internal) | Manual (caller persists `NextCursorValues`) |
 
-**`CursorPageResult` structure:**
+**`core.CursorPageResult` structure:**
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1126,13 +1127,13 @@ For Elasticsearch, classic `from + size` pagination may become unstable across r
 
 - `SetPITID(pitID)` to continue a PIT session.
 - `SetCursorValue(...)` to continue from last page cursor.
-- `QueryPageWithPIT(ctx)` to fetch one page and return `ESPITPageResult`.
+- `QueryPageWithPIT(ctx)` to fetch one page and return `core.ESPITPageResult`.
 
-**`ESPITPageResult` structure** (embeds `CursorPageResult` — inherits all its fields: `Items`, `Total`, `HasMore`, `NextCursorValues`):
+**`core.ESPITPageResult` structure** (embeds `core.CursorPageResult` — inherits all its fields: `Items`, `Total`, `HasMore`, `NextCursorValues`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| *(inherited)* | | All fields from `CursorPageResult` (see [above](#querypage-single-batch-cursor-pagination)) |
+| *(inherited)* | | All fields from `core.CursorPageResult` (see [above](#querypage-single-batch-cursor-pagination)) |
 | `PitID` | `string` | Point-in-Time ID for next request (empty when `HasMore=false`) |
 
 ```go
@@ -1224,9 +1225,9 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetAfterQueryHook(hook)` | Set post-query hook |
 | `SetCursorField(fields...)` | Set cursor pagination sort fields |
 | `SetCursorValue(values...)` | Set initial cursor values (for resuming from a specific position) |
-| `QueryList(ctx)` | Execute the query |
+| `QueryList(ctx)` | Execute the query, returns `*core.ListResult` |
 | `QueryCursor(ctx)` | Execute cursor pagination query, returns `iter.Seq2` iterator |
-| `QueryPage(ctx)` | Execute single-batch cursor pagination, returns `*CursorPageResult` (items + has_more + next_cursor) |
+| `QueryPage(ctx)` | Execute single-batch cursor pagination, returns `*core.CursorPageResult` (items + has_more + next_cursor) |
 
 ### Builder-Specific Methods
 
@@ -1238,7 +1239,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetESIndex(index)` | `ElasticSearchBuilder` | Set/change ES index name |
 | `SetPitKeepAlive(keepAlive)` | `ElasticSearchBuilder` | Set PIT (Point-in-Time) keep-alive duration |
 | `SetPITID(pitID)` | `ElasticSearchBuilder` | Set PIT ID for cross-request pagination resumption |
-| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | Execute single-batch PIT-based pagination, returns `*ESPITPageResult` |
+| `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | Execute single-batch PIT-based pagination, returns `*core.ESPITPageResult` |
 | `Explain(ctx)` | All builders | Preview generated query (Dry Run) |
 
 ---

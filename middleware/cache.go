@@ -6,6 +6,7 @@ import (
 	"time"
 
 	builder "github.com/fantasticbin/QueryBuilder"
+	"github.com/fantasticbin/QueryBuilder/core"
 )
 
 // CacheProvider 缓存提供者接口
@@ -19,8 +20,41 @@ type CacheProvider interface {
 
 // cacheResult 缓存结果结构体，用于序列化/反序列化查询结果
 type cacheResult[R any] struct {
-	List  []*R  `json:"list"`
-	Total int64 `json:"total"`
+	Kind             core.ResultKind `json:"kind"`
+	Items            []*R            `json:"items"`
+	Total            int64           `json:"total"`
+	HasMore          bool            `json:"has_more"`
+	NextCursorValues []any           `json:"next_cursor_values"`
+}
+
+// toResult 将 cacheResult 转换为 core.Result[R]，根据 Kind 字段区分 CursorPageResult 和 ListResult
+func (r cacheResult[R]) toResult() core.Result[R] {
+	if r.Kind == core.ResultKindList {
+		return &core.ListResult[R]{
+			Items: r.Items,
+			Total: r.Total,
+		}
+	}
+	return &core.CursorPageResult[R]{
+		Items:            r.Items,
+		Total:            r.Total,
+		HasMore:          r.HasMore,
+		NextCursorValues: r.NextCursorValues,
+	}
+}
+
+// cacheResultFromResult 从 core.Result[R] 构建 cacheResult[R]，提取公共字段并区分分页查询结果
+func cacheResultFromResult[R any](result core.Result[R]) cacheResult[R] {
+	if result == nil {
+		return cacheResult[R]{Kind: core.ResultKindList}
+	}
+	return cacheResult[R]{
+		Kind:             result.GetResultKind(),
+		Items:            result.GetItems(),
+		Total:            result.GetTotal(),
+		HasMore:          result.GetHasMore(),
+		NextCursorValues: result.GetNextCursorValues(),
+	}
 }
 
 // CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
@@ -46,32 +80,29 @@ func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration
 //
 //	builder.Middleware[R] - 可直接通过 Use 方法添加到构建器的中间件
 func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context, b builder.Querier[R]) string) builder.Middleware[R] {
-	return func(ctx context.Context, b builder.Querier[R], next func(context.Context) ([]*R, int64, error)) ([]*R, int64, error) {
+	return func(ctx context.Context, b builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
 		key := keyFn(ctx, b)
 
 		// 尝试从缓存获取
 		if data, ok := cache.Get(ctx, key); ok {
 			var result cacheResult[R]
 			if err := json.Unmarshal(data, &result); err == nil {
-				return result.List, result.Total, nil
+				return result.toResult(), nil
 			}
 		}
 
 		// 缓存未命中，执行实际查询
-		list, total, err := next(ctx)
+		result, err := next(ctx)
 		if err != nil {
-			return list, total, err
+			return result, err
 		}
 
 		// 将查询结果写入缓存
-		result := cacheResult[R]{
-			List:  list,
-			Total: total,
-		}
-		if data, marshalErr := json.Marshal(result); marshalErr == nil {
+		cacheValue := cacheResultFromResult(result)
+		if data, marshalErr := json.Marshal(cacheValue); marshalErr == nil {
 			cache.Set(ctx, key, data, ttl)
 		}
 
-		return list, total, nil
+		return result, nil
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/mock/gomock"
-	"gorm.io/gorm"
 	"testing"
 	"time"
+
+	"github.com/fantasticbin/QueryBuilder/core"
+	"go.uber.org/mock/gomock"
+	"gorm.io/gorm"
 )
 
 type TestEntity struct {
@@ -42,10 +44,10 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return([]*TestEntity{
+					Return(&core.ListResult[TestEntity]{Items: []*TestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
 						{ID: 2, Name: "Bob", Age: 30},
-					}, int64(2), nil)
+					}, Total: 2}, nil)
 			},
 			opts: []QueryOption{
 				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -67,10 +69,10 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return([]*TestEntity{
+					Return(&core.ListResult[TestEntity]{Items: []*TestEntity{
 						{ID: 2, Name: "Bob", Age: 30},
 						{ID: 1, Name: "Alice", Age: 25},
-					}, int64(2), nil)
+					}, Total: 2}, nil)
 			},
 			opts: []QueryOption{
 				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -92,9 +94,9 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return([]*TestEntity{
+					Return(&core.ListResult[TestEntity]{Items: []*TestEntity{
 						{ID: 1, Name: "Alice", Age: 25},
-					}, int64(1), nil)
+					}, Total: 1}, nil)
 			},
 			opts: []QueryOption{
 				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -115,9 +117,9 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return([]*TestEntity{
+					Return(&core.ListResult[TestEntity]{Items: []*TestEntity{
 						{ID: 2, Name: "Bob", Age: 30},
-					}, int64(1), nil)
+					}, Total: 1}, nil)
 			},
 			opts: []QueryOption{
 				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -138,7 +140,7 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return(nil, int64(0), nil)
+					Return(&core.ListResult[TestEntity]{Total: 0}, nil)
 			},
 			opts: []QueryOption{
 				WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -157,7 +159,7 @@ func TestQueryList(t *testing.T) {
 				mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier)
 				mockQuerier.EXPECT().
 					QueryList(ctx).
-					Return(nil, int64(0), errors.New("no data source provided"))
+					Return(nil, errors.New("no data source provided"))
 			},
 			opts:           []QueryOption{},
 			expectedResult: nil,
@@ -173,8 +175,8 @@ func TestQueryList(t *testing.T) {
 	list.Use(func(
 		ctx context.Context,
 		builder Querier[TestEntity],
-		next func(context.Context,
-		) ([]*TestEntity, int64, error)) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		defer func() func() {
 			pre := time.Now()
 			return func() {
@@ -182,8 +184,8 @@ func TestQueryList(t *testing.T) {
 				fmt.Println("elapsed:", elapsed)
 			}
 		}()()
-		result, total, err := next(ctx)
-		return result, total, err
+		result, err := next(ctx)
+		return result, err
 	})
 
 	for _, tt := range tests {
@@ -192,7 +194,7 @@ func TestQueryList(t *testing.T) {
 				tt.mockSetup()
 			}
 
-			result, total, err := list.Query(ctx, tt.opts...)
+			result, err := list.Query(ctx, tt.opts...)
 
 			if tt.expectedErr != nil {
 				if err == nil || err.Error() != tt.expectedErr.Error() {
@@ -203,15 +205,15 @@ func TestQueryList(t *testing.T) {
 					t.Errorf("unexpected error: %v", err)
 				}
 
-				if total != tt.expectedTotal {
-					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, total)
+				if result.Total != tt.expectedTotal {
+					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, result.Total)
 				}
 
-				if len(result) != len(tt.expectedResult) {
-					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result))
+				if len(result.Items) != len(tt.expectedResult) {
+					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result.Items))
 				}
 
-				for i, item := range result {
+				for i, item := range result.Items {
 					if item.ID != tt.expectedResult[i].ID || item.Name != tt.expectedResult[i].Name || item.Age != tt.expectedResult[i].Age {
 						t.Errorf("expected result[%d]: %+v, got: %+v", i, tt.expectedResult[i], item)
 					}
@@ -239,24 +241,24 @@ func TestMiddlewareChainOrder(t *testing.T) {
 	list.Use(func(
 		ctx context.Context,
 		builder Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		order = append(order, "middleware1_before")
-		result, total, err := next(ctx)
+		result, err := next(ctx)
 		order = append(order, "middleware1_after")
-		return result, total, err
+		return result, err
 	})
 
 	// 添加第二个中间件
 	list.Use(func(
 		ctx context.Context,
 		builder Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		order = append(order, "middleware2_before")
-		result, total, err := next(ctx)
+		result, err := next(ctx)
 		order = append(order, "middleware2_after")
-		return result, total, err
+		return result, err
 	})
 
 	// 设置 Mock 期望
@@ -267,20 +269,20 @@ func TestMiddlewareChainOrder(t *testing.T) {
 	mockQuerier.EXPECT().Use(gomock.Any()).Return(mockQuerier).Times(2)
 	mockQuerier.EXPECT().
 		QueryList(ctx).
-		Return([]*TestEntity{{ID: 1, Name: "Test", Age: 20}}, int64(1), nil)
+		Return(&core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Test", Age: 20}}, Total: 1}, nil)
 
-	result, total, err := list.Query(ctx,
+	result, err := list.Query(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if total != 1 {
-		t.Errorf("expected total 1, got %d", total)
+	if result.Total != 1 {
+		t.Errorf("expected total 1, got %d", result.Total)
 	}
-	if len(result) != 1 {
-		t.Errorf("expected 1 result, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 result, got %d", len(result.Items))
 	}
 }
 
@@ -292,7 +294,7 @@ func TestUnsupportedDataSourcePanicRecovery(t *testing.T) {
 	// 设置一个不支持的数据源类型（枚举值 99）
 	list.SetDataSource(DataSource(99))
 
-	result, total, err := list.Query(ctx,
+	result, err := list.Query(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
@@ -302,10 +304,6 @@ func TestUnsupportedDataSourcePanicRecovery(t *testing.T) {
 	if result != nil {
 		t.Errorf("expected nil result, got %v", result)
 	}
-	if total != 0 {
-		t.Errorf("expected total 0, got %d", total)
-	}
-
 	// 验证错误信息包含 panic 恢复标识
 	expectedErrPrefix := "query panic recovered:"
 	if len(err.Error()) < len(expectedErrPrefix) || err.Error()[:len(expectedErrPrefix)] != expectedErrPrefix {
@@ -326,23 +324,23 @@ func TestMiddlewareReceivesQuerierInterface(t *testing.T) {
 	gormBuilder.Use(func(
 		ctx context.Context,
 		builder Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		receivedBuilder = builder
 		// 短路返回，不执行真实查询
-		return []*TestEntity{{ID: 1, Name: "Test", Age: 20}}, 1, nil
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Test", Age: 20}}, Total: 1}, nil
 	})
 
-	result, total, err := gormBuilder.QueryList(ctx)
+	result, err := gormBuilder.QueryList(ctx)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if total != 1 {
-		t.Errorf("expected total 1, got %d", total)
+	if result.Total != 1 {
+		t.Errorf("expected total 1, got %d", result.Total)
 	}
-	if len(result) != 1 {
-		t.Errorf("expected 1 result, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 result, got %d", len(result.Items))
 	}
 
 	// 验证中间件接收到的 builder 参数不为 nil 且是 Querier[R] 接口类型
@@ -607,7 +605,7 @@ func TestBeforeAndAfterQueryHook(t *testing.T) {
 	beforeHook := func(ctx context.Context) context.Context {
 		return ctx
 	}
-	afterHook := func(ctx context.Context, list []*TestEntity, total int64, err error) {
+	afterHook := func(ctx context.Context, result core.Result[TestEntity], err error) {
 	}
 
 	list := NewList[TestEntity]()
@@ -622,17 +620,17 @@ func TestBeforeAndAfterQueryHook(t *testing.T) {
 	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetBeforeQueryHook(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetAfterQueryHook(gomock.Any()).Return(mockQuerier)
-	mockQuerier.EXPECT().QueryList(ctx).Return([]*TestEntity{{ID: 1, Name: "Test", Age: 20}}, int64(1), nil)
+	mockQuerier.EXPECT().QueryList(ctx).Return(&core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Test", Age: 20}}, Total: 1}, nil)
 
-	result, total, err := list.Query(ctx)
+	result, err := list.Query(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if total != 1 {
-		t.Errorf("expected total 1, got %d", total)
+	if result.Total != 1 {
+		t.Errorf("expected total 1, got %d", result.Total)
 	}
-	if len(result) != 1 {
-		t.Errorf("expected 1 result, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 result, got %d", len(result.Items))
 	}
 
 	// 注意：beforeCalled 和 afterCalled 不会被设置为 true，
@@ -662,9 +660,9 @@ func TestSetScope(t *testing.T) {
 	mockQuerier.EXPECT().SetLimit(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
-	mockQuerier.EXPECT().QueryList(ctx).Return([]*TestEntity{{ID: 1, Name: "Test", Age: 20}}, int64(1), nil)
+	mockQuerier.EXPECT().QueryList(ctx).Return(&core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Test", Age: 20}}, Total: 1}, nil)
 
-	_, _, err := list.Query(ctx)
+	_, err := list.Query(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -702,17 +700,17 @@ func TestQueryWithFields(t *testing.T) {
 	mockQuerier.EXPECT().SetNeedTotal(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetNeedPagination(gomock.Any()).Return(mockQuerier)
 	mockQuerier.EXPECT().SetFields("id", "name").Return(mockQuerier)
-	mockQuerier.EXPECT().QueryList(ctx).Return([]*TestEntity{{ID: 1, Name: "Alice"}}, int64(1), nil)
+	mockQuerier.EXPECT().QueryList(ctx).Return(&core.ListResult[TestEntity]{Items: []*TestEntity{{ID: 1, Name: "Alice"}}, Total: 1}, nil)
 
-	result, total, err := list.Query(ctx, WithFields("id", "name"))
+	result, err := list.Query(ctx, WithFields("id", "name"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if total != 1 {
-		t.Errorf("expected total 1, got %d", total)
+	if result.Total != 1 {
+		t.Errorf("expected total 1, got %d", result.Total)
 	}
-	if len(result) != 1 {
-		t.Errorf("expected 1 result, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 result, got %d", len(result.Items))
 	}
 }
 
@@ -1003,7 +1001,7 @@ func TestQueryCursor_WithNeedPaginationTrueAndHooks(t *testing.T) {
 	beforeHook := func(ctx context.Context) context.Context {
 		return ctx
 	}
-	afterHook := func(ctx context.Context, list []*TestEntity, total int64, err error) {
+	afterHook := func(ctx context.Context, result core.Result[TestEntity], err error) {
 	}
 
 	list := NewList[TestEntity]()
@@ -1056,8 +1054,8 @@ func TestQueryCursor_WithNeedTotalTrueAndMiddleware(t *testing.T) {
 	list.Use(func(
 		ctx context.Context,
 		builder Querier[TestEntity],
-		next func(context.Context) ([]*TestEntity, int64, error),
-	) ([]*TestEntity, int64, error) {
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
 		return next(ctx)
 	})
 
@@ -1105,7 +1103,7 @@ func TestQueryPage_Basic(t *testing.T) {
 	list := NewList[TestEntity]()
 	list.SetQuerier(mockQuerier)
 
-	expectedResult := &CursorPageResult[TestEntity]{
+	expectedResult := &core.CursorPageResult[TestEntity]{
 		Items: []*TestEntity{
 			{ID: 1, Name: "Alice", Age: 25},
 			{ID: 2, Name: "Bob", Age: 30},
@@ -1160,7 +1158,7 @@ func TestQueryPage_LastPage(t *testing.T) {
 	list := NewList[TestEntity]()
 	list.SetQuerier(mockQuerier)
 
-	expectedResult := &CursorPageResult[TestEntity]{
+	expectedResult := &core.CursorPageResult[TestEntity]{
 		Items: []*TestEntity{
 			{ID: 4, Name: "David", Age: 40},
 		},
@@ -1208,7 +1206,7 @@ func TestQueryPage_EmptyResult(t *testing.T) {
 	list := NewList[TestEntity]()
 	list.SetQuerier(mockQuerier)
 
-	expectedResult := &CursorPageResult[TestEntity]{
+	expectedResult := &core.CursorPageResult[TestEntity]{
 		Items:            []*TestEntity{},
 		Total:            0,
 		HasMore:          false,
@@ -1246,7 +1244,7 @@ func TestQueryPage_MultiFieldCursor(t *testing.T) {
 	list := NewList[TestEntity]()
 	list.SetQuerier(mockQuerier)
 
-	expectedResult := &CursorPageResult[TestEntity]{
+	expectedResult := &core.CursorPageResult[TestEntity]{
 		Items: []*TestEntity{
 			{ID: 6, Name: "Frank", Age: 28},
 			{ID: 7, Name: "Grace", Age: 32},
