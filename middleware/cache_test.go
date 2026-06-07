@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"testing"
 	"time"
@@ -199,6 +200,53 @@ func TestCacheMiddlewarePreservesCursorPageResult(t *testing.T) {
 	}
 	if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0].(float64) != 1 {
 		t.Fatalf("cursor page metadata was not preserved: %+v", page)
+	}
+}
+
+func TestCacheMiddlewareBypassesPITQuery(t *testing.T) {
+	ctx := context.Background()
+	cache := newMockCache()
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+	mq.meta.IsCursorQuery = true
+	mq.meta.IsPITQuery = true
+
+	cached := cacheResult[testUser]{
+		Kind:  core.ResultKindCursorPage,
+		Items: []*testUser{{ID: 99}},
+		Total: 99,
+	}
+	data, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("failed to marshal cache result: %v", err)
+	}
+	cache.Set(ctx, "pit", data, time.Minute)
+
+	keyCalls := 0
+	nextCalls := 0
+	mw := CacheMiddleware[testUser](cache, time.Minute, func(ctx context.Context, b builder.Querier[testUser]) string {
+		keyCalls++
+		return "pit"
+	})
+
+	result, err := mw(ctx, mq, func(ctx context.Context) (core.Result[testUser], error) {
+		nextCalls++
+		return &core.CursorPageResult[testUser]{
+			Items:   []*testUser{{ID: 1}},
+			Total:   1,
+			HasMore: true,
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if keyCalls != 0 {
+		t.Fatalf("expected PIT query to bypass key builder, got %d calls", keyCalls)
+	}
+	if nextCalls != 1 {
+		t.Fatalf("expected next to be called once, got %d", nextCalls)
+	}
+	if result.GetTotal() != 1 || result.GetItems()[0].ID != 1 {
+		t.Fatalf("expected live PIT result, got %+v", result)
 	}
 }
 

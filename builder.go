@@ -186,6 +186,7 @@ type cursorConfig struct {
 	parsedCursorFields []cursorSortField // 解析后的游标字段与方向缓存
 	cursorValues       []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
 	isCursorQuery      bool              // 是否为游标查询模式
+	isPITQuery         bool              // 是否为 Elasticsearch PIT + search_after 查询模式
 }
 
 // clone 返回 cursorConfig 的深拷贝
@@ -268,6 +269,7 @@ func (b *builder[B, R]) GetQueryMeta() QueryMeta {
 		NeedTotal:      b.needTotal,
 		NeedPagination: b.needPagination,
 		IsCursorQuery:  b.isCursorQuery,
+		IsPITQuery:     b.isPITQuery,
 		StartTime:      b.startTime,
 	}
 	if b.fields != nil {

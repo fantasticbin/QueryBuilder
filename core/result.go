@@ -22,6 +22,18 @@ const (
 	ResultKindCursorPage
 )
 
+// String 返回 ResultKind 的稳定字符串表示。
+func (k ResultKind) String() string {
+	switch k {
+	case ResultKindList:
+		return "list"
+	case ResultKindCursorPage:
+		return "cursor_page"
+	default:
+		return "unknown"
+	}
+}
+
 // ListResult 列表查询结果结构体
 // 泛型参数:
 //

@@ -452,7 +452,7 @@ type CacheKeyBuilder interface {
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | 业务资源名（如 "users"、"orders"），隔离不同查询场景 |
 | `datasource` | `QueryMeta.DataSource` | 数据源类型（Gorm/MongoDB/ElasticSearch） |
 | `fields` | `QueryMeta.Fields` | 查询字段投影 |
-| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、cursorFields |
+| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、isPITQuery、cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | 业务过滤条件（map/struct/切片/标量） |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | 业务排序条件 |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | 扩展维度（如 tenant_id 等多租户隔离字段） |
@@ -584,7 +584,101 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCac
 - **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
 - **Clone 安全**：每个 Clone 实例使用各自的 `DefaultCacheKeyBuilder`（携带独立的 `Hints`），确保无共享可变状态。
 
-> ⚠️ **注意：** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` **不适用于 `ElasticSearchBuilder.QueryPageWithPIT`**。`QueryPageWithPIT` 是独立的 PIT + `search_after` 单页查询 API，不会经过列表查询的中间件管道；同时每一页都依赖会持续演进的 PIT 状态（`pit_id`、`cursor_values`），在中间件层复用缓存容易返回过期页或页序错乱。
+> **注意：** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` 会自动旁路 `ElasticSearchBuilder.QueryPageWithPIT`。PIT 页依赖持续演进的 `pit_id` 和 `cursor_values`，因此内置缓存中间件会跳过缓存读写，直接调用下一层查询处理器。其他中间件（包括 `ObservabilityMiddleware`）仍会在 PIT 查询中执行。
+
+### 可观测中间件
+
+使用内置的 `ObservabilityMiddleware` 将查询执行过程接入日志、指标和链路追踪系统。该中间件不依赖任何厂商 SDK：QueryBuilder 只产出稳定的事件和属性，应用侧自行适配 `log`、zap、Prometheus、OpenTelemetry 或其他后端。
+
+```go
+import (
+    "context"
+    "log"
+    "time"
+
+    builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/core"
+    "github.com/fantasticbin/QueryBuilder/middleware"
+)
+
+obs := middleware.ObservabilityMiddleware[User](middleware.ObservabilityOptions{
+    Logger: middleware.QueryLoggerFunc(func(ctx context.Context, event middleware.QueryEvent) {
+        log.Printf(
+            "operation=%s success=%t duration=%s items=%d total=%d error_type=%s",
+            event.Operation,
+            event.Success,
+            event.Duration,
+            event.ItemCount,
+            event.Total,
+            event.ErrorType,
+        )
+    }),
+    Metrics: middleware.QueryMetricsFunc(func(ctx context.Context, event middleware.QueryEvent) {
+        queryDuration.WithLabelValues(event.Operation, event.ErrorType).Observe(event.Duration.Seconds())
+        queryItems.WithLabelValues(event.Operation).Observe(float64(event.ItemCount))
+    }),
+    LoggerFilter: func(ctx context.Context, event middleware.QueryEvent) bool {
+        return !event.Success || event.Duration > 2*time.Second
+    },
+    TraceFilter: func(ctx context.Context, meta core.QueryMeta) bool {
+        return meta.DataSource == builder.Gorm
+    },
+    AttributeProvider: func(ctx context.Context, meta core.QueryMeta) []middleware.Attribute {
+        return []middleware.Attribute{
+            {Key: "tenant_id", Value: tenantIDFromContext(ctx)},
+            {Key: "resource", Value: "users"},
+        }
+    },
+})
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.Use(obs)
+result, err := b.QueryList(ctx)
+```
+
+链路追踪同样通过适配器接入。例如应用侧可以把 `QueryTracer` 桥接到 OpenTelemetry，而 QueryBuilder 本身不需要引入 OpenTelemetry 依赖：
+
+```go
+type otelQueryTracer struct {
+    tracer trace.Tracer
+}
+
+func (t otelQueryTracer) StartQuery(ctx context.Context, start middleware.QuerySpanStart) (context.Context, middleware.QuerySpan) {
+    ctx, span := t.tracer.Start(ctx, start.Operation)
+    for _, attr := range start.Attributes {
+        span.SetAttributes(attribute.String(attr.Key, fmt.Sprint(attr.Value)))
+    }
+    return ctx, otelQuerySpan{span: span}
+}
+
+type otelQuerySpan struct {
+    span trace.Span
+}
+
+func (s otelQuerySpan) EndQuery(ctx context.Context, event middleware.QueryEvent) {
+    if event.Error != nil {
+        s.span.RecordError(event.Error)
+    }
+    s.span.SetAttributes(
+        attribute.Bool("querybuilder.success", event.Success),
+        attribute.Int("querybuilder.item_count", event.ItemCount),
+    )
+    s.span.End()
+}
+```
+
+默认属性只包含低敏查询维度，例如数据源、查询模式、分页标记、start/limit、结果类型、成功状态和错误分类。QueryBuilder 不会自动暴露 filter/sort 或 cursor values；如需记录业务维度，请在确认安全后通过 `AttributeProvider` 显式补充。
+
+行为说明：
+
+- 配置 `LoggerFilter`、`MetricsFilter` 和 `TraceFilter` 可避免每次查询都触发全部信号。例如指标保持全量，日志只记录错误/慢查询，链路按 context 或数据源采样。
+- 配置 `SignalOrder` 可调整查询完成后的信号分发顺序。默认仍为 `trace -> metrics -> logger`；漏配的已知信号会按默认顺序追加，重复或未知值会被忽略。
+- 当 `Logger`、`Metrics` 和 `Tracer` 都为 nil 时，中间件会跳过可观测处理，直接调用下一层处理器。
+- 观测适配器是 best-effort 的：`Logger`、`Metrics`、`Tracer`、`AttributeProvider`、`OperationNameBuilder` 或 `ErrorClassifier` 自身 panic 时会被隔离，不会中断查询。
+- 默认 operation 名称为 `querybuilder.<DataSource>.list`、`querybuilder.<DataSource>.cursor`；ES PIT + `search_after` 场景为 `querybuilder.ElasticSearch.pit_cursor`。
+- `QueryCursor` 每次批量拉取会产生一个事件；`QueryPage` 和 `QueryPageWithPIT` 每次返回一页产生一个事件。
+- 在中间件管道启动前发生的校验/配置错误不会由该中间件发出事件。如需覆盖完整 API 入口，请在业务服务边界额外记录这些调用点错误。
+- `DefaultErrorClassifier` 会为 context 取消和超时返回稳定分类：`context_canceled`、`context_deadline_exceeded`。
 
 ### 查询元信息
 
@@ -649,6 +743,7 @@ func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
 | `NeedPagination` | `bool` | 是否需要分页 |
 | `Fields` | `[]string` | 指定字段列表 |
 | `IsCursorQuery` | `bool` | 是否为游标查询模式 |
+| `IsPITQuery` | `bool` | 是否为 Elasticsearch PIT + `search_after` 查询模式 |
 | `CursorFields` | `[]string` | 游标分页排序字段列表 |
 | `CursorValues` | `[]any` | 调用方传入的游标初始值，用于断点续查/App 分页场景 |
 | `StartTime` | `time.Time` | 查询开始时间 |
@@ -1155,6 +1250,7 @@ if err != nil {
 - PIT 存在保活窗口；若 PIT 过期/无效，建议从第一页重启并重新申请 PIT。
 - 建议使用稳定排序键（如业务时间 + 唯一 ID），确保 `search_after` 顺序可预期。
 - `HasMore` 基于 `limit+1` 探测，可作为翻页提示；业务上仍应以返回的 cursor/token 为准。
+- `QueryPageWithPIT` 会经过中间件管道，并由 `ObservabilityMiddleware` 记录为 `querybuilder.ElasticSearch.pit_cursor`；内置缓存中间件会自动旁路 PIT 页。
 
 后端 API 协议参考（业务层）：
 

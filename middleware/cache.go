@@ -81,6 +81,10 @@ func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration
 //	builder.Middleware[R] - 可直接通过 Use 方法添加到构建器的中间件
 func CacheMiddleware[R any](cache CacheProvider, ttl time.Duration, keyFn func(ctx context.Context, b builder.Querier[R]) string) builder.Middleware[R] {
 	return func(ctx context.Context, b builder.Querier[R], next func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
+		if b.GetQueryMeta().IsPITQuery {
+			return next(ctx)
+		}
+
 		key := keyFn(ctx, b)
 
 		// 尝试从缓存获取

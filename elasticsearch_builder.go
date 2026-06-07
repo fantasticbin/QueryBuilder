@@ -244,7 +244,12 @@ func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPa
 // 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议。
 func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.ESPITPageResult[R], error) {
 	e.builder.beginQueryMode(true)
-	defer e.builder.finishCursorQuery()
+	e.builder.isPITQuery = true
+	defer func() {
+		e.builder.isPITQuery = false
+		e.builder.finishCursorQuery()
+	}()
+
 	if err := e.builder.prepareAndValidate(); err != nil {
 		return nil, err
 	}
@@ -264,16 +269,11 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 
 	// PIT + search_after 本质是分页查询，确保 QueryMeta 和执行语义一致
 	e.builder.needPagination = true
-
 	isFirstBatch := len(e.builder.cursorValues) == 0
 
-	var (
-		nextCursorValues []any
-		hasMore          bool
-		resultPitID      string
-	)
-
+	var resultPitID string
 	chainResult, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) (core.Result[R], error) {
+		resultPitID = e.pitID
 		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
 			ctx,
 			e.builder.cursorValues,
@@ -285,28 +285,33 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 			return nil, queryErr
 		}
 
-		nextCursorValues = batchNextCursorValues
-		hasMore = batchHasMore
-		resultPitID = e.pitID
-
-		return &core.ListResult[R]{Items: batchList, Total: batchTotal}, nil
+		return &core.CursorPageResult[R]{
+			Items:            batchList,
+			Total:            batchTotal,
+			HasMore:          batchHasMore,
+			NextCursorValues: batchNextCursorValues,
+		}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	listResult := listResultFromResult(chainResult)
+
+	pageResult := cursorPageResultFromResult(chainResult)
+	if pageResult == nil {
+		pageResult = &core.CursorPageResult[R]{}
+	}
 
 	result := &core.ESPITPageResult[R]{
 		CursorPageResult: core.CursorPageResult[R]{
-			Items:            listResult.Items,
-			Total:            listResult.Total,
-			HasMore:          hasMore,
-			NextCursorValues: nextCursorValues,
+			Items:            pageResult.Items,
+			Total:            pageResult.Total,
+			HasMore:          pageResult.HasMore,
+			NextCursorValues: pageResult.NextCursorValues,
 		},
 		PitID: resultPitID,
 	}
 
-	if !hasMore {
+	if !result.HasMore {
 		result.PitID = ""
 		result.NextCursorValues = nil
 	}

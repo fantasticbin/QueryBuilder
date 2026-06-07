@@ -453,7 +453,7 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | Business resource name (e.g. `"users"`, `"orders"`) |
 | `datasource` | `QueryMeta` | Data source type (Gorm/MongoDB/ES) |
 | `fields` | `QueryMeta` | Field projection list |
-| `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, cursorFields |
+| `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, isPITQuery, cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | Query filter conditions |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | Sort conditions |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | Additional dimensions (e.g. tenant_id) |
@@ -586,7 +586,101 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCac
 - **Empty-result caching**: Empty query results are still cached to prevent cache penetration.
 - **Clone-safe**: Each Clone instance uses its own `DefaultCacheKeyBuilder` with independent `Hints`, ensuring no shared mutable state.
 
-> ⚠️ **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` **do not apply to `ElasticSearchBuilder.QueryPageWithPIT`**. `QueryPageWithPIT` is a dedicated one-page PIT + `search_after` API and does not go through the list middleware chain; additionally, each page depends on evolving PIT state (`pit_id`, `cursor_values`), so middleware-level cache reuse may return stale or out-of-order pages.
+> **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` automatically bypass `ElasticSearchBuilder.QueryPageWithPIT`. PIT pages depend on evolving `pit_id` and `cursor_values`, so the built-in cache middleware skips cache read/write and calls the next query handler directly. Other middleware, including `ObservabilityMiddleware`, still runs for PIT queries.
+
+### Observability Middleware
+
+Use the built-in `ObservabilityMiddleware` to connect query execution with your logging, metrics, and tracing stack. The middleware has no vendor dependency: QueryBuilder only emits stable events and attributes, while your application decides how to adapt them to `log`, zap, Prometheus, OpenTelemetry, or any other backend.
+
+```go
+import (
+    "context"
+    "log"
+    "time"
+
+    builder "github.com/fantasticbin/QueryBuilder"
+    "github.com/fantasticbin/QueryBuilder/core"
+    "github.com/fantasticbin/QueryBuilder/middleware"
+)
+
+obs := middleware.ObservabilityMiddleware[User](middleware.ObservabilityOptions{
+    Logger: middleware.QueryLoggerFunc(func(ctx context.Context, event middleware.QueryEvent) {
+        log.Printf(
+            "operation=%s success=%t duration=%s items=%d total=%d error_type=%s",
+            event.Operation,
+            event.Success,
+            event.Duration,
+            event.ItemCount,
+            event.Total,
+            event.ErrorType,
+        )
+    }),
+    Metrics: middleware.QueryMetricsFunc(func(ctx context.Context, event middleware.QueryEvent) {
+        queryDuration.WithLabelValues(event.Operation, event.ErrorType).Observe(event.Duration.Seconds())
+        queryItems.WithLabelValues(event.Operation).Observe(float64(event.ItemCount))
+    }),
+    LoggerFilter: func(ctx context.Context, event middleware.QueryEvent) bool {
+        return !event.Success || event.Duration > 2*time.Second
+    },
+    TraceFilter: func(ctx context.Context, meta core.QueryMeta) bool {
+        return meta.DataSource == builder.Gorm
+    },
+    AttributeProvider: func(ctx context.Context, meta core.QueryMeta) []middleware.Attribute {
+        return []middleware.Attribute{
+            {Key: "tenant_id", Value: tenantIDFromContext(ctx)},
+            {Key: "resource", Value: "users"},
+        }
+    },
+})
+
+b := builder.NewGormBuilder[User](builder.NewDBProxy(db, nil, nil))
+b.Use(obs)
+result, err := b.QueryList(ctx)
+```
+
+Tracing is also adapter-based. For example, an application can bridge `QueryTracer` to OpenTelemetry without QueryBuilder importing OpenTelemetry itself:
+
+```go
+type otelQueryTracer struct {
+    tracer trace.Tracer
+}
+
+func (t otelQueryTracer) StartQuery(ctx context.Context, start middleware.QuerySpanStart) (context.Context, middleware.QuerySpan) {
+    ctx, span := t.tracer.Start(ctx, start.Operation)
+    for _, attr := range start.Attributes {
+        span.SetAttributes(attribute.String(attr.Key, fmt.Sprint(attr.Value)))
+    }
+    return ctx, otelQuerySpan{span: span}
+}
+
+type otelQuerySpan struct {
+    span trace.Span
+}
+
+func (s otelQuerySpan) EndQuery(ctx context.Context, event middleware.QueryEvent) {
+    if event.Error != nil {
+        s.span.RecordError(event.Error)
+    }
+    s.span.SetAttributes(
+        attribute.Bool("querybuilder.success", event.Success),
+        attribute.Int("querybuilder.item_count", event.ItemCount),
+    )
+    s.span.End()
+}
+```
+
+Default attributes only include low-sensitive query dimensions such as data source, query mode, pagination flags, start/limit, result kind, success, and error type. QueryBuilder does not automatically expose filter/sort or cursor values; add business dimensions explicitly through `AttributeProvider` when they are safe and useful.
+
+Behavior notes:
+
+- Configure `LoggerFilter`, `MetricsFilter`, and `TraceFilter` to avoid emitting every signal for every query. For example, keep metrics full-fidelity, log only errors/slow queries, and sample traces by context or data source.
+- Configure `SignalOrder` to change completion dispatch order. The default remains `trace -> metrics -> logger`; omitted known signals are appended in default order, while duplicate or unknown values are ignored.
+- When `Logger`, `Metrics`, and `Tracer` are all nil, the middleware bypasses observability work and calls the next handler directly.
+- Observer adapters are best-effort: panics from `Logger`, `Metrics`, `Tracer`, `AttributeProvider`, `OperationNameBuilder`, or `ErrorClassifier` are isolated and do not interrupt the query.
+- Default operation names are `querybuilder.<DataSource>.list`, `querybuilder.<DataSource>.cursor`, and `querybuilder.ElasticSearch.pit_cursor` for PIT + `search_after`.
+- `QueryCursor` emits one event per fetched batch. `QueryPage` and `QueryPageWithPIT` emit one event per returned page.
+- Validation/configuration errors that happen before the middleware pipeline starts are not emitted by this middleware. If you need full API-entry observability, record those call-site errors at your service boundary as well.
+- `DefaultErrorClassifier` returns stable names for context cancellation and deadline errors: `context_canceled` and `context_deadline_exceeded`.
 
 ### Query Meta
 
@@ -651,6 +745,7 @@ This approach is safe for `Clone` scenarios because each clone's middleware pipe
 | `NeedPagination` | `bool` | Whether pagination is enabled |
 | `Fields` | `[]string` | Field projection list |
 | `IsCursorQuery` | `bool` | Whether this is a cursor query |
+| `IsPITQuery` | `bool` | Whether this is an Elasticsearch PIT + `search_after` query |
 | `CursorFields` | `[]string` | Cursor pagination sort fields |
 | `CursorValues` | `[]any` | Initial cursor values passed by the caller for resume/app pagination scenarios |
 | `StartTime` | `time.Time` | Query start timestamp |
@@ -1157,6 +1252,7 @@ Integration recommendations:
 - PIT has a keep-alive window; if PIT is expired/invalid, restart from first page and issue a new PIT.
 - Keep a stable sort key (for example: business timestamp + unique id) to make `search_after` deterministic.
 - `HasMore` is computed via `limit+1` probing; use it as a paging hint and still rely on returned cursor/token as source of truth.
+- `QueryPageWithPIT` goes through the middleware pipeline and is reported by `ObservabilityMiddleware` as `querybuilder.ElasticSearch.pit_cursor`; the built-in cache middleware bypasses PIT pages automatically.
 
 Backend API contract reference (business layer):
 

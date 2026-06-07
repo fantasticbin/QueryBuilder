@@ -50,6 +50,7 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 		"needTotal":      meta.NeedTotal,
 		"needPagination": meta.NeedPagination,
 		"isCursorQuery":  meta.IsCursorQuery,
+		"isPITQuery":     meta.IsPITQuery,
 		"cursorFields":   append([]string(nil), meta.CursorFields...),
 	}
 
