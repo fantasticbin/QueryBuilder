@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/fantasticbin/QueryBuilder/core"
-	"github.com/fantasticbin/QueryBuilder/util"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"

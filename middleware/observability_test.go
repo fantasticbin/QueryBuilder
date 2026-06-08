@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 type recordingLogger struct {

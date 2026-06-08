@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 // CacheKeyBuilder 定义缓存键构建接口，业务方可覆写默认实现。

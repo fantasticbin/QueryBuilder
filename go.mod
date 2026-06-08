@@ -1,4 +1,4 @@
-module github.com/fantasticbin/QueryBuilder
+module github.com/fantasticbin/QueryBuilder/v2
 
 go 1.26
 

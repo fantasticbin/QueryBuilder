@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
-	builder "github.com/fantasticbin/QueryBuilder"
-	"github.com/fantasticbin/QueryBuilder/core"
+	builder "github.com/fantasticbin/QueryBuilder/v2"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 // CacheProvider 缓存提供者接口

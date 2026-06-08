@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"go.uber.org/mock/gomock"
 	"gorm.io/gorm"
 )

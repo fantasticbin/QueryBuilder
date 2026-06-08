@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"

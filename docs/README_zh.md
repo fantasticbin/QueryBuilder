@@ -32,7 +32,7 @@
 ## 安装
 
 ```shell
-go get github.com/fantasticbin/QueryBuilder
+go get github.com/fantasticbin/QueryBuilder/v2
 ```
 
 > **需要 Go 1.26+**（自引用泛型约束特性）。
@@ -77,7 +77,7 @@ package main
 import (
     "context"
     "gorm.io/gorm"
-    builder "github.com/fantasticbin/QueryBuilder"
+    builder "github.com/fantasticbin/QueryBuilder/v2"
 )
 
 func main() {
@@ -127,8 +127,8 @@ import (
     "context"
     pb "demo/api/user/v1"
     "demo/internal/model"
-    builder "github.com/fantasticbin/QueryBuilder"
-    "github.com/fantasticbin/QueryBuilder/core"
+    builder "github.com/fantasticbin/QueryBuilder/v2"
+    "github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 func ListUser(ctx context.Context, req *pb.ListUserRequest) (*core.ListResult[model.User], error) {
@@ -388,7 +388,7 @@ import (
     "time"
 
     "github.com/bluele/gcache"
-    "github.com/fantasticbin/QueryBuilder/middleware"
+    "github.com/fantasticbin/QueryBuilder/v2/middleware"
 )
 
 // GCacheProvider 使用 gcache 实现 middleware.CacheProvider 接口
@@ -596,9 +596,9 @@ import (
     "log"
     "time"
 
-    builder "github.com/fantasticbin/QueryBuilder"
-    "github.com/fantasticbin/QueryBuilder/core"
-    "github.com/fantasticbin/QueryBuilder/middleware"
+    builder "github.com/fantasticbin/QueryBuilder/v2"
+    "github.com/fantasticbin/QueryBuilder/v2/core"
+    "github.com/fantasticbin/QueryBuilder/v2/middleware"
 )
 
 obs := middleware.ObservabilityMiddleware[User](middleware.ObservabilityOptions{

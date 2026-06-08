@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 // List 查询列表功能结构

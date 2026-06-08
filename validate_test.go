@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"

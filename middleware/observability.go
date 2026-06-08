@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"time"
 
-	builder "github.com/fantasticbin/QueryBuilder"
-	"github.com/fantasticbin/QueryBuilder/core"
+	builder "github.com/fantasticbin/QueryBuilder/v2"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 // ObservabilitySignal 表示查询完成事件可分发到的信号类型。

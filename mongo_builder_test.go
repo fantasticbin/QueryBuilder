@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"go.uber.org/mock/gomock"
 )
 

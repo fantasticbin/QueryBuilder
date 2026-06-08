@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/fantasticbin/QueryBuilder/core"
-	"github.com/fantasticbin/QueryBuilder/util"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )

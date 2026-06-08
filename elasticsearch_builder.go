@@ -8,8 +8,8 @@ import (
 	"iter"
 	"time"
 
-	"github.com/fantasticbin/QueryBuilder/core"
-	"github.com/fantasticbin/QueryBuilder/util"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"github.com/olivere/elastic/v7"
 )
 

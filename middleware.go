@@ -5,7 +5,7 @@ import (
 	"iter"
 	"time"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 // Middleware 查询中间件类型定义

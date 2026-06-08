@@ -8,7 +8,7 @@ import (
 	"iter"
 	reflect "reflect"
 
-	"github.com/fantasticbin/QueryBuilder/core"
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 	gomock "go.uber.org/mock/gomock"
 )
 
