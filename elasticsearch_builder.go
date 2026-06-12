@@ -110,6 +110,12 @@ func (e *ElasticSearchBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return e
 }
 
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+func (e *ElasticSearchBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
+	e.builder.SetTotalLimit(totalLimit)
+	return e
+}
+
 // SetNeedPagination 设置是否需要分页（实现 Querier 接口）
 func (e *ElasticSearchBuilder[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	e.builder.SetNeedPagination(needPagination)
@@ -273,7 +279,6 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 
 	var resultPitID string
 	chainResult, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) (core.Result[R], error) {
-		resultPitID = e.pitID
 		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
 			ctx,
 			e.builder.cursorValues,
@@ -284,6 +289,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 		if queryErr != nil {
 			return nil, queryErr
 		}
+		resultPitID = e.pitID
 
 		return &core.CursorPageResult[R]{
 			Items:            batchList,
@@ -374,10 +380,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 			return nil
 		}
 
-		countService := e.builder.data.ElasticSearch.Count().
-			Index(e.index).
-			Query(e.filter)
-		count, err := countService.Do(ctx)
+		count, err := e.countTotal(ctx, e.filter)
 		if err != nil {
 			return err
 		}
@@ -390,6 +393,30 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 	}
 
 	return list, total, nil
+}
+
+// countTotal 执行 Elasticsearch 总数统计；配置 totalLimit 时使用 track_total_hits 上限统计。
+func (e *ElasticSearchBuilder[R]) countTotal(ctx context.Context, filter elastic.Query) (int64, error) {
+	if e.builder.totalLimit == 0 {
+		return e.builder.data.ElasticSearch.Count().
+			Index(e.index).
+			Query(filter).
+			Do(ctx)
+	}
+
+	searchResult, err := e.builder.data.ElasticSearch.Search().
+		Index(e.index).
+		Query(filter).
+		Size(0).
+		TrackTotalHits(int(e.builder.totalLimit)).
+		Do(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if searchResult == nil || searchResult.Hits == nil || searchResult.Hits.TotalHits == nil {
+		return 0, nil
+	}
+	return searchResult.Hits.TotalHits.Value, nil
 }
 
 // Explain 返回 ElasticSearch 构建器最终生成的查询 DSL（Dry Run 模式）
@@ -676,11 +703,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			return nil
 		}
 
-		countService := e.builder.data.ElasticSearch.Count().
-			Index(e.index).
-			Query(filter)
-
-		count, err := countService.Do(ctx)
+		count, err := e.countTotal(ctx, filter)
 		if err != nil {
 			return err
 		}

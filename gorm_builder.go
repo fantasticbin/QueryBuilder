@@ -91,6 +91,12 @@ func (g *GormBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return g
 }
 
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+func (g *GormBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
+	g.builder.SetTotalLimit(totalLimit)
+	return g
+}
+
 // SetNeedPagination 设置是否需要分页（实现 Querier 接口）
 func (g *GormBuilder[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	g.builder.SetNeedPagination(needPagination)
@@ -217,19 +223,28 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 			return nil
 		}
 
-		query := g.builder.data.DB.WithContext(ctx).
-			Model(new(R))
-
-		if g.filter != nil {
-			query = query.Scopes(g.filter)
-		}
-
-		return query.Count(&total).Error
+		return g.countTotal(ctx, &total)
 	}); err != nil {
 		return nil, 0, err
 	}
 
 	return list, total, nil
+}
+
+// countTotal 执行总数统计；配置 totalLimit 时通过子查询限制最多扫描的记录数。
+func (g *GormBuilder[R]) countTotal(ctx context.Context, total *int64) error {
+	query := g.builder.data.DB.WithContext(ctx).Model(new(R))
+	if g.filter != nil {
+		query = query.Scopes(g.filter)
+	}
+	if g.builder.totalLimit == 0 {
+		return query.Count(total).Error
+	}
+
+	subQuery := query.Select("1").Limit(int(g.builder.totalLimit))
+	return g.builder.data.DB.WithContext(ctx).
+		Table("(?) AS querybuilder_total_limit", subQuery).
+		Count(total).Error
 }
 
 // Explain 返回 GORM 构建器最终生成的 SQL 语句（Dry Run 模式）
@@ -401,15 +416,11 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 		return query.Find(&list).Error
 	}, func() error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
-		if !isFirstBatch || !g.builder.needTotal || g.afterHook == nil {
+		if !isFirstBatch || !g.builder.needTotal {
 			return nil
 		}
 
-		countQuery := g.builder.data.DB.WithContext(ctx).Model(new(R))
-		if g.filter != nil {
-			countQuery = countQuery.Scopes(g.filter)
-		}
-		return countQuery.Count(&total).Error
+		return g.countTotal(ctx, &total)
 	}); err != nil {
 		return nil, nil, 0, false, err
 	}

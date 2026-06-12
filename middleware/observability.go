@@ -220,35 +220,28 @@ func ObservabilityMiddleware[R any](opts ObservabilityOptions) builder.Middlewar
 			return next(ctx)
 		}
 
+		eventInput := queryEventBuildInput[R]{
+			operation:       operation,
+			meta:            meta,
+			startTime:       startTime,
+			errorClassifier: errorClassifier,
+			baseAttrs:       attrs,
+		}
+
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				event := buildQueryEvent[R](
-					operation,
-					meta,
-					startTime,
-					time.Since(startTime),
-					result,
-					err,
-					panicAsError(recovered),
-					errorClassifier,
-					attrs,
-				)
+				eventInput.result = result
+				eventInput.err = err
+				eventInput.panicErr = panicAsError(recovered)
+				event := buildQueryEvent(eventInput)
 				recordQuery(ctx, opts, span, event, signalOrder)
 				panic(recovered)
 			}
 		}()
 		result, err = next(ctx)
-		event := buildQueryEvent[R](
-			operation,
-			meta,
-			startTime,
-			time.Since(startTime),
-			result,
-			err,
-			nil,
-			errorClassifier,
-			attrs,
-		)
+		eventInput.result = result
+		eventInput.err = err
+		event := buildQueryEvent(eventInput)
 		recordQuery(ctx, opts, span, event, signalOrder)
 		return result, err
 	}
@@ -334,39 +327,47 @@ func recordLogger(ctx context.Context, opts ObservabilityOptions, event QueryEve
 	}
 }
 
+// queryEventBuildInput 聚合构建 QueryEvent 所需的上下文。
+type queryEventBuildInput[R any] struct {
+	operation       string
+	meta            core.QueryMeta
+	startTime       time.Time
+	result          core.Result[R]
+	err             error
+	panicErr        error
+	errorClassifier ErrorClassifier
+	baseAttrs       []Attribute
+}
+
 // buildQueryEvent 根据查询结果、错误和基础属性组装统一的可观测事件。
-func buildQueryEvent[R any](
-	operation string,
-	meta core.QueryMeta,
-	startTime time.Time,
-	duration time.Duration,
-	result core.Result[R],
-	err error,
-	panicErr error,
-	errorClassifier ErrorClassifier,
-	baseAttrs []Attribute,
-) QueryEvent {
-	eventErr := err
-	if panicErr != nil {
-		eventErr = panicErr
+func buildQueryEvent[R any](input queryEventBuildInput[R]) (event QueryEvent) {
+	defer func() {
+		event.Duration = time.Since(input.startTime)
+		if event.Duration <= 0 {
+			event.Duration = time.Nanosecond
+		}
+	}()
+
+	eventErr := input.err
+	if input.panicErr != nil {
+		eventErr = input.panicErr
 	}
 
-	event := QueryEvent{
-		Operation:  operation,
-		Meta:       meta,
-		StartTime:  startTime,
-		Duration:   duration,
+	event = QueryEvent{
+		Operation:  input.operation,
+		Meta:       input.meta,
+		StartTime:  input.startTime,
 		Error:      eventErr,
-		ErrorType:  safeErrorClass(errorClassifier, eventErr),
+		ErrorType:  safeErrorClass(input.errorClassifier, eventErr),
 		Success:    eventErr == nil,
-		Attributes: cloneAttributes(baseAttrs),
+		Attributes: cloneAttributes(input.baseAttrs),
 	}
-	hasResult := result != nil
+	hasResult := input.result != nil
 	if hasResult {
-		event.ResultKind = result.GetResultKind()
-		event.ItemCount = len(result.GetItems())
-		event.Total = result.GetTotal()
-		event.HasMore = result.GetHasMore()
+		event.ResultKind = input.result.GetResultKind()
+		event.ItemCount = len(input.result.GetItems())
+		event.Total = input.result.GetTotal()
+		event.HasMore = input.result.GetHasMore()
 	}
 	event.Attributes = append(event.Attributes, resultAttributes(event, hasResult)...)
 	return event
@@ -379,6 +380,7 @@ func defaultQueryAttributes(meta core.QueryMeta) []Attribute {
 		{Key: "querybuilder.mode", Value: meta.QueryMode()},
 		{Key: "querybuilder.pit", Value: meta.IsPITQuery},
 		{Key: "querybuilder.need_total", Value: meta.NeedTotal},
+		{Key: "querybuilder.total_limit", Value: meta.TotalLimit},
 		{Key: "querybuilder.need_pagination", Value: meta.NeedPagination},
 		{Key: "querybuilder.start", Value: meta.Start},
 		{Key: "querybuilder.limit", Value: meta.Limit},

@@ -69,6 +69,24 @@ func TestGormBuilder_Clone_StateIsolation(t *testing.T) {
 	}
 }
 
+func TestGormBuilder_Clone_TotalLimitIsolation(t *testing.T) {
+	original := NewGormBuilder[CloneTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+	original.SetTotalLimit(1000)
+
+	cloned := original.Clone()
+	if cloned.GetQueryMeta().TotalLimit != 1000 {
+		t.Fatalf("expected cloned total limit 1000, got %d", cloned.GetQueryMeta().TotalLimit)
+	}
+
+	cloned.SetTotalLimit(500)
+	if original.GetQueryMeta().TotalLimit != 1000 {
+		t.Fatalf("expected original total limit to remain 1000, got %d", original.GetQueryMeta().TotalLimit)
+	}
+	if cloned.GetQueryMeta().TotalLimit != 500 {
+		t.Fatalf("expected cloned total limit 500, got %d", cloned.GetQueryMeta().TotalLimit)
+	}
+}
+
 // --- MongoBuilder Clone 状态隔离测试 ---
 
 func TestMongoBuilder_Clone_StateIsolation(t *testing.T) {

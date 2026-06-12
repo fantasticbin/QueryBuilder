@@ -48,6 +48,7 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 		"start":          meta.Start,
 		"limit":          meta.Limit,
 		"needTotal":      meta.NeedTotal,
+		"totalLimit":     meta.TotalLimit,
 		"needPagination": meta.NeedPagination,
 		"isCursorQuery":  meta.IsCursorQuery,
 		"isPITQuery":     meta.IsPITQuery,

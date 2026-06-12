@@ -14,7 +14,9 @@ import (
 //	R - 返回结果类型参数
 type List[R any] struct {
 	dataSource  DataSource         // 数据源类型
+	data        *DBProxy           // 可选：默认数据实例
 	querier     Querier[R]         // 可选：直接注入自定义 Querier（用于测试等场景）
+	metaQuerier Querier[R]         // 最近一次查询使用的构建器，用于获取元信息
 	beforeHook  BeforeQueryHook    // 查询前置钩子
 	afterHook   AfterQueryHook[R]  // 查询后置钩子
 	middlewares []Middleware[R]    // 中间件链
@@ -26,12 +28,14 @@ func NewList[R any]() *List[R] {
 }
 
 // NewListWithData 通过指定数据源类型和数据实例创建 List
-// 内部会预先创建对应的专属查询构建器并持有，后续 Query/QueryCursor 将复用该构建器
-// 这种方式下可通过 GetQueryMeta() 在查询执行后获取元信息
+// 内部会保留默认数据实例，并预创建一个元信息构建器。
+// 后续每次 Query/QueryCursor/QueryPage 都会使用新的构建器，避免查询状态串场。
 func NewListWithData[R any](ds DataSource, data *DBProxy) *List[R] {
+	querier := NewBuilder[R](ds, data)
 	return &List[R]{
-		dataSource: ds,
-		querier:    NewBuilder[R](ds, data),
+		dataSource:  ds,
+		data:        data,
+		metaQuerier: querier,
 	}
 }
 
@@ -40,6 +44,9 @@ func NewListWithData[R any](ds DataSource, data *DBProxy) *List[R] {
 // 通过该方法指定数据源类型，查询时将自动创建对应的专属构建器
 func (l *List[R]) SetDataSource(ds DataSource) *List[R] {
 	l.dataSource = ds
+	if l.querier == nil {
+		l.metaQuerier = nil
+	}
 	return l
 }
 
@@ -48,6 +55,7 @@ func (l *List[R]) SetDataSource(ds DataSource) *List[R] {
 // 设置后将忽略 DataSource 配置，直接使用注入的 Querier
 func (l *List[R]) SetQuerier(querier Querier[R]) *List[R] {
 	l.querier = querier
+	l.metaQuerier = querier
 	return l
 }
 
@@ -77,47 +85,102 @@ func (l *List[R]) SetAfterQueryHook(hook AfterQueryHook[R]) *List[R] {
 	return l
 }
 
+// buildQuerier 为单次查询准备 Querier。
+// 对内置构建器使用 Clone 隔离可变查询状态，对自定义 Querier 保持原样以兼容测试和扩展实现。
+func (l *List[R]) buildQuerier(options BaseQueryListOptions) Querier[R] {
+	var querier Querier[R]
+	if l.querier != nil {
+		querier = cloneQuerier(l.querier)
+	} else {
+		data := options.GetData()
+		if data == nil {
+			data = l.data
+		}
+		querier = NewBuilder[R](l.dataSource, data)
+	}
+	l.applyBackendOptions(querier, options)
+	l.metaQuerier = querier
+	return querier
+}
+
+// cloneQuerier 在已知内置构建器上创建查询状态副本。
+// 未知 Querier 没有通用复制协议，直接返回原实例。
+func cloneQuerier[R any](querier Querier[R]) Querier[R] {
+	switch q := querier.(type) {
+	case *GormBuilder[R]:
+		return q.Clone()
+	case *MongoBuilder[R]:
+		return q.Clone()
+	case *ElasticSearchBuilder[R]:
+		return q.Clone()
+	default:
+		return querier
+	}
+}
+
+// applyBackendOptions 应用通用 QueryOption 中承载的后端专属配置。
+func (l *List[R]) applyBackendOptions(querier Querier[R], options BaseQueryListOptions) {
+	if es, ok := querier.(*ElasticSearchBuilder[R]); ok {
+		if options.esIndex != "" {
+			es.SetESIndex(options.esIndex)
+		}
+		if options.pitID != "" {
+			es.SetPITID(options.pitID)
+		}
+		if options.pitKeepAlive > 0 {
+			es.SetPitKeepAlive(options.pitKeepAlive)
+		}
+	}
+}
+
 // passQueryOption 传递查询选项
-func (l *List[R]) passQueryOption(options BaseQueryListOptions, cursorMode, handleHookAndMiddleware bool) {
+func (l *List[R]) passQueryOption(querier Querier[R], options BaseQueryListOptions, cursorMode, handleHookAndMiddleware bool) {
 	// 配置通用参数
-	l.querier.SetStart(options.GetStart())
-	l.querier.SetLimit(options.GetLimit())
-	l.querier.SetNeedTotal(options.GetNeedTotal())
-	l.querier.SetNeedPagination(options.GetNeedPagination())
+	querier.SetStart(options.GetStart())
+	querier.SetLimit(options.GetLimit())
+	querier.SetNeedTotal(options.GetNeedTotal())
+	if totalLimit := options.GetTotalLimit(); totalLimit > 0 {
+		if q, ok := querier.(interface {
+			SetTotalLimit(uint32) Querier[R]
+		}); ok {
+			q.SetTotalLimit(totalLimit)
+		}
+	}
+	querier.SetNeedPagination(options.GetNeedPagination())
 
 	// 应用指定字段
 	if fields := options.GetFields(); len(fields) > 0 {
-		l.querier.SetFields(fields...)
+		querier.SetFields(fields...)
 	}
 
 	if cursorMode {
 		// 设置游标字段
 		if cursorFields := options.GetCursorFields(); len(cursorFields) > 0 {
-			l.querier.SetCursorField(cursorFields...)
+			querier.SetCursorField(cursorFields...)
 		}
 		// 设置游标初始值
 		if cursorValues := options.GetCursorValues(); len(cursorValues) > 0 {
-			l.querier.SetCursorValue(cursorValues...)
+			querier.SetCursorValue(cursorValues...)
 		}
 	}
 
 	// 应用 Scope 配置回调，自动设置 filter/sort
 	if l.scope != nil {
-		l.scope(l.querier)
+		l.scope(querier)
 	}
 
 	if handleHookAndMiddleware {
 		// 设置 Hook
 		if l.beforeHook != nil {
-			l.querier.SetBeforeQueryHook(l.beforeHook)
+			querier.SetBeforeQueryHook(l.beforeHook)
 		}
 		if l.afterHook != nil {
-			l.querier.SetAfterQueryHook(l.afterHook)
+			querier.SetAfterQueryHook(l.afterHook)
 		}
 
 		// 添加中间件
 		for _, m := range l.middlewares {
-			l.querier.Use(m)
+			querier.Use(m)
 		}
 	}
 }
@@ -140,18 +203,8 @@ func (l *List[R]) Query(
 
 	options := LoadQueryOptions(opts...)
 
-	var querier Querier[R]
-	if l.querier != nil {
-		// 使用注入的自定义 Querier
-		querier = l.querier
-	} else {
-		// 通过工厂函数创建对应的专属查询构建器
-		querier = NewBuilder[R](l.dataSource, options.GetData())
-		l.querier = querier
-	}
-
-	// 配置通用参数
-	l.passQueryOption(options, false, true)
+	querier := l.buildQuerier(options)
+	l.passQueryOption(querier, options, false, true)
 	return querier.QueryList(ctx)
 }
 
@@ -173,18 +226,8 @@ func (l *List[R]) QueryCursor(
 
 	options := LoadQueryOptions(opts...)
 
-	var querier Querier[R]
-	if l.querier != nil {
-		// 使用注入的自定义 Querier
-		querier = l.querier
-	} else {
-		// 通过工厂函数创建对应的专属查询构建器
-		querier = NewBuilder[R](l.dataSource, options.GetData())
-		l.querier = querier
-	}
-
-	// 配置通用参数
-	l.passQueryOption(options, true, true)
+	querier := l.buildQuerier(options)
+	l.passQueryOption(querier, options, true, true)
 	return querier.QueryCursor(ctx)
 }
 
@@ -205,19 +248,33 @@ func (l *List[R]) QueryPage(
 
 	options := LoadQueryOptions(opts...)
 
-	var querier Querier[R]
-	if l.querier != nil {
-		// 使用注入的自定义 Querier
-		querier = l.querier
-	} else {
-		// 通过工厂函数创建对应的专属查询构建器
-		querier = NewBuilder[R](l.dataSource, options.GetData())
-		l.querier = querier
+	querier := l.buildQuerier(options)
+	l.passQueryOption(querier, options, true, true)
+	return querier.QueryPage(ctx)
+}
+
+// QueryPageWithPIT 执行 Elasticsearch PIT + search_after 单批次分页查询。
+// 该方法仅支持 ElasticSearchBuilder，用于需要跨请求维持 PIT ID 的分页场景。
+func (l *List[R]) QueryPageWithPIT(
+	ctx context.Context,
+	opts ...QueryOption,
+) (result *core.ESPITPageResult[R], err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = fmt.Errorf("query page with pit panic recovered: %v", r)
+		}
+	}()
+
+	options := LoadQueryOptions(opts...)
+	querier := l.buildQuerier(options)
+	es, ok := querier.(*ElasticSearchBuilder[R])
+	if !ok {
+		return nil, fmt.Errorf("QueryPageWithPIT requires ElasticSearchBuilder")
 	}
 
-	// 配置通用参数
-	l.passQueryOption(options, true, true)
-	return querier.QueryPage(ctx)
+	l.passQueryOption(es, options, true, true)
+	return es.QueryPageWithPIT(ctx)
 }
 
 // Explain 返回构建器最终生成的查询语句（Dry Run 模式）
@@ -232,21 +289,14 @@ func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result stri
 	}()
 
 	options := LoadQueryOptions(opts...)
-
-	var querier Querier[R]
-	if l.querier != nil {
-		querier = l.querier
-	} else {
-		querier = NewBuilder[R](l.dataSource, options.GetData())
-		l.querier = querier
-	}
+	querier := l.buildQuerier(options)
 
 	// 配置通用参数
 	var cursorMode bool
 	if len(options.GetCursorFields()) > 0 {
 		cursorMode = true
 	}
-	l.passQueryOption(options, cursorMode, false)
+	l.passQueryOption(querier, options, cursorMode, false)
 
 	return querier.Explain(ctx)
 }
@@ -259,8 +309,8 @@ func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result stri
 //
 // 仅在首次调用 Query/QueryCursor 之前且未设置 Querier 时返回零值
 func (l *List[R]) GetQueryMeta() QueryMeta {
-	if l.querier != nil {
-		return l.querier.GetQueryMeta()
+	if l.metaQuerier != nil {
+		return l.metaQuerier.GetQueryMeta()
 	}
 	return QueryMeta{}
 }

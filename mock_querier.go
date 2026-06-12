@@ -87,6 +87,19 @@ func (mr *MockQuerierMockRecorder[R]) SetNeedTotal(needTotal any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetNeedTotal", reflect.TypeOf((*MockQuerier[R])(nil).SetNeedTotal), needTotal)
 }
 
+// SetTotalLimit Mock 实现
+func (m *MockQuerier[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetTotalLimit", totalLimit)
+	return m
+}
+
+// SetTotalLimit 记录预期调用
+func (mr *MockQuerierMockRecorder[R]) SetTotalLimit(totalLimit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTotalLimit", reflect.TypeOf((*MockQuerier[R])(nil).SetTotalLimit), totalLimit)
+}
+
 // SetNeedPagination Mock 实现
 func (m *MockQuerier[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	m.ctrl.T.Helper()

@@ -24,6 +24,7 @@
 - **游标分页**：内置基于游标的分页查询 `QueryCursor`，返回 Go 1.23+ `iter.Seq2` 迭代器，支持对大数据集进行内存高效的流式遍历。支持 Gorm（行值表达式）、MongoDB（`$gt` 复合条件）和 ElasticSearch（`search_after` API）。同时提供 `QueryPage` 单批次游标分页 API，返回结构化的 `core.CursorPageResult`（items + has_more + next_cursor），适用于 App "加载更多" 或 API 驱动的分页场景。在 ElasticSearch 游标场景全量数据迭代中支持 `search_after` + `Point-in-Time (PIT)` 方案，在迭代期间保持索引快照一致、避免 refresh 导致排序不稳定；可通过 `SetNeedPagination(false)` 自动启用，并用 `SetPitKeepAlive(...)` 配置保活时长。
 - **Clone 并发分叉**：每个构建器提供 `Clone()` 方法，创建当前查询配置的独立副本——支持安全的并发分叉查询，无共享可变状态。
 - **分页控制**：支持开关分页，适用于数据导出等场景。
+- **上限总数统计**：通过 `WithTotalLimit` / `SetTotalLimit` 限制昂贵的总数统计，默认仍保持精确统计。
 - **选项模式**：通过函数式选项灵活配置查询参数。
 - **易于测试**：内置 `MockQuerier`，便于单元测试。
 
@@ -452,7 +453,7 @@ type CacheKeyBuilder interface {
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | 业务资源名（如 "users"、"orders"），隔离不同查询场景 |
 | `datasource` | `QueryMeta.DataSource` | 数据源类型（Gorm/MongoDB/ElasticSearch） |
 | `fields` | `QueryMeta.Fields` | 查询字段投影 |
-| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、needPagination、isCursorQuery、isPITQuery、cursorFields |
+| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、totalLimit、needPagination、isCursorQuery、isPITQuery、cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | 业务过滤条件（map/struct/切片/标量） |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | 业务排序条件 |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | 扩展维度（如 tenant_id 等多租户隔离字段） |
@@ -740,6 +741,7 @@ func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
 | `Start` | `uint32` | 分页起始位置 |
 | `Limit` | `uint32` | 每页数据条数 |
 | `NeedTotal` | `bool` | 是否需要查询总数 |
+| `TotalLimit` | `uint32` | 总数统计上限，`0` 表示精确统计 |
 | `NeedPagination` | `bool` | 是否需要分页 |
 | `Fields` | `[]string` | 指定字段列表 |
 | `IsCursorQuery` | `bool` | 是否为游标查询模式 |
@@ -1024,6 +1026,7 @@ for order, err := range list.QueryCursor(ctx,
 |------|--------|-----------------|
 | `needPagination` | `true` | 为 `true` 时，只获取**单批次**数据（相当于一页）。为 `false` 时，自动分批遍历整个数据集直到耗尽。 |
 | `needTotal` | `true` | 为 `true` 时，在**首批次**查询时并行执行 Count 查询获取总数。总数通过 `AfterQueryHook` 传递。为 `false` 时，完全跳过 Count 查询。 |
+| `totalLimit` | `0` | 大于 `0` 时限制总数统计最多统计到该值。若返回的 `Total` 等于上限，应按 `上限+` 理解，而不是精确总数。 |
 
 **单页游标查询**（仅获取单批次）：
 
@@ -1065,6 +1068,28 @@ for user, err := range list.QueryCursor(ctx,
 ```
 
 > **性能提示：** 对于不需要总数的大数据集遍历场景，设置 `needTotal(false)` 可以避免一次昂贵的 `COUNT(*)` / `CountDocuments` / `Count` 查询。
+
+#### 上限总数统计
+
+对于大数据量查询，精确总数统计可能成为主要耗时。如果界面仍需要一个“总数感知”的值，可以保留 `needTotal=true`，同时通过 `WithTotalLimit(n)` 设置统计上限：
+
+```go
+result, err := list.Query(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithLimit(20),
+    builder.WithNeedTotal(true),
+    builder.WithTotalLimit(10000),
+)
+// 如果 result.Total == 10000，建议展示为 "10000+" 或按上限总数处理。
+```
+
+默认 `totalLimit=0`，保持原有精确统计行为。启用上限统计后：
+
+- Gorm 使用带 `LIMIT n` 的子查询统计：`SELECT COUNT(*) FROM (SELECT 1 ... LIMIT n)`。
+- MongoDB 使用 `CountDocuments` 的 `CountOptions.Limit`。
+- ElasticSearch 使用 `size=0` 配合 `track_total_hits=n`。
+
+该选项适用于 `QueryList`、`QueryCursor` 首批次总数、`QueryPage` 和 `QueryPageWithPIT`。
 
 #### QueryPage（单批次游标分页）
 
@@ -1222,6 +1247,24 @@ sql, err := b.Explain(ctx)
 - `SetCursorValue(...)`：设置上一页返回的游标值。
 - `QueryPageWithPIT(ctx)`：查询一页并返回 `core.ESPITPageResult`。
 
+同样可以通过 `List` 选项模式使用：
+
+```go
+list := builder.NewList[Doc]()
+list.SetDataSource(builder.ElasticSearch)
+list.SetScope(builder.NewElasticSearchScope[Doc](elastic.NewMatchAllQuery()))
+
+page, err := list.QueryPageWithPIT(ctx,
+    builder.WithData(builder.NewDBProxy(nil, nil, esClient)),
+    builder.WithESIndex("my_index"),
+    builder.WithCursorField("created_at", "id"),
+    builder.WithPITID(prevPitID),
+    builder.WithCursorValue(prevCursorValues...),
+    builder.WithPitKeepAlive(time.Minute),
+    builder.WithLimit(20),
+)
+```
+
 **`core.ESPITPageResult` 结构**（内嵌 `core.CursorPageResult`，继承其所有字段：`Items`、`Total`、`HasMore`、`NextCursorValues`）：
 
 | 字段 | 类型 | 说明 |
@@ -1313,6 +1356,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetStart(start)` | 设置分页起始位置 |
 | `SetLimit(limit)` | 设置每页数据条数（最大值：5000） |
 | `SetNeedTotal(bool)` | 设置是否需要查询总数 |
+| `SetTotalLimit(limit)` | 设置总数统计上限，`0` 表示精确统计 |
 | `SetNeedPagination(bool)` | 设置是否需要分页 |
 | `SetFields(fields...)` | 设置指定字段 |
 | `SetBeforeQueryHook(hook)` | 设置查询前置钩子 |
@@ -1335,6 +1379,23 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 | `SetPITID(pitID)` | `ElasticSearchBuilder` | 设置 PIT ID，用于跨请求分页续查 |
 | `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | 执行基于 PIT 的单批次分页查询，返回 `*core.ESPITPageResult` |
 | `Explain(ctx)` | 所有构建器 | 预览生成的查询语句（Dry Run） |
+
+### List 查询选项
+
+| 选项 | 说明 |
+|------|------|
+| `WithData(data)` | 设置本次查询的数据代理 |
+| `WithStart(start)` | 设置分页起始位置 |
+| `WithLimit(limit)` | 设置每页数据条数 |
+| `WithNeedTotal(bool)` | 设置是否需要查询总数 |
+| `WithTotalLimit(limit)` | 设置总数统计上限，`0` 表示精确统计 |
+| `WithNeedPagination(bool)` | 设置是否需要分页 |
+| `WithFields(fields...)` | 设置指定字段 |
+| `WithCursorField(fields...)` | 设置游标分页排序字段 |
+| `WithCursorValue(values...)` | 设置游标初始值 |
+| `WithESIndex(index)` | 在 `List` 模式下设置 Elasticsearch 索引名 |
+| `WithPITID(pitID)` | 续用 Elasticsearch PIT 分页会话 |
+| `WithPitKeepAlive(duration)` | 设置 Elasticsearch PIT 保活时长 |
 
 ---
 

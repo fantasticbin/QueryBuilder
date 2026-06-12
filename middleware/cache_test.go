@@ -37,6 +37,7 @@ func (m *mockQuerier[R]) Use(_ builder.Middleware[R]) builder.Querier[R]        
 func (m *mockQuerier[R]) SetStart(_ uint32) builder.Querier[R]                             { return m }
 func (m *mockQuerier[R]) SetLimit(_ uint32) builder.Querier[R]                             { return m }
 func (m *mockQuerier[R]) SetNeedTotal(_ bool) builder.Querier[R]                           { return m }
+func (m *mockQuerier[R]) SetTotalLimit(_ uint32) builder.Querier[R]                        { return m }
 func (m *mockQuerier[R]) SetNeedPagination(_ bool) builder.Querier[R]                      { return m }
 func (m *mockQuerier[R]) SetFields(_ ...string) builder.Querier[R]                         { return m }
 func (m *mockQuerier[R]) SetBeforeQueryHook(_ builder.BeforeQueryHook) builder.Querier[R]  { return m }

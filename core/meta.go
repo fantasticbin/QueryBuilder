@@ -16,6 +16,7 @@ type QueryMeta struct {
 	Start          uint32     // 分页起始位置
 	Limit          uint32     // 每页数据条数
 	NeedTotal      bool       // 是否需要查询总数
+	TotalLimit     uint32     // 总数统计上限，0 表示精确统计
 	NeedPagination bool       // 是否需要分页
 	Fields         []string   // 查询字段投影
 	IsCursorQuery  bool       // 是否为游标查询模式

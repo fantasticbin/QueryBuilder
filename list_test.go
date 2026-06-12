@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/olivere/elastic/v7"
 	"go.uber.org/mock/gomock"
 	"gorm.io/gorm"
 )
@@ -1283,5 +1284,131 @@ func TestQueryPage_MultiFieldCursor(t *testing.T) {
 	}
 	if len(result.NextCursorValues) != 2 {
 		t.Errorf("expected 2 cursor values, got %d", len(result.NextCursorValues))
+	}
+}
+
+func TestListQuery_DoesNotReuseConcreteQuerierState(t *testing.T) {
+	ctx := context.Background()
+	baseBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(baseBuilder)
+
+	var calls int
+	var capturedFields [][]string
+	list.Use(func(
+		ctx context.Context,
+		b Querier[TestEntity],
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
+		calls++
+		gb, ok := b.(*GormBuilder[TestEntity])
+		if !ok {
+			t.Fatalf("expected *GormBuilder[TestEntity], got %T", b)
+		}
+		fields := make([]string, len(gb.builder.fields))
+		copy(fields, gb.builder.fields)
+		capturedFields = append(capturedFields, fields)
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
+	})
+
+	if _, err := list.Query(ctx, WithFields("id")); err != nil {
+		t.Fatalf("unexpected first query error: %v", err)
+	}
+	if _, err := list.Query(ctx); err != nil {
+		t.Fatalf("unexpected second query error: %v", err)
+	}
+
+	if calls != 2 {
+		t.Fatalf("expected one middleware call per query, got %d", calls)
+	}
+	if len(baseBuilder.builder.middlewares) != 0 {
+		t.Fatalf("expected injected builder to remain unmodified, got %d middlewares", len(baseBuilder.builder.middlewares))
+	}
+	if len(capturedFields) != 2 {
+		t.Fatalf("expected two captured field snapshots, got %d", len(capturedFields))
+	}
+	if len(capturedFields[0]) != 1 || capturedFields[0][0] != "id" {
+		t.Fatalf("expected first query fields [id], got %v", capturedFields[0])
+	}
+	if len(capturedFields[1]) != 0 {
+		t.Fatalf("expected second query fields to be empty, got %v", capturedFields[1])
+	}
+}
+
+func TestListQuery_WithESOptions(t *testing.T) {
+	ctx := context.Background()
+	list := NewList[TestEntity]()
+	list.SetDataSource(ElasticSearch)
+
+	list.Use(func(
+		ctx context.Context,
+		b Querier[TestEntity],
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
+		eb, ok := b.(*ElasticSearchBuilder[TestEntity])
+		if !ok {
+			t.Fatalf("expected *ElasticSearchBuilder[TestEntity], got %T", b)
+		}
+		if eb.index != "users" {
+			t.Fatalf("expected ES index users, got %q", eb.index)
+		}
+		if eb.pitKeepAlive != 2*time.Minute {
+			t.Fatalf("expected PIT keep alive 2m, got %v", eb.pitKeepAlive)
+		}
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
+	})
+
+	_, err := list.Query(ctx,
+		WithData(NewDBProxy(nil, nil, &elastic.Client{})),
+		WithESIndex("users"),
+		WithPitKeepAlive(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListQuery_WithTotalLimit(t *testing.T) {
+	ctx := context.Background()
+	baseBuilder := NewGormBuilder[TestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+
+	list := NewList[TestEntity]()
+	list.SetQuerier(baseBuilder)
+
+	list.Use(func(
+		ctx context.Context,
+		b Querier[TestEntity],
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
+		meta := b.GetQueryMeta()
+		if meta.TotalLimit != 1000 {
+			t.Fatalf("expected total limit 1000, got %d", meta.TotalLimit)
+		}
+		return &core.ListResult[TestEntity]{Items: []*TestEntity{}, Total: 0}, nil
+	})
+
+	_, err := list.Query(ctx, WithTotalLimit(1000))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if baseBuilder.GetQueryMeta().TotalLimit != 0 {
+		t.Fatalf("expected base builder total limit to remain 0, got %d", baseBuilder.GetQueryMeta().TotalLimit)
+	}
+}
+
+func TestListQueryPageWithPITRejectsCursorWithoutPITID(t *testing.T) {
+	ctx := context.Background()
+	list := NewList[TestEntity]()
+	list.SetDataSource(ElasticSearch)
+
+	_, err := list.QueryPageWithPIT(ctx,
+		WithData(NewDBProxy(nil, nil, &elastic.Client{})),
+		WithESIndex("users"),
+		WithCursorField("id"),
+		WithCursorValue(uint32(10)),
+	)
+	if !errors.Is(err, ErrPITCursorWithoutPITID) {
+		t.Fatalf("expected ErrPITCursorWithoutPITID, got %v", err)
 	}
 }

@@ -24,6 +24,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 - **Cursor Pagination**: Built-in cursor-based pagination with `QueryCursor`, returning Go 1.23+ `iter.Seq2` iterators for memory-efficient streaming over large datasets. Supports Gorm (row value expressions), MongoDB (`$gt` compound conditions), and ElasticSearch (`search_after` API). Also provides `QueryPage` for single-batch cursor pagination, returning a structured `core.CursorPageResult` (items + has_more + next_cursor) — ideal for App "load more" or API-driven pagination. Supports the `search_after` + `Point-in-Time (PIT)` approach for full data iteration in ElasticSearch cursor scenarios, ensuring index snapshot consistency during iteration and avoiding unstable sorting caused by refresh operations. It can be automatically enabled via `SetNeedPagination(false)`, with the keep-alive duration configurable through `SetPitKeepAlive(...)`.
 - **Clone for Concurrent Forking**: Each builder provides a `Clone()` method to create an independent copy of the current query configuration — enabling safe concurrent forked queries without shared state.
 - **Pagination Control**: Toggle pagination on/off — useful for data export scenarios.
+- **Bounded Total Count**: Cap expensive total-count queries with `WithTotalLimit` / `SetTotalLimit` while keeping exact counting as the default.
 - **Options Pattern**: Flexible query configuration via functional options.
 - **Easy to Test**: Built-in `MockQuerier` for convenient unit testing.
 
@@ -453,7 +454,7 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | Business resource name (e.g. `"users"`, `"orders"`) |
 | `datasource` | `QueryMeta` | Data source type (Gorm/MongoDB/ES) |
 | `fields` | `QueryMeta` | Field projection list |
-| `pagination` | `QueryMeta` | start, limit, needTotal, needPagination, isCursorQuery, isPITQuery, cursorFields |
+| `pagination` | `QueryMeta` | start, limit, needTotal, totalLimit, needPagination, isCursorQuery, isPITQuery, cursorFields |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | Query filter conditions |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | Sort conditions |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | Additional dimensions (e.g. tenant_id) |
@@ -742,6 +743,7 @@ This approach is safe for `Clone` scenarios because each clone's middleware pipe
 | `Start` | `uint32` | Pagination offset |
 | `Limit` | `uint32` | Page size |
 | `NeedTotal` | `bool` | Whether total count is requested |
+| `TotalLimit` | `uint32` | Total count cap; `0` means exact count |
 | `NeedPagination` | `bool` | Whether pagination is enabled |
 | `Fields` | `[]string` | Field projection list |
 | `IsCursorQuery` | `bool` | Whether this is a cursor query |
@@ -1026,6 +1028,7 @@ for order, err := range list.QueryCursor(ctx,
 |--------|---------|------------------------|
 | `needPagination` | `true` | When `true`, only fetches a **single batch** (equivalent to one page). When `false`, iterates through the entire dataset in batches until exhausted. |
 | `needTotal` | `true` | When `true`, executes a **parallel Count query** on the first batch to retrieve the total count. The total is passed to `AfterQueryHook`. When `false`, skips the Count query entirely. |
+| `totalLimit` | `0` | When greater than `0`, caps the total-count query. If returned `Total` equals the cap, treat it as `cap+` rather than an exact count. |
 
 **Single-page cursor query** (fetch one batch only):
 
@@ -1067,6 +1070,28 @@ for user, err := range list.QueryCursor(ctx,
 ```
 
 > **Performance tip:** Set `needTotal(false)` for large-dataset traversals where total count is unnecessary — this avoids an expensive `COUNT(*)` / `CountDocuments` / `Count` query.
+
+#### Bounded Total Count
+
+Exact total counts can dominate latency on large datasets. Keep `needTotal=true` when the UI still needs a total-like value, but configure a cap with `WithTotalLimit(n)`:
+
+```go
+result, err := list.Query(ctx,
+    builder.WithData(builder.NewDBProxy(db, nil, nil)),
+    builder.WithLimit(20),
+    builder.WithNeedTotal(true),
+    builder.WithTotalLimit(10000),
+)
+// If result.Total == 10000, display it as "10000+" or treat it as a capped total.
+```
+
+The default `totalLimit=0` preserves exact-count behavior. When capped counting is enabled:
+
+- Gorm uses a limited subquery count (`SELECT COUNT(*) FROM (SELECT 1 ... LIMIT n)`).
+- MongoDB uses `CountDocuments` with `CountOptions.Limit`.
+- ElasticSearch uses `size=0` with `track_total_hits=n`.
+
+This option applies to `QueryList`, `QueryCursor` first-batch totals, `QueryPage`, and `QueryPageWithPIT`.
 
 #### QueryPage (Single-Batch Cursor Pagination)
 
@@ -1224,6 +1249,24 @@ For Elasticsearch, classic `from + size` pagination may become unstable across r
 - `SetCursorValue(...)` to continue from last page cursor.
 - `QueryPageWithPIT(ctx)` to fetch one page and return `core.ESPITPageResult`.
 
+The same flow can be used through `List` options:
+
+```go
+list := builder.NewList[Doc]()
+list.SetDataSource(builder.ElasticSearch)
+list.SetScope(builder.NewElasticSearchScope[Doc](elastic.NewMatchAllQuery()))
+
+page, err := list.QueryPageWithPIT(ctx,
+    builder.WithData(builder.NewDBProxy(nil, nil, esClient)),
+    builder.WithESIndex("my_index"),
+    builder.WithCursorField("created_at", "id"),
+    builder.WithPITID(prevPitID),
+    builder.WithCursorValue(prevCursorValues...),
+    builder.WithPitKeepAlive(time.Minute),
+    builder.WithLimit(20),
+)
+```
+
 **`core.ESPITPageResult` structure** (embeds `core.CursorPageResult` — inherits all its fields: `Items`, `Total`, `HasMore`, `NextCursorValues`):
 
 | Field | Type | Description |
@@ -1315,6 +1358,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetStart(start)` | Set pagination offset |
 | `SetLimit(limit)` | Set page size (max: 5000) |
 | `SetNeedTotal(bool)` | Toggle total count query |
+| `SetTotalLimit(limit)` | Cap total counting; `0` keeps exact counting |
 | `SetNeedPagination(bool)` | Toggle pagination |
 | `SetFields(fields...)` | Set field selection |
 | `SetBeforeQueryHook(hook)` | Set pre-query hook |
@@ -1337,6 +1381,23 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 | `SetPITID(pitID)` | `ElasticSearchBuilder` | Set PIT ID for cross-request pagination resumption |
 | `QueryPageWithPIT(ctx)` | `ElasticSearchBuilder` | Execute single-batch PIT-based pagination, returns `*core.ESPITPageResult` |
 | `Explain(ctx)` | All builders | Preview generated query (Dry Run) |
+
+### List QueryOptions
+
+| Option | Description |
+|--------|-------------|
+| `WithData(data)` | Set the data proxy for this query |
+| `WithStart(start)` | Set pagination offset |
+| `WithLimit(limit)` | Set page size |
+| `WithNeedTotal(bool)` | Toggle total count query |
+| `WithTotalLimit(limit)` | Cap total counting; `0` keeps exact counting |
+| `WithNeedPagination(bool)` | Toggle pagination |
+| `WithFields(fields...)` | Set field selection |
+| `WithCursorField(fields...)` | Set cursor pagination sort fields |
+| `WithCursorValue(values...)` | Set initial cursor values |
+| `WithESIndex(index)` | Set Elasticsearch index when using `List` |
+| `WithPITID(pitID)` | Continue an Elasticsearch PIT pagination session |
+| `WithPitKeepAlive(duration)` | Set Elasticsearch PIT keep-alive duration |
 
 ---
 

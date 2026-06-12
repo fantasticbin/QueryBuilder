@@ -100,6 +100,12 @@ func (m *MongoBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return m
 }
 
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+func (m *MongoBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
+	m.builder.SetTotalLimit(totalLimit)
+	return m
+}
+
 // SetNeedPagination 设置是否需要分页（实现 Querier 接口）
 func (m *MongoBuilder[R]) SetNeedPagination(needPagination bool) Querier[R] {
 	m.builder.SetNeedPagination(needPagination)
@@ -228,7 +234,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 			return nil
 		}
 
-		total, err = m.builder.data.Mongodb.CountDocuments(ctx, m.filter)
+		total, err = m.countDocuments(ctx, m.filter)
 		if err != nil {
 			return err
 		}
@@ -239,6 +245,14 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 	}
 
 	return list, total, nil
+}
+
+// countDocuments 执行 MongoDB 总数统计；配置 totalLimit 时使用 CountOptions.Limit 限制扫描数量。
+func (m *MongoBuilder[R]) countDocuments(ctx context.Context, filter MongoFilter) (int64, error) {
+	if m.builder.totalLimit == 0 {
+		return m.builder.data.Mongodb.CountDocuments(ctx, filter)
+	}
+	return m.builder.data.Mongodb.CountDocuments(ctx, filter, options.Count().SetLimit(int64(m.builder.totalLimit)))
 }
 
 // Explain 返回 MongoDB 构建器最终生成的查询条件（Dry Run 模式）
@@ -451,12 +465,12 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 		return cursor.Err()
 	}, func() error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
-		if !isFirstBatch || !m.builder.needTotal || m.afterHook == nil {
+		if !isFirstBatch || !m.builder.needTotal {
 			return nil
 		}
 
 		var countErr error
-		total, countErr = m.builder.data.Mongodb.CountDocuments(ctx, baseFilter)
+		total, countErr = m.countDocuments(ctx, baseFilter)
 		return countErr
 	}); err != nil {
 		return nil, nil, 0, false, err

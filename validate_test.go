@@ -228,6 +228,22 @@ func TestValidateData_CursorFieldsEmpty_NoError(t *testing.T) {
 	}
 }
 
+func TestValidateData_CursorValuesWithoutFields_QueryCursorMismatch(t *testing.T) {
+	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+	g.SetCursorValue(uint32(1), uint32(2))
+
+	seq := g.QueryCursor(context.Background())
+	for _, err := range seq {
+		if err == nil {
+			t.Fatal("expected ErrCursorMismatch, got nil")
+		}
+		if !errors.Is(err, ErrCursorMismatch) {
+			t.Errorf("expected ErrCursorMismatch, got: %v", err)
+		}
+		break
+	}
+}
+
 func TestValidateData_CursorLengthMatch_NoError(t *testing.T) {
 	// cursorValues 与 cursorFields 长度一致时不触发校验
 	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))

@@ -140,6 +140,8 @@ type Querier[R any] interface {
 	SetLimit(limit uint32) Querier[R]
 	// SetNeedTotal 设置是否需要查询总数
 	SetNeedTotal(needTotal bool) Querier[R]
+	// SetTotalLimit 设置总数统计上限，0 表示精确统计。
+	SetTotalLimit(totalLimit uint32) Querier[R]
 	// SetNeedPagination 设置是否需要分页
 	SetNeedPagination(needPagination bool) Querier[R]
 	// SetFields 设置查询字段投影，指定只返回部分字段
@@ -166,6 +168,7 @@ type queryConfig struct {
 	start          uint32   // 分页起始位置
 	limit          uint32   // 每页数据条数
 	needTotal      bool     // 是否需要查询总数
+	totalLimit     uint32   // 总数统计上限，0 表示精确统计
 	needPagination bool     // 是否需要分页
 	fields         []string // 查询字段投影
 }
@@ -267,6 +270,7 @@ func (b *builder[B, R]) GetQueryMeta() QueryMeta {
 		Start:          b.start,
 		Limit:          b.limit,
 		NeedTotal:      b.needTotal,
+		TotalLimit:     b.totalLimit,
 		NeedPagination: b.needPagination,
 		IsCursorQuery:  b.isCursorQuery,
 		IsPITQuery:     b.isPITQuery,
@@ -304,17 +308,17 @@ func (b *builder[B, R]) prepareAndValidate() error {
 		return ErrLimitExceeded
 	}
 
-	// cursorValues 与 cursorFields 长度一致性校验
-	if len(b.cursorValues) > 0 && len(b.cursorFields) > 0 && len(b.cursorValues) != len(b.cursorFields) {
-		return ErrCursorMismatch
-	}
-
 	// fields 自动清洗
 	b.sanitizeFields()
 	if b.isCursorQuery {
 		if err := b.ensureDefaultCursorField(); err != nil {
 			return err
 		}
+	}
+
+	// cursorValues 与 cursorFields 长度一致性校验
+	if len(b.cursorValues) > 0 && len(b.cursorFields) > 0 && len(b.cursorValues) != len(b.cursorFields) {
+		return ErrCursorMismatch
 	}
 
 	return nil
@@ -395,6 +399,12 @@ func (b *builder[B, R]) SetLimit(limit uint32) B {
 // SetNeedTotal 设置是否需要查询总数
 func (b *builder[B, R]) SetNeedTotal(needTotal bool) B {
 	b.needTotal = needTotal
+	return b.selfRef
+}
+
+// SetTotalLimit 设置总数统计上限，0 表示精确统计。
+func (b *builder[B, R]) SetTotalLimit(totalLimit uint32) B {
+	b.totalLimit = totalLimit
 	return b.selfRef
 }
 

@@ -1,5 +1,7 @@
 package builder
 
+import "time"
+
 const (
 	defaultStart          = 0    // 默认从第0条开始
 	defaultLimit          = 10   // 默认每页10条
@@ -14,6 +16,7 @@ type QueryListOptions interface {
 	GetStart() uint32
 	GetLimit() uint32
 	GetNeedTotal() bool
+	GetTotalLimit() uint32
 	GetNeedPagination() bool
 	GetFields() []string
 	GetCursorFields() []string
@@ -23,14 +26,18 @@ type QueryListOptions interface {
 // BaseQueryListOptions 实现了QueryListOptions接口的基础结构体
 // 包含查询列表所需的所有基本选项
 type BaseQueryListOptions struct {
-	data           *DBProxy // 数据实例
-	start          uint32   // 分页起始位置
-	limit          uint32   // 每页数据条数
-	needTotal      bool     // 是否需要查询总数
-	needPagination bool     // 是否需要分页
-	fields         []string // 查询字段投影
-	cursorFields   []string // 游标分页排序字段
-	cursorValues   []any    // 游标初始值（用于断点续查/App分页场景）
+	data           *DBProxy      // 数据实例
+	start          uint32        // 分页起始位置
+	limit          uint32        // 每页数据条数
+	needTotal      bool          // 是否需要查询总数
+	totalLimit     uint32        // 总数统计上限，0 表示精确统计
+	needPagination bool          // 是否需要分页
+	fields         []string      // 查询字段投影
+	cursorFields   []string      // 游标分页排序字段
+	cursorValues   []any         // 游标初始值（用于断点续查/App分页场景）
+	esIndex        string        // Elasticsearch 索引名
+	pitID          string        // Elasticsearch PIT ID（跨请求分页）
+	pitKeepAlive   time.Duration // Elasticsearch Point-in-Time 保持时间
 }
 
 func (opts *BaseQueryListOptions) GetData() *DBProxy {
@@ -47,6 +54,10 @@ func (opts *BaseQueryListOptions) GetLimit() uint32 {
 
 func (opts *BaseQueryListOptions) GetNeedTotal() bool {
 	return opts.needTotal
+}
+
+func (opts *BaseQueryListOptions) GetTotalLimit() uint32 {
+	return opts.totalLimit
 }
 
 func (opts *BaseQueryListOptions) GetNeedPagination() bool { return opts.needPagination }
@@ -115,6 +126,12 @@ func WithNeedTotal(needTotal bool) QueryOption {
 	}
 }
 
+func WithTotalLimit(totalLimit uint32) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.totalLimit = totalLimit
+	}
+}
+
 func WithNeedPagination(needPagination bool) QueryOption {
 	return func(o *BaseQueryListOptions) {
 		o.needPagination = needPagination
@@ -136,5 +153,23 @@ func WithCursorField(fields ...string) QueryOption {
 func WithCursorValue(values ...any) QueryOption {
 	return func(o *BaseQueryListOptions) {
 		o.cursorValues = values
+	}
+}
+
+func WithESIndex(index string) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.esIndex = index
+	}
+}
+
+func WithPITID(pitID string) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.pitID = pitID
+	}
+}
+
+func WithPitKeepAlive(keepAlive time.Duration) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.pitKeepAlive = keepAlive
 	}
 }
