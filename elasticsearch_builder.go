@@ -332,15 +332,16 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		return nil, 0, errors.New("elasticsearch index not configured")
 	}
 
-	if e.filter == nil {
-		e.filter = elastic.NewMatchAllQuery()
+	filter := e.filter
+	if filter == nil {
+		filter = elastic.NewMatchAllQuery()
 	}
 
-	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
-	if err = util.WaitAndGo(func() error {
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		searchService := e.builder.data.ElasticSearch.Search().
 			Index(e.index).
-			Query(e.filter)
+			Query(filter)
 
 		// 应用字段投影
 		if len(e.builder.fields) > 0 {
@@ -354,10 +355,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		}
 
 		if e.builder.needPagination {
-			if e.builder.limit == 0 {
-				e.builder.limit = defaultLimit
-			}
-			searchService = searchService.From(int(e.builder.start)).Size(int(e.builder.limit))
+			searchService = searchService.From(int(e.builder.start)).Size(int(effectiveLimit(e.builder.limit)))
 		}
 
 		searchResult, err := searchService.Do(ctx)
@@ -375,12 +373,12 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		}
 
 		return nil
-	}, func() error {
+	}, func(ctx context.Context) error {
 		if !e.builder.needTotal {
 			return nil
 		}
 
-		count, err := e.countTotal(ctx, e.filter)
+		count, err := e.countTotal(ctx, filter)
 		if err != nil {
 			return err
 		}
@@ -432,8 +430,9 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 		return e.explainCursor(ctx)
 	}
 
-	if e.filter == nil {
-		e.filter = elastic.NewMatchAllQuery()
+	filter := e.filter
+	if filter == nil {
+		filter = elastic.NewMatchAllQuery()
 	}
 
 	result := map[string]any{
@@ -441,7 +440,7 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	}
 
 	// 序列化查询条件
-	querySource, err := e.filter.Source()
+	querySource, err := filter.Source()
 	if err != nil {
 		return "", err
 	}
@@ -464,11 +463,8 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	}
 
 	if e.builder.needPagination {
-		if e.builder.limit == 0 {
-			e.builder.limit = defaultLimit
-		}
 		result["from"] = e.builder.start
-		result["size"] = e.builder.limit
+		result["size"] = effectiveLimit(e.builder.limit)
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
@@ -533,10 +529,7 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortSources() ([]any, error) {
 
 // explainCursor 返回游标查询模式的首批查询 DSL
 func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, error) {
-	batchSize := int(e.builder.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
+	batchSize := int(effectiveLimit(e.builder.limit))
 
 	filter := e.filter
 	if filter == nil {
@@ -621,10 +614,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		return nil, nil, 0, false, errors.New("elasticsearch index not configured")
 	}
 
-	batchSize := int(e.builder.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
+	batchSize := int(effectiveLimit(e.builder.limit))
 
 	filter := e.filter
 	if filter == nil {
@@ -685,7 +675,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	}
 
 	var searchResult *elastic.SearchResult
-	if err = util.WaitAndGo(func() error {
+	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		var err error
 		searchResult, err = searchService.Do(ctx)
 		if err != nil {
@@ -697,7 +687,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		}
 
 		return nil
-	}, func() error {
+	}, func(ctx context.Context) error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
 		if !isFirstBatch || !e.builder.needTotal {
 			return nil

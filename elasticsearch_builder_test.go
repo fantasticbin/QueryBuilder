@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	qbtest "github.com/fantasticbin/QueryBuilder/v2/test"
 	"github.com/olivere/elastic/v7"
 	"go.uber.org/mock/gomock"
 )
@@ -119,23 +120,8 @@ func TestElasticsearchQueryList(t *testing.T) {
 					t.Errorf("expected error: %v, got: %v", tt.expectedErr, err)
 				}
 			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-
-				if result.Total != tt.expectedTotal {
-					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, result.Total)
-				}
-
-				if len(result.Items) != len(tt.expectedResult) {
-					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result.Items))
-				}
-
-				for i, item := range result.Items {
-					if item.ID != tt.expectedResult[i].ID || item.Name != tt.expectedResult[i].Name || item.Age != tt.expectedResult[i].Age {
-						t.Errorf("expected result[%d]: %+v, got: %+v", i, tt.expectedResult[i], item)
-					}
-				}
+				qbtest.AssertNoError(t, err)
+				qbtest.AssertListResult(t, result, tt.expectedResult, tt.expectedTotal)
 			}
 		})
 	}

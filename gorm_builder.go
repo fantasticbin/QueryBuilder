@@ -203,10 +203,7 @@ func (g *GormBuilder[R]) buildQuery(db *gorm.DB) *gorm.DB {
 	}
 
 	if g.builder.needPagination {
-		if g.builder.limit == 0 {
-			g.builder.limit = defaultLimit
-		}
-		query = query.Offset(int(g.builder.start)).Limit(int(g.builder.limit))
+		query = query.Offset(int(g.builder.start)).Limit(int(effectiveLimit(g.builder.limit)))
 	}
 
 	return query
@@ -214,11 +211,11 @@ func (g *GormBuilder[R]) buildQuery(db *gorm.DB) *gorm.DB {
 
 // doQuery 执行实际的 GORM 查询逻辑
 func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {
-	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
-	if err = util.WaitAndGo(func() error {
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		query := g.buildQuery(g.builder.data.DB.WithContext(ctx))
 		return query.Find(&list).Error
-	}, func() error {
+	}, func(ctx context.Context) error {
 		if !g.builder.needTotal {
 			return nil
 		}
@@ -283,11 +280,7 @@ func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
 
 // buildCursorBatchSize 获取游标查询的批次大小
 func (g *GormBuilder[R]) buildCursorBatchSize() int {
-	batchSize := int(g.builder.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
-	return batchSize
+	return int(effectiveLimit(g.builder.limit))
 }
 
 // buildCursorQuery 构建游标查询的公共 GORM 查询对象（不含游标条件）
@@ -412,9 +405,9 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	var list []*R
 	var total int64
-	if err := util.WaitAndGo(func() error {
-		return query.Find(&list).Error
-	}, func() error {
+	if err := util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
+		return query.WithContext(ctx).Find(&list).Error
+	}, func(ctx context.Context) error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
 		if !isFirstBatch || !g.builder.needTotal {
 			return nil

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	qbtest "github.com/fantasticbin/QueryBuilder/v2/test"
 	"go.uber.org/mock/gomock"
 )
 
@@ -99,14 +100,7 @@ func TestMongoDBQueryList(t *testing.T) {
 			list := NewList[MongoTestEntity]()
 			list.SetQuerier(mockQuerier)
 
-			// 添加耗时监控中间件
-			list.Use(func(
-				ctx context.Context,
-				builder Querier[MongoTestEntity],
-				next func(context.Context) (core.Result[MongoTestEntity], error),
-			) (core.Result[MongoTestEntity], error) {
-				return next(ctx)
-			})
+			list.Use(qbtest.PassthroughMiddleware[MongoTestEntity, Querier[MongoTestEntity]]())
 
 			// 执行查询
 			opts := []QueryOption{
@@ -120,23 +114,8 @@ func TestMongoDBQueryList(t *testing.T) {
 					t.Errorf("expected error: %v, got: %v", tt.expectedErr, err)
 				}
 			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-
-				if result.Total != tt.expectedTotal {
-					t.Errorf("expected total: %d, got: %d", tt.expectedTotal, result.Total)
-				}
-
-				if len(result.Items) != len(tt.expectedResult) {
-					t.Errorf("expected result length: %d, got: %d", len(tt.expectedResult), len(result.Items))
-				}
-
-				for i, item := range result.Items {
-					if item.ID != tt.expectedResult[i].ID || item.Name != tt.expectedResult[i].Name || item.Age != tt.expectedResult[i].Age {
-						t.Errorf("expected result[%d]: %+v, got: %+v", i, tt.expectedResult[i], item)
-					}
-				}
+				qbtest.AssertNoError(t, err)
+				qbtest.AssertListResult(t, result, tt.expectedResult, tt.expectedTotal)
 			}
 		})
 	}

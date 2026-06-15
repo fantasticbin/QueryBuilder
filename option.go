@@ -10,6 +10,13 @@ const (
 	maxLimit              = 5000 // limit 允许的最大值
 )
 
+func effectiveLimit(limit uint32) uint32 {
+	if limit == 0 {
+		return defaultLimit
+	}
+	return limit
+}
+
 // QueryListOptions 定义了查询列表的通用选项接口
 type QueryListOptions interface {
 	GetData() *DBProxy

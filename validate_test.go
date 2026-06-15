@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	qbtest "github.com/fantasticbin/QueryBuilder/v2/test"
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
@@ -62,9 +63,7 @@ func TestValidateData_LimitValid_Gorm(t *testing.T) {
 	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 
 	// 使用中间件短路，避免真实数据库查询
-	g.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	// 测试 limit = 1（最小合法值）
 	g.SetLimit(1)
@@ -75,9 +74,7 @@ func TestValidateData_LimitValid_Gorm(t *testing.T) {
 
 	// 测试 limit = defaultLimit（默认值）
 	g2 := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
-	g2.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g2.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 	_, err = g2.QueryList(context.Background())
 	if err != nil {
 		t.Errorf("default limit should pass validation, got: %v", err)
@@ -86,9 +83,7 @@ func TestValidateData_LimitValid_Gorm(t *testing.T) {
 	// 测试 limit = 5000（最大合法值）
 	g3 := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
 	g3.SetLimit(5000)
-	g3.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g3.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 	_, err = g3.QueryList(context.Background())
 	if err != nil {
 		t.Errorf("limit=5000 should pass validation, got: %v", err)
@@ -97,9 +92,7 @@ func TestValidateData_LimitValid_Gorm(t *testing.T) {
 
 func TestValidateData_LimitValid_Mongo(t *testing.T) {
 	m := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
-	m.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	m.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	// 默认 limit 应通过校验
 	_, err := m.QueryList(context.Background())
@@ -110,9 +103,7 @@ func TestValidateData_LimitValid_Mongo(t *testing.T) {
 	// limit = 5000 应通过校验
 	m2 := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
 	m2.SetLimit(5000)
-	m2.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	m2.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 	_, err = m2.QueryList(context.Background())
 	if err != nil {
 		t.Errorf("limit=5000 should pass validation, got: %v", err)
@@ -121,9 +112,7 @@ func TestValidateData_LimitValid_Mongo(t *testing.T) {
 
 func TestValidateData_LimitValid_ES(t *testing.T) {
 	e := NewElasticSearchBuilder[ValidateTestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
-	e.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	e.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	// 默认 limit 应通过校验
 	_, err := e.QueryList(context.Background())
@@ -134,9 +123,7 @@ func TestValidateData_LimitValid_ES(t *testing.T) {
 	// limit = 5000 应通过校验
 	e2 := NewElasticSearchBuilder[ValidateTestEntity](NewDBProxy(nil, nil, &elastic.Client{}), "test_index")
 	e2.SetLimit(5000)
-	e2.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	e2.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 	_, err = e2.QueryList(context.Background())
 	if err != nil {
 		t.Errorf("limit=5000 should pass validation, got: %v", err)
@@ -202,9 +189,7 @@ func TestValidateData_CursorValuesEmpty_NoError(t *testing.T) {
 	g.SetCursorField("id", "name")
 	// 不设置 cursorValues
 
-	g.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	_, err := g.QueryList(context.Background())
 	if err != nil {
@@ -218,9 +203,7 @@ func TestValidateData_CursorFieldsEmpty_NoError(t *testing.T) {
 	g.SetCursorValue("value1", "value2")
 	// 不设置 cursorFields
 
-	g.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	_, err := g.QueryList(context.Background())
 	if err != nil {
@@ -250,9 +233,7 @@ func TestValidateData_CursorLengthMatch_NoError(t *testing.T) {
 	g.SetCursorField("id", "name")
 	g.SetCursorValue(uint32(1), "Alice")
 
-	g.Use(func(ctx context.Context, builder Querier[ValidateTestEntity], next func(context.Context) (core.Result[ValidateTestEntity], error)) (core.Result[ValidateTestEntity], error) {
-		return &core.ListResult[ValidateTestEntity]{Items: []*ValidateTestEntity{}, Total: 0}, nil
-	})
+	g.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
 
 	_, err := g.QueryList(context.Background())
 	if err != nil {
@@ -281,14 +262,7 @@ func TestSanitizeFields_FilterEmpty_Gorm(t *testing.T) {
 	}
 
 	expected := []string{"id", "name", "age"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_FilterEmpty_Mongo(t *testing.T) {
@@ -309,14 +283,7 @@ func TestSanitizeFields_FilterEmpty_Mongo(t *testing.T) {
 	}
 
 	expected := []string{"id", "name"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_FilterEmpty_ES(t *testing.T) {
@@ -337,14 +304,7 @@ func TestSanitizeFields_FilterEmpty_ES(t *testing.T) {
 	}
 
 	expected := []string{"id", "name"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_Deduplicate_Gorm(t *testing.T) {
@@ -365,14 +325,7 @@ func TestSanitizeFields_Deduplicate_Gorm(t *testing.T) {
 	}
 
 	expected := []string{"id", "name", "age"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_Deduplicate_Mongo(t *testing.T) {
@@ -393,14 +346,7 @@ func TestSanitizeFields_Deduplicate_Mongo(t *testing.T) {
 	}
 
 	expected := []string{"name", "age"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_Deduplicate_ES(t *testing.T) {
@@ -421,14 +367,7 @@ func TestSanitizeFields_Deduplicate_ES(t *testing.T) {
 	}
 
 	expected := []string{"id"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_AllEmpty_BecomesNil(t *testing.T) {
@@ -475,14 +414,7 @@ func TestSanitizeFields_NormalFields_Unchanged(t *testing.T) {
 	}
 
 	expected := []string{"id", "name", "age"}
-	if len(capturedFields) != len(expected) {
-		t.Fatalf("expected fields %v, got %v", expected, capturedFields)
-	}
-	for i, f := range capturedFields {
-		if f != expected[i] {
-			t.Errorf("expected fields[%d]=%q, got %q", i, expected[i], f)
-		}
-	}
+	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
 func TestSanitizeFields_NilFields_NoAction(t *testing.T) {

@@ -196,12 +196,13 @@ func (m *MongoBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult
 
 // doQuery 执行实际的 MongoDB 查询逻辑
 func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {
-	if m.filter == nil {
-		m.filter = bson.D{}
+	filter := m.filter
+	if filter == nil {
+		filter = bson.D{}
 	}
 
-	// 使用 WaitAndGo 并行执行数据查询和总数统计操作
-	if err = util.WaitAndGo(func() error {
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		findOpt := options.Find().SetSort(m.sort)
 
 		// 应用字段投影
@@ -214,13 +215,10 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 		}
 
 		if m.builder.needPagination {
-			if m.builder.limit == 0 {
-				m.builder.limit = defaultLimit
-			}
-			findOpt.SetSkip(int64(m.builder.start)).SetLimit(int64(m.builder.limit))
+			findOpt.SetSkip(int64(m.builder.start)).SetLimit(int64(effectiveLimit(m.builder.limit)))
 		}
 
-		cursor, err := m.builder.data.Mongodb.Find(ctx, m.filter, findOpt)
+		cursor, err := m.builder.data.Mongodb.Find(ctx, filter, findOpt)
 		if err != nil {
 			return err
 		}
@@ -229,12 +227,12 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 		}(cursor, ctx)
 
 		return cursor.All(ctx, &list)
-	}, func() error {
+	}, func(ctx context.Context) error {
 		if !m.builder.needTotal {
 			return nil
 		}
 
-		total, err = m.countDocuments(ctx, m.filter)
+		total, err = m.countDocuments(ctx, filter)
 		if err != nil {
 			return err
 		}
@@ -264,12 +262,13 @@ func (m *MongoBuilder[R]) Explain(ctx context.Context) (string, error) {
 		return m.explainCursor(ctx)
 	}
 
-	if m.filter == nil {
-		m.filter = bson.D{}
+	filter := m.filter
+	if filter == nil {
+		filter = bson.D{}
 	}
 
 	result := map[string]any{
-		"filter": m.filter,
+		"filter": filter,
 	}
 
 	if m.sort != nil {
@@ -285,11 +284,8 @@ func (m *MongoBuilder[R]) Explain(ctx context.Context) (string, error) {
 	}
 
 	if m.builder.needPagination {
-		if m.builder.limit == 0 {
-			m.builder.limit = defaultLimit
-		}
 		result["skip"] = m.builder.start
-		result["limit"] = m.builder.limit
+		result["limit"] = effectiveLimit(m.builder.limit)
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
@@ -340,10 +336,7 @@ func (m *MongoBuilder[R]) buildCursorProjection() bson.D {
 
 // explainCursor 返回游标查询模式的首批查询 DSL
 func (m *MongoBuilder[R]) explainCursor(ctx context.Context) (string, error) {
-	batchSize := int(m.builder.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
+	batchSize := int(effectiveLimit(m.builder.limit))
 
 	filter := m.filter
 	if filter == nil {
@@ -375,10 +368,7 @@ func (m *MongoBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 // probeHasMore 为 true 时，通过 limit+1 探测精确判断是否还有下一页
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 CountDocuments 查询
 func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, probeHasMore bool) ([]*R, []any, int64, bool, error) {
-	batchSize := int(m.builder.limit)
-	if batchSize == 0 {
-		batchSize = defaultLimit
-	}
+	batchSize := int(effectiveLimit(m.builder.limit))
 
 	// 构建过滤条件
 	filter := m.filter
@@ -442,7 +432,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 	var total int64
 	var lastRaw bson.Raw
 
-	if err := util.WaitAndGo(func() error {
+	if err := util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		cursor, err := m.builder.data.Mongodb.Find(ctx, filter, findOpt)
 		if err != nil {
 			return err
@@ -463,7 +453,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 			}
 		}
 		return cursor.Err()
-	}, func() error {
+	}, func(ctx context.Context) error {
 		// 首批次且需要总数时，并行执行数据查询和 Count 查询
 		if !isFirstBatch || !m.builder.needTotal {
 			return nil
