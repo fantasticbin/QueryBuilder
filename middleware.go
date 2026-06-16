@@ -57,7 +57,7 @@ type middlewareRunner[R any] func(ctx context.Context, queryFn func(context.Cont
 //
 //	R: 查询结果的实体类型
 type middlewareProvider[R any] interface {
-	GetQueryMeta() QueryMeta
+	GetQueryMeta() core.QueryMeta
 	getMiddlewares() []Middleware[R]
 	getQuerierRef() Querier[R]
 	getBeforeHook() BeforeQueryHook
@@ -117,7 +117,7 @@ func buildRunner[R any](mc *middlewareContext[R]) middlewareRunner[R] {
 }
 
 // executeWithMiddlewares 执行中间件链并调用最终查询逻辑
-// 由各专属构建器在 QueryList 中调用，传入最终的查询函数
+// 由基础 builder 的 QueryList 等查询入口调用，传入最终的查询函数
 // 支持前置/后置钩子
 // 参数:
 //

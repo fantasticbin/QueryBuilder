@@ -33,10 +33,10 @@ func (g *GormBuilder[R]) self() *GormBuilder[R] {
 }
 
 // NewGormBuilder 创建 GORM 专属查询构建器实例
-func NewGormBuilder[R any](data *DBProxy) *GormBuilder[R] {
+func NewGormBuilder[R any](data *core.DBProxy) *GormBuilder[R] {
 	g := &GormBuilder[R]{}
 	g.builder.data = data
-	g.builder.dataSource = Gorm
+	g.builder.dataSource = core.Gorm
 	g.builder.limit = defaultLimit
 	g.builder.setSelf(g, g)
 	return g
@@ -134,28 +134,8 @@ func (g *GormBuilder[R]) SetCursorValue(values ...any) Querier[R] {
 }
 
 // GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
-func (g *GormBuilder[R]) GetQueryMeta() QueryMeta {
+func (g *GormBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return g.builder.GetQueryMeta()
-}
-
-// QueryList 执行 GORM 查询列表操作
-func (g *GormBuilder[R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
-	g.builder.beginQueryMode(false)
-	if err := g.builder.prepareAndValidate(); err != nil {
-		return nil, err
-	}
-	result, err := executeWithMiddlewares(
-		ctx,
-		newMiddlewareContext[R](&g.builder),
-		func(ctx context.Context) (core.Result[R], error) {
-			list, total, err := g.doQuery(ctx)
-			return &core.ListResult[R]{Items: list, Total: total}, err
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return listResultFromResult(result), nil
 }
 
 // QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -211,9 +191,14 @@ func (g *GormBuilder[R]) buildQuery(db *gorm.DB) *gorm.DB {
 
 // doQuery 执行实际的 GORM 查询逻辑
 func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {
+	db, err := g.builder.data.GormDB()
+	if err != nil {
+		return nil, 0, err
+	}
+
 	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
-		query := g.buildQuery(g.builder.data.DB.WithContext(ctx))
+		query := g.buildQuery(db.WithContext(ctx))
 		return query.Find(&list).Error
 	}, func(ctx context.Context) error {
 		if !g.builder.needTotal {
@@ -230,7 +215,12 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 
 // countTotal 执行总数统计；配置 totalLimit 时通过子查询限制最多扫描的记录数。
 func (g *GormBuilder[R]) countTotal(ctx context.Context, total *int64) error {
-	query := g.builder.data.DB.WithContext(ctx).Model(new(R))
+	db, err := g.builder.data.GormDB()
+	if err != nil {
+		return err
+	}
+
+	query := db.WithContext(ctx).Model(new(R))
 	if g.filter != nil {
 		query = query.Scopes(g.filter)
 	}
@@ -239,7 +229,7 @@ func (g *GormBuilder[R]) countTotal(ctx context.Context, total *int64) error {
 	}
 
 	subQuery := query.Select("1").Limit(int(g.builder.totalLimit))
-	return g.builder.data.DB.WithContext(ctx).
+	return db.WithContext(ctx).
 		Table("(?) AS querybuilder_total_limit", subQuery).
 		Count(total).Error
 }
@@ -251,13 +241,17 @@ func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
 	if err := g.builder.prepareAndValidate(); err != nil {
 		return "", err
 	}
+	db, err := g.builder.data.GormDB()
+	if err != nil {
+		return "", err
+	}
 
 	// 如果配置了游标字段，展示游标查询模式的首批 SQL
 	if len(g.builder.cursorFields) > 0 {
 		return g.explainCursor(ctx)
 	}
 
-	query := g.buildQuery(g.builder.data.DB.WithContext(ctx).
+	query := g.buildQuery(db.WithContext(ctx).
 		Session(&gorm.Session{DryRun: true}))
 
 	stmt := query.Find(new([]R)).Statement
@@ -321,8 +315,13 @@ func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB) *gorm.DB {
 
 // explainCursor 返回游标查询模式的首批查询 SQL（Dry Run 模式）
 func (g *GormBuilder[R]) explainCursor(ctx context.Context) (string, error) {
+	db, err := g.builder.data.GormDB()
+	if err != nil {
+		return "", err
+	}
+
 	query := g.buildCursorQuery(
-		g.builder.data.DB.WithContext(ctx).Session(&gorm.Session{DryRun: true}),
+		db.WithContext(ctx).Session(&gorm.Session{DryRun: true}),
 	)
 
 	stmt := query.Find(new([]R)).Statement
@@ -349,10 +348,15 @@ func (g *GormBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 // probeHasMore 为 true 时，通过 limit+1 探测精确判断是否还有下一页
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
 func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, probeHasMore bool) ([]*R, []any, int64, bool, error) {
+	db, err := g.builder.data.GormDB()
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
+
 	batchSize := g.buildCursorBatchSize()
 
 	// 构建查询
-	query := g.buildCursorQuery(g.builder.data.DB.WithContext(ctx))
+	query := g.buildCursorQuery(db.WithContext(ctx))
 	// probeHasMore 模式下覆盖 limit 为 batchSize+1
 	if probeHasMore {
 		query = query.Limit(batchSize + 1)

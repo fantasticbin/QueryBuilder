@@ -235,10 +235,10 @@ func (mr *MockQuerierMockRecorder[R]) QueryPage(ctx any) *gomock.Call {
 }
 
 // GetQueryMeta Mock 实现
-func (m *MockQuerier[R]) GetQueryMeta() QueryMeta {
+func (m *MockQuerier[R]) GetQueryMeta() core.QueryMeta {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetQueryMeta")
-	ret0, _ := ret[0].(QueryMeta)
+	ret0, _ := ret[0].(core.QueryMeta)
 	return ret0
 }
 

@@ -264,7 +264,7 @@ func TestUnsupportedDataSourcePanicRecovery(t *testing.T) {
 
 	list := NewList[TestEntity]()
 	// 设置一个不支持的数据源类型（枚举值 99）
-	list.SetDataSource(DataSource(99))
+	list.SetDataSource(core.DataSource(99))
 
 	result, err := list.Query(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -420,7 +420,7 @@ func TestExplainPanicRecovery(t *testing.T) {
 
 	list := NewList[TestEntity]()
 	// 设置不支持的数据源类型，触发 NewBuilder panic
-	list.SetDataSource(DataSource(99))
+	list.SetDataSource(core.DataSource(99))
 
 	result, err := list.Explain(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
@@ -447,7 +447,7 @@ func TestGetQueryMeta(t *testing.T) {
 	mockQuerier := NewMockQuerier[TestEntity](ctrl)
 
 	t.Run("有querier时返回元信息", func(t *testing.T) {
-		expectedMeta := QueryMeta{
+		expectedMeta := core.QueryMeta{
 			DataSource:     Gorm,
 			Start:          0,
 			Limit:          10,
@@ -541,7 +541,7 @@ func TestQueryCursorPanicRecovery(t *testing.T) {
 
 	list := NewList[TestEntity]()
 	// 设置不支持的数据源类型，触发 NewBuilder panic
-	list.SetDataSource(DataSource(99))
+	list.SetDataSource(core.DataSource(99))
 
 	seq := list.QueryCursor(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),

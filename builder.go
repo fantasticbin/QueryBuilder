@@ -13,9 +13,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// DataSource 数据源类型枚举（定义于 core 包，此处为类型别名）
-type DataSource = core.DataSource
-
 const (
 	// Gorm 数据源
 	Gorm = core.Gorm
@@ -27,9 +24,9 @@ const (
 
 var (
 	// ErrDataNotConfigured 数据源未正确配置的统一错误
-	ErrDataNotConfigured = errors.New("data source not configured: DBProxy or its required field is nil")
+	ErrDataNotConfigured = core.ErrDataNotConfigured
 	// ErrDataSourceInvalid 数据源无效
-	ErrDataSourceInvalid = errors.New("data source invalid")
+	ErrDataSourceInvalid = core.ErrDataSourceInvalid
 	// ErrLimitExceeded limit 超出允许的最大值
 	ErrLimitExceeded = errors.New("limit exceeds maximum allowed value (5000)")
 	// ErrCursorMismatch cursorValues 与 cursorFields 长度不匹配
@@ -38,48 +35,31 @@ var (
 	ErrPITCursorWithoutPITID = errors.New("PIT ID is required when cursor values are provided")
 )
 
-// DBProxy 数据实例结构
-type DBProxy struct {
-	DB            *gorm.DB
-	Mongodb       *mongo.Collection // 需提前指定.Database("db_name").Collection("collection_name")
-	ElasticSearch *elastic.Client
-	// redis...
+// NewGormAdapter 创建 GORM 数据源适配器。
+func NewGormAdapter(db *gorm.DB) core.GormAdapter {
+	return core.NewGormAdapter(db)
 }
 
-// NewDBProxy 创建数据实例
-func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *DBProxy {
-	return &DBProxy{
-		DB:            db,
-		Mongodb:       mongodb,
-		ElasticSearch: elasticsearch,
-	}
+// NewMongoAdapter 创建 MongoDB 数据源适配器。
+func NewMongoAdapter(collection *mongo.Collection) core.MongoAdapter {
+	return core.NewMongoAdapter(collection)
 }
 
-// CheckConfigured 检查指定数据源是否已正确配置
-func (p *DBProxy) CheckConfigured(ds DataSource) error {
-	switch ds {
-	case Gorm:
-		if p.DB == nil {
-			return ErrDataNotConfigured
-		}
-	case MongoDB:
-		if p.Mongodb == nil {
-			return ErrDataNotConfigured
-		}
-	case ElasticSearch:
-		if p.ElasticSearch == nil {
-			return ErrDataNotConfigured
-		}
-	default:
-		return ErrDataSourceInvalid
-	}
-
-	return nil
+// NewElasticSearchAdapter 创建 ElasticSearch 数据源适配器。
+func NewElasticSearchAdapter(client *elastic.Client) core.ElasticSearchAdapter {
+	return core.NewElasticSearchAdapter(client)
 }
 
-// QueryMeta 查询元信息结构体（定义于 core 包，此处为类型别名）
-// 中间件可通过 builder.GetQueryMeta() 获取当前查询的元数据快照
-type QueryMeta = core.QueryMeta
+// NewDBProxy 创建数据实例。
+// 保留旧构造函数签名以兼容现有调用；新数据源请使用 NewDBProxyWithAdapters 或 RegisterAdapter。
+func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *core.DBProxy {
+	return core.NewDBProxy(db, mongodb, elasticsearch)
+}
+
+// NewDBProxyWithAdapters 通过适配器创建数据源注册表。
+func NewDBProxyWithAdapters(adapters ...core.DataSourceAdapter) *core.DBProxy {
+	return core.NewDBProxyWithAdapters(adapters...)
+}
 
 // queryBuilder 构建器接口约束，利用 Go 1.26 自引用泛型约束特性
 // 泛型参数:
@@ -89,8 +69,8 @@ type QueryMeta = core.QueryMeta
 type queryBuilder[B any, R any] interface {
 	// self 返回具体构建器自身引用，用于链式调用返回具体子类型
 	self() B
-	// QuerierList 嵌入列表查询执行能力，由各专属构建器各自实现
-	QuerierList[R]
+	// doQuery 执行后端专属的列表查询逻辑
+	doQuery(ctx context.Context) ([]*R, int64, error)
 	// QuerierCursor 嵌入游标查询执行能力
 	QuerierCursor[R]
 }
@@ -122,9 +102,6 @@ type QuerierExplain interface {
 	// 用于调试场景，不会实际执行查询
 	Explain(ctx context.Context) (string, error)
 }
-
-// QuerierMeta 查询元信息能力接口（定义于 core 包，此处为类型别名）
-type QuerierMeta = core.QuerierMeta
 
 // Querier 通用查询接口，作为工厂函数的返回类型
 // 包含所有配置方法（Setter）和执行能力接口
@@ -160,7 +137,7 @@ type Querier[R any] interface {
 	QuerierList[R]
 	QuerierCursor[R]
 	QuerierExplain
-	QuerierMeta
+	core.QuerierMeta
 }
 
 // queryConfig 分页配置
@@ -235,9 +212,9 @@ func (c hookChain[R]) clone() hookChain[R] {
 //	B: 具体构建器类型（自引用，满足 queryBuilder 约束）
 //	R: 查询结果的实体类型
 type builder[B queryBuilder[B, R], R any] struct {
-	data       *DBProxy
-	dataSource DataSource // 数据源类型，用于查询元信息
-	startTime  time.Time  // 查询开始时间
+	data       *core.DBProxy
+	dataSource core.DataSource // 数据源类型，用于查询元信息
+	startTime  time.Time       // 查询开始时间
 
 	queryConfig  // 嵌入分页配置
 	cursorConfig // 嵌入游标配置
@@ -264,8 +241,8 @@ func (b *builder[B, R]) setStartTime(t time.Time)        { b.startTime = t }
 // GetQueryMeta 返回当前查询元信息的只读快照
 // 中间件可通过 builder 参数直接调用此方法获取元数据
 // 切片字段返回副本，防止外部意外修改内部状态
-func (b *builder[B, R]) GetQueryMeta() QueryMeta {
-	meta := QueryMeta{
+func (b *builder[B, R]) GetQueryMeta() core.QueryMeta {
+	meta := core.QueryMeta{
 		DataSource:     b.dataSource,
 		Start:          b.start,
 		Limit:          b.limit,
@@ -289,6 +266,27 @@ func (b *builder[B, R]) GetQueryMeta() QueryMeta {
 		copy(meta.CursorValues, b.cursorValues)
 	}
 	return meta
+}
+
+// QueryList 执行查询列表操作，封装列表查询的通用生命周期。
+func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
+	b.beginQueryMode(false)
+	if err := b.prepareAndValidate(); err != nil {
+		return nil, err
+	}
+
+	result, err := executeWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](b),
+		func(ctx context.Context) (core.Result[R], error) {
+			list, total, err := b.selfRef.doQuery(ctx)
+			return &core.ListResult[R]{Items: list, Total: total}, err
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return listResultFromResult(result), nil
 }
 
 // prepareAndValidate 执行查询前的参数校验与数据准备
@@ -463,11 +461,11 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 		return nil
 	}
 	switch b.dataSource {
-	case Gorm:
+	case core.Gorm:
 		b.cursorFields = []string{"id"}
-	case MongoDB:
+	case core.MongoDB:
 		b.cursorFields = []string{"_id"}
-	case ElasticSearch:
+	case core.ElasticSearch:
 		b.cursorFields = []string{"_shard_doc"}
 	}
 	b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
@@ -476,13 +474,13 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 
 // NewBuilder 通用工厂函数，根据 DataSource 枚举值创建对应的专属查询构建器
 // 返回 Querier[R] 通用查询接口
-func NewBuilder[R any](ds DataSource, data *DBProxy) Querier[R] {
+func NewBuilder[R any](ds core.DataSource, data *core.DBProxy) Querier[R] {
 	switch ds {
-	case Gorm:
+	case core.Gorm:
 		return NewGormBuilder[R](data)
-	case MongoDB:
+	case core.MongoDB:
 		return NewMongoBuilder[R](data)
-	case ElasticSearch:
+	case core.ElasticSearch:
 		return NewElasticSearchBuilder[R](data, "")
 	default:
 		panic(fmt.Sprintf("unsupported data source: %d", ds))

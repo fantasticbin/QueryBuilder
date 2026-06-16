@@ -34,13 +34,13 @@ func (e *ElasticSearchBuilder[R]) self() *ElasticSearchBuilder[R] {
 }
 
 // NewElasticSearchBuilder 创建 ElasticSearch 专属查询构建器实例
-func NewElasticSearchBuilder[R any](data *DBProxy, index string) *ElasticSearchBuilder[R] {
+func NewElasticSearchBuilder[R any](data *core.DBProxy, index string) *ElasticSearchBuilder[R] {
 	e := &ElasticSearchBuilder[R]{
 		index:        index,
 		pitKeepAlive: 0,
 	}
 	e.builder.data = data
-	e.builder.dataSource = ElasticSearch
+	e.builder.dataSource = core.ElasticSearch
 	e.builder.limit = defaultLimit
 	e.builder.setSelf(e, e)
 	return e
@@ -165,28 +165,8 @@ func (e *ElasticSearchBuilder[R]) SetPITID(pitID string) *ElasticSearchBuilder[R
 }
 
 // GetQueryMeta 返回当前查询元信息的只读快照（实现 Querier 接口）
-func (e *ElasticSearchBuilder[R]) GetQueryMeta() QueryMeta {
+func (e *ElasticSearchBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return e.builder.GetQueryMeta()
-}
-
-// QueryList 执行 ElasticSearch 查询列表操作
-func (e *ElasticSearchBuilder[R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
-	e.builder.beginQueryMode(false)
-	if err := e.builder.prepareAndValidate(); err != nil {
-		return nil, err
-	}
-	result, err := executeWithMiddlewares(
-		ctx,
-		newMiddlewareContext[R](&e.builder),
-		func(ctx context.Context) (core.Result[R], error) {
-			list, total, err := e.doQuery(ctx)
-			return &core.ListResult[R]{Items: list, Total: total}, err
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return listResultFromResult(result), nil
 }
 
 // QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
@@ -331,6 +311,10 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 	if e.index == "" {
 		return nil, 0, errors.New("elasticsearch index not configured")
 	}
+	client, err := e.builder.data.ElasticSearchClient()
+	if err != nil {
+		return nil, 0, err
+	}
 
 	filter := e.filter
 	if filter == nil {
@@ -339,7 +323,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 
 	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
-		searchService := e.builder.data.ElasticSearch.Search().
+		searchService := client.Search().
 			Index(e.index).
 			Query(filter)
 
@@ -395,14 +379,19 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 
 // countTotal 执行 Elasticsearch 总数统计；配置 totalLimit 时使用 track_total_hits 上限统计。
 func (e *ElasticSearchBuilder[R]) countTotal(ctx context.Context, filter elastic.Query) (int64, error) {
+	client, err := e.builder.data.ElasticSearchClient()
+	if err != nil {
+		return 0, err
+	}
+
 	if e.builder.totalLimit == 0 {
-		return e.builder.data.ElasticSearch.Count().
+		return client.Count().
 			Index(e.index).
 			Query(filter).
 			Do(ctx)
 	}
 
-	searchResult, err := e.builder.data.ElasticSearch.Search().
+	searchResult, err := client.Search().
 		Index(e.index).
 		Query(filter).
 		Size(0).
@@ -572,6 +561,7 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 	return string(data), nil
 }
 
+// pitKeepAliveString 将 PIT keep alive 配置转换为 Elasticsearch 接受的时间字符串。
 func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	d := e.pitKeepAlive
 	if d <= 0 {
@@ -595,10 +585,14 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	if pitID == "" {
 		return
 	}
+	client, err := e.builder.data.ElasticSearchClient()
+	if err != nil {
+		return
+	}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
-	_, _ = e.builder.data.ElasticSearch.ClosePointInTime(pitID).Do(closeCtx)
+	_, _ = client.ClosePointInTime(pitID).Do(closeCtx)
 }
 
 // doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
@@ -612,6 +606,10 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 ) (list []*R, nextCursorValues []any, total int64, hasMore bool, err error) {
 	if e.index == "" {
 		return nil, nil, 0, false, errors.New("elasticsearch index not configured")
+	}
+	client, err := e.builder.data.ElasticSearchClient()
+	if err != nil {
+		return nil, nil, 0, false, err
 	}
 
 	batchSize := int(effectiveLimit(e.builder.limit))
@@ -627,7 +625,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 		querySize = batchSize + 1
 	}
 
-	searchService := e.builder.data.ElasticSearch.Search().
+	searchService := client.Search().
 		Query(filter).
 		Size(querySize)
 
@@ -646,7 +644,7 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 			return nil, nil, 0, false, errors.New("pitID pointer is nil")
 		}
 		if *pitID == "" {
-			openResp, err := e.builder.data.ElasticSearch.OpenPointInTime(e.index).
+			openResp, err := client.OpenPointInTime(e.index).
 				KeepAlive(e.pitKeepAliveString()).
 				Do(ctx)
 			if err != nil {

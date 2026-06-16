@@ -1375,9 +1375,9 @@ func TestListQueryPage_PanicRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	list := NewList[CursorTestEntity]()
-	list.SetDataSource(DataSource(99)) // 无效数据源，触发 panic
+	list.SetDataSource(core.DataSource(99)) // 无效数据源，触发 panic
 
-	result, err := list.QueryPage(ctx, WithCursorField("ID"), WithData(&DBProxy{}))
+	result, err := list.QueryPage(ctx, WithCursorField("ID"), WithData(&core.DBProxy{}))
 
 	if err == nil {
 		t.Fatal("expected error from panic recovery, got nil")

@@ -13,8 +13,8 @@ import (
 //
 //	R - 返回结果类型参数
 type List[R any] struct {
-	dataSource  DataSource         // 数据源类型
-	data        *DBProxy           // 可选：默认数据实例
+	dataSource  core.DataSource    // 数据源类型
+	data        *core.DBProxy      // 可选：默认数据实例
 	querier     Querier[R]         // 可选：直接注入自定义 Querier（用于测试等场景）
 	metaQuerier Querier[R]         // 最近一次查询使用的构建器，用于获取元信息
 	beforeHook  BeforeQueryHook    // 查询前置钩子
@@ -23,6 +23,8 @@ type List[R any] struct {
 	scope       ScopeConfigurer[R] // 可选：构建器配置回调，用于自动设置 filter/sort
 }
 
+// NewList 创建一个未绑定数据源的 List。
+// 调用方可后续通过 SetDataSource/WithData 或 SetQuerier 提供查询后端。
 func NewList[R any]() *List[R] {
 	return &List[R]{}
 }
@@ -30,7 +32,7 @@ func NewList[R any]() *List[R] {
 // NewListWithData 通过指定数据源类型和数据实例创建 List
 // 内部会保留默认数据实例，并预创建一个元信息构建器。
 // 后续每次 Query/QueryCursor/QueryPage 都会使用新的构建器，避免查询状态串场。
-func NewListWithData[R any](ds DataSource, data *DBProxy) *List[R] {
+func NewListWithData[R any](ds core.DataSource, data *core.DBProxy) *List[R] {
 	querier := NewBuilder[R](ds, data)
 	return &List[R]{
 		dataSource:  ds,
@@ -42,7 +44,7 @@ func NewListWithData[R any](ds DataSource, data *DBProxy) *List[R] {
 // SetDataSource 设置数据源类型
 // 支持不同数据源的查询实现，如 Gorm、MongoDB、ElasticSearch
 // 通过该方法指定数据源类型，查询时将自动创建对应的专属构建器
-func (l *List[R]) SetDataSource(ds DataSource) *List[R] {
+func (l *List[R]) SetDataSource(ds core.DataSource) *List[R] {
 	l.dataSource = ds
 	if l.querier == nil {
 		l.metaQuerier = nil
@@ -308,9 +310,9 @@ func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result stri
 //   - 通过 Query/QueryCursor 执行后，内部自动创建的构建器会回填到 List 中
 //
 // 仅在首次调用 Query/QueryCursor 之前且未设置 Querier 时返回零值
-func (l *List[R]) GetQueryMeta() QueryMeta {
+func (l *List[R]) GetQueryMeta() core.QueryMeta {
 	if l.metaQuerier != nil {
 		return l.metaQuerier.GetQueryMeta()
 	}
-	return QueryMeta{}
+	return core.QueryMeta{}
 }
