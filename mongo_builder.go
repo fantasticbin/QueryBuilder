@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"iter"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/fantasticbin/QueryBuilder/v2/util"
@@ -147,32 +146,8 @@ func (m *MongoBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return m.builder.GetQueryMeta()
 }
 
-// QueryCursor 执行 MongoDB 游标分页查询，返回迭代器（实现 Querier 接口）
-func (m *MongoBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	return executeBuilderCursorQuery(
-		ctx,
-		&m.builder,
-		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			return m.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
-		},
-	)
-}
-
-// QueryPage 执行 MongoDB 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
-func (m *MongoBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
-	m.builder.beginQueryMode(true)
-	defer m.builder.finishCursorQuery()
-	if err := m.builder.prepareAndValidate(); err != nil {
-		return nil, err
-	}
-	return executePageWithMiddlewares(
-		ctx,
-		newMiddlewareContext[R](&m.builder),
-		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			return m.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
-		},
-	)
-}
+// cleanupCursorQuery 清理 MongoDB 游标查询资源。
+func (m *MongoBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
 // doQuery 执行实际的 MongoDB 查询逻辑
 func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {

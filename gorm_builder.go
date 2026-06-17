@@ -3,7 +3,6 @@ package builder
 import (
 	"context"
 	"fmt"
-	"iter"
 	"reflect"
 	"strings"
 	"sync"
@@ -138,32 +137,8 @@ func (g *GormBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return g.builder.GetQueryMeta()
 }
 
-// QueryCursor 执行 GORM 游标分页查询，返回迭代器（实现 Querier 接口）
-func (g *GormBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	return executeBuilderCursorQuery(
-		ctx,
-		&g.builder,
-		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			return g.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
-		},
-	)
-}
-
-// QueryPage 执行 GORM 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
-func (g *GormBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
-	g.builder.beginQueryMode(true)
-	defer g.builder.finishCursorQuery()
-	if err := g.builder.prepareAndValidate(); err != nil {
-		return nil, err
-	}
-	return executePageWithMiddlewares(
-		ctx,
-		newMiddlewareContext[R](&g.builder),
-		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			return g.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
-		},
-	)
-}
+// cleanupCursorQuery 清理 GORM 游标查询资源。
+func (g *GormBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
 // buildQuery 构建公共的 GORM 查询对象（私有方法）
 // 将字段投影、过滤条件、排序条件、分页等公共逻辑统一抽取

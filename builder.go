@@ -71,8 +71,10 @@ type queryBuilder[B any, R any] interface {
 	self() B
 	// doQuery 执行后端专属的列表查询逻辑
 	doQuery(ctx context.Context) ([]*R, int64, error)
-	// QuerierCursor 嵌入游标查询执行能力
-	QuerierCursor[R]
+	// doCursorQuery 执行后端专属的单批次游标查询逻辑
+	doCursorQuery(ctx context.Context, cursorValues []any, isFirstBatch bool, probeHasMore bool) ([]*R, []any, int64, bool, error)
+	// cleanupCursorQuery 清理游标查询结束后的后端资源
+	cleanupCursorQuery(result *core.CursorPageResult[R], err error)
 }
 
 // QuerierList 列表查询执行能力接口
@@ -287,6 +289,59 @@ func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], err
 		return nil, err
 	}
 	return listResultFromResult(result), nil
+}
+
+// QueryCursor 执行游标分页查询，返回迭代器（实现 Querier 接口）。
+func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
+	b.beginQueryMode(true)
+	if err := b.prepareAndValidate(); err != nil {
+		b.finishCursorQuery()
+		return func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	innerIter := executeCursorWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](b),
+		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+			return b.selfRef.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
+		},
+	)
+
+	return func(yield func(*R, error) bool) {
+		defer func() {
+			b.selfRef.cleanupCursorQuery(nil, nil)
+			b.finishCursorQuery()
+		}()
+		for item, err := range innerIter {
+			if !yield(item, err) {
+				return
+			}
+		}
+	}
+}
+
+// QueryPage 执行单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）。
+func (b *builder[B, R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
+	b.beginQueryMode(true)
+	defer b.finishCursorQuery()
+	if err := b.prepareAndValidate(); err != nil {
+		return nil, err
+	}
+
+	result, err := executePageWithMiddlewares(
+		ctx,
+		newMiddlewareContext[R](b),
+		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+			return b.selfRef.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
+		},
+	)
+	b.selfRef.cleanupCursorQuery(result, err)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // prepareAndValidate 执行查询前的参数校验与数据准备

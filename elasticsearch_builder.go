@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"iter"
 	"time"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
@@ -26,6 +25,7 @@ type ElasticSearchBuilder[R any] struct {
 	sort         []elastic.Sorter // ES 专属排序条件
 	pitKeepAlive time.Duration    // Point-in-Time 保持时间
 	pitID        string           // 外部传入/内部更新的 PIT ID（用于跨请求分页）
+	cursorPitID  string           // QueryCursor/QueryPage 内部临时 PIT ID
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -169,61 +169,27 @@ func (e *ElasticSearchBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return e.builder.GetQueryMeta()
 }
 
-// QueryCursor 执行 ElasticSearch 游标分页查询，返回迭代器（实现 Querier 接口）
-// 使用 ES 的 search_after API 进行分批查询
-func (e *ElasticSearchBuilder[R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	// ES 的 search_after 需要在迭代结束后关闭当前查询打开的 PIT。
-	var pitID string
-	return executeBuilderCursorQueryWithCleanup(
-		ctx,
-		&e.builder,
-		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
-			return e.doCursorQuery(ctx, cursorValues, isFirstBatch, false, &pitID)
-		},
-		func() {
-			e.closePIT(pitID)
-		},
-	)
+// doCursorQuery 执行 ElasticSearch 游标分页的单批次查询。
+func (e *ElasticSearchBuilder[R]) doCursorQuery(
+	ctx context.Context,
+	cursorValues []any,
+	isFirstBatch bool,
+	probeHasMore bool,
+) ([]*R, []any, int64, bool, error) {
+	if probeHasMore {
+		// QueryPage 保持原语义：只使用显式 cursorValues，并按其是否为空判断是否统计总数。
+		cursorValues = e.builder.cursorValues
+		isFirstBatch = len(e.builder.cursorValues) == 0
+	}
+	return e.doElasticCursorQuery(ctx, cursorValues, isFirstBatch, probeHasMore, &e.cursorPitID)
 }
 
-// QueryPage 执行 ElasticSearch 单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
-// 内部自动管理 PIT 生命周期：自动打开 PIT，HasMore=false 时自动关闭
-// 不暴露 PIT ID 给调用方（与 QueryPageWithPIT 的区别）
-func (e *ElasticSearchBuilder[R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
-	e.builder.beginQueryMode(true)
-	defer e.builder.finishCursorQuery()
-	if err := e.builder.prepareAndValidate(); err != nil {
-		return nil, err
+// cleanupCursorQuery 清理 QueryCursor/QueryPage 内部自动管理的 PIT。
+func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResult[R], err error) {
+	if err != nil || result == nil || !result.HasMore {
+		e.closePIT(e.cursorPitID)
 	}
-	if e.index == "" {
-		return nil, errors.New("elasticsearch index not configured")
-	}
-
-	// 内部自动管理 PIT
-	var pitID string
-	isFirstBatch := len(e.builder.cursorValues) == 0
-	// 使用 forcePIT=true，doCursorQuery 内部通过 limit+1 探测精确返回 hasMore
-	pageFetchFn := func(ctx context.Context, cursorValues []any, isFirst bool) ([]*R, []any, int64, bool, error) {
-		list, nextCursorValues, total, hasMore, err := e.doCursorQuery(ctx, e.builder.cursorValues, isFirstBatch, true, &pitID)
-		return list, nextCursorValues, total, hasMore, err
-	}
-
-	result, err := executePageWithMiddlewares(
-		ctx,
-		newMiddlewareContext[R](&e.builder),
-		pageFetchFn,
-	)
-
-	// 无论成功失败，如果 HasMore=false 则关闭 PIT
-	if err != nil {
-		e.closePIT(pitID)
-		return nil, err
-	}
-	if !result.HasMore {
-		e.closePIT(pitID)
-	}
-
-	return result, nil
+	e.cursorPitID = ""
 }
 
 // QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
@@ -259,7 +225,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 
 	var resultPitID string
 	chainResult, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) (core.Result[R], error) {
-		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doCursorQuery(
+		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doElasticCursorQuery(
 			ctx,
 			e.builder.cursorValues,
 			isFirstBatch,
@@ -595,10 +561,10 @@ func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
 	_, _ = client.ClosePointInTime(pitID).Do(closeCtx)
 }
 
-// doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
+// doElasticCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 // 使用 search_after API，将上一批最后一条文档的 sort values 作为下一批的 search_after 参数
 // isFirstBatch 为 true 时，若 needTotal 也为 true，则并行执行 Count 查询
-func (e *ElasticSearchBuilder[R]) doCursorQuery(
+func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 	ctx context.Context,
 	cursorValues []any,
 	isFirstBatch, forcePIT bool,
