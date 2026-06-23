@@ -1359,6 +1359,105 @@ list.SetScope(builder.NewElasticSearchScope[model.Doc](
 
 Passing `nil` for filter or sort will be ignored and won't affect the query flow.
 
+### Aggregate Statistics
+
+Use the `agg` package when you need counts, totals, averages, or similar summaries. Describe the grouping and metrics with an `agg.Spec`, then run it with the builder for your data source.
+
+#### Basic Usage
+
+This example counts paid orders and sums their amount for each region:
+
+```go
+import (
+    "context"
+    "fmt"
+
+    "github.com/fantasticbin/QueryBuilder/v2/agg"
+    "github.com/fantasticbin/QueryBuilder/v2/core"
+    "gorm.io/gorm"
+)
+
+type Order struct {
+    ID     uint64
+    Region string
+    Amount float64
+}
+
+type SalesSummary struct {
+    Region string  `gorm:"column:region" bson:"region" json:"region"`
+    Count  int64   `gorm:"column:order_count" bson:"order_count" json:"order_count"`
+    Amount float64 `gorm:"column:amount_sum" bson:"amount_sum" json:"amount_sum"`
+}
+
+func summarize(ctx context.Context, db *gorm.DB) error {
+    data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+    query := agg.NewGormBuilder[Order, SalesSummary](data, agg.Spec{})
+    query.GroupBy("region", "region").
+        Count("order_count").
+        Sum("amount", "amount_sum").
+        SetLimit(100)
+    query.SetFilter(func(db *gorm.DB) *gorm.DB {
+        return db.Where("status = ?", "paid")
+    })
+
+    result, err := query.Query(ctx)
+    if err != nil {
+        return err
+    }
+    for _, row := range result.Rows {
+        fmt.Println(row.Region, row.Count, row.Amount)
+    }
+    return nil
+}
+```
+
+`GroupBy` adds grouping fields to the builder, and methods such as `Count` and `Sum` add metrics to the builder's internal `Spec`. If you prefer the explicit form, pass `agg.Spec{Groups: ..., Metrics: ..., Limit: ...}` to the constructor and keep using the same builder methods to adjust it later. Each `Alias` must match a tag on the result struct. For example, `amount_sum` is decoded into `SalesSummary.Amount`. Add `gorm`, `bson`, and `json` tags when the same result type is used with more than one data source. Groups are sorted in ascending order by default; use `GroupByDesc` or `AddGroup(agg.Group{...})` with `Descending: true` for descending order.
+
+#### Switching Data Sources
+
+The same `Spec` works with each builder:
+
+```go
+spec := agg.Spec{
+    Groups:  []agg.Group{{Field: "region", Alias: "region"}},
+    Metrics: []agg.Metric{{Func: agg.Count, Alias: "order_count"}},
+}
+
+gormQuery := agg.NewGormBuilder[Order, SalesSummary](data, spec)
+mongoQuery := agg.NewMongoBuilder[SalesSummary](data, spec)
+esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
+```
+
+All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. The `SetFilter` argument is specific to GORM, MongoDB, or Elasticsearch, so filters keep the native syntax of each data source.
+
+#### Supported Functions
+
+| Function | Builder method | Purpose | `Field` |
+|----------|----------------|---------|---------|
+| `agg.Count` | `.Count(alias)` | Count matching records | Omit |
+| `agg.Sum` | `.Sum(field, alias)` | Calculate a sum | Required |
+| `agg.Avg` | `.Avg(field, alias)` | Calculate an average | Required |
+| `agg.Min` | `.Min(field, alias)` | Find the minimum | Required |
+| `agg.Max` | `.Max(field, alias)` | Find the maximum | Required |
+
+At least one metric is required, and aliases must be unique across groups and metrics. Field names may be regular identifiers or dotted paths such as `amount` and `customer.region`; raw expressions are not accepted.
+
+#### Inspecting the Query
+
+Call `Explain` while debugging. It returns the generated SQL, MongoDB pipeline, or Elasticsearch DSL without executing the query:
+
+```go
+statement, err := query.Explain(ctx)
+```
+
+#### Current Limits
+
+- Grouped queries return at most 100 rows by default; `Limit` cannot exceed 5000
+- A query without `Groups` returns one summary row
+- Records with a null or missing group field are excluded; null metric values are ignored
+- HAVING, distinct metrics, metric ordering, raw expressions, and grouped cursor pagination are not supported yet
+- Cache and observability middleware for aggregate queries lives in `middleware/agg`
+
 ---
 
 ## API Reference

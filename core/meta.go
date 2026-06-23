@@ -26,7 +26,7 @@ type QueryMeta struct {
 	StartTime      time.Time  // 查询开始时间
 }
 
-// QueryMode 返回查询模式名称，用于日志、指标、链路和调试输出。
+// QueryMode 返回查询模式名称，用于日志、指标、链路和调试输出
 func (m QueryMeta) QueryMode() string {
 	if m.IsPITQuery {
 		return "pit_cursor"

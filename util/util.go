@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ConcurrentTask 表示一个受 context 控制的并发任务。
+// ConcurrentTask 表示一个受 context 控制的并发任务
 type ConcurrentTask func(context.Context) error
 
-// TaskEvent 描述一个并发任务的完成状态。
+// TaskEvent 描述一个并发任务的完成状态
 type TaskEvent struct {
 	Index    int
 	Err      error
@@ -30,15 +30,15 @@ func WaitAndGo(fn ...func() error) error {
 	return WaitAndGoWithContext(context.Background(), tasks...)
 }
 
-// WaitAndGoWithContext 等待所有受 context 控制的函数执行完毕。
-// 任一任务返回错误时，会取消同组任务的 context。
+// WaitAndGoWithContext 等待所有受 context 控制的函数执行完毕
+// 任一任务返回错误时，会取消同组任务的 context
 func WaitAndGoWithContext(ctx context.Context, fn ...ConcurrentTask) error {
 	_, done := GoWithNotify(ctx, fn...)
 	return <-done
 }
 
-// GoWithNotify 并发执行任务，并通过事件 channel 通知每个任务的完成状态。
-// 返回的事件 channel 和 done channel 均由本函数关闭。
+// GoWithNotify 并发执行任务，并通过事件 channel 通知每个任务的完成状态
+// 返回的事件 channel 和 done channel 均由本函数关闭
 func GoWithNotify(ctx context.Context, fn ...ConcurrentTask) (<-chan TaskEvent, <-chan error) {
 	if ctx == nil {
 		ctx = context.Background()

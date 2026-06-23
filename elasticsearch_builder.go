@@ -110,7 +110,7 @@ func (e *ElasticSearchBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return e
 }
 
-// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）
 func (e *ElasticSearchBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
 	e.builder.SetTotalLimit(totalLimit)
 	return e
@@ -158,7 +158,7 @@ func (e *ElasticSearchBuilder[R]) SetPitKeepAlive(keepAlive time.Duration) *Elas
 	return e
 }
 
-// SetPITID 设置 Point-in-Time ID，用于跨请求分页场景续查。
+// SetPITID 设置 Point-in-Time ID，用于跨请求分页场景续查
 func (e *ElasticSearchBuilder[R]) SetPITID(pitID string) *ElasticSearchBuilder[R] {
 	e.pitID = pitID
 	return e
@@ -169,7 +169,7 @@ func (e *ElasticSearchBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return e.builder.GetQueryMeta()
 }
 
-// doCursorQuery 执行 ElasticSearch 游标分页的单批次查询。
+// doCursorQuery 执行 ElasticSearch 游标分页的单批次查询
 func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	ctx context.Context,
 	cursorValues []any,
@@ -177,14 +177,14 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	probeHasMore bool,
 ) ([]*R, []any, int64, bool, error) {
 	if probeHasMore {
-		// QueryPage 保持原语义：只使用显式 cursorValues，并按其是否为空判断是否统计总数。
+		// QueryPage 保持原语义：只使用显式 cursorValues，并按其是否为空判断是否统计总数
 		cursorValues = e.builder.cursorValues
 		isFirstBatch = len(e.builder.cursorValues) == 0
 	}
 	return e.doElasticCursorQuery(ctx, cursorValues, isFirstBatch, probeHasMore, &e.cursorPitID)
 }
 
-// cleanupCursorQuery 清理 QueryCursor/QueryPage 内部自动管理的 PIT。
+// cleanupCursorQuery 清理 QueryCursor/QueryPage 内部自动管理的 PIT
 func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResult[R], err error) {
 	if err != nil || result == nil || !result.HasMore {
 		e.closePIT(e.cursorPitID)
@@ -192,8 +192,8 @@ func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResu
 	e.cursorPitID = ""
 }
 
-// QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询。
-// 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议。
+// QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询
+// 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议
 func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.ESPITPageResult[R], error) {
 	e.builder.beginQueryMode(true)
 	e.builder.isPITQuery = true
@@ -287,7 +287,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 		filter = elastic.NewMatchAllQuery()
 	}
 
-	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		searchService := client.Search().
 			Index(e.index).
@@ -343,7 +343,7 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 	return list, total, nil
 }
 
-// countTotal 执行 Elasticsearch 总数统计；配置 totalLimit 时使用 track_total_hits 上限统计。
+// countTotal 执行 Elasticsearch 总数统计；配置 totalLimit 时使用 track_total_hits 上限统计
 func (e *ElasticSearchBuilder[R]) countTotal(ctx context.Context, filter elastic.Query) (int64, error) {
 	client, err := e.builder.data.ElasticSearchClient()
 	if err != nil {
@@ -527,7 +527,7 @@ func (e *ElasticSearchBuilder[R]) explainCursor(ctx context.Context) (string, er
 	return string(data), nil
 }
 
-// pitKeepAliveString 将 PIT keep alive 配置转换为 Elasticsearch 接受的时间字符串。
+// pitKeepAliveString 将 PIT keep alive 配置转换为 Elasticsearch 接受的时间字符串
 func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 	d := e.pitKeepAlive
 	if d <= 0 {
@@ -587,7 +587,7 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 
 	querySize := batchSize
 	if forcePIT {
-		// PIT 分页场景通过多取 1 条记录来判断是否还有下一页，避免 len(list)==limit 时误判。
+		// PIT 分页场景通过多取 1 条记录来判断是否还有下一页，避免 len(list)==limit 时误判
 		querySize = batchSize + 1
 	}
 

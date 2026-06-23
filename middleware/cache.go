@@ -57,7 +57,7 @@ func cacheResultFromResult[R any](result core.Result[R]) cacheResult[R] {
 	}
 }
 
-// CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键。
+// CacheMiddlewareWithKeyBuilder 使用 CacheKeyBuilder 构建缓存键
 // 中间件内部通过 builder.GetQueryMeta() 获取查询元信息，传递给 keyBuilder.Build
 func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration, keyBuilder CacheKeyBuilder) builder.Middleware[R] {
 	if keyBuilder == nil {

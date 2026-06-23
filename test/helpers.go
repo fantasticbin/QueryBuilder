@@ -9,7 +9,7 @@ import (
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
-// AssertNoError 在 err 不为 nil 时终止测试。
+// AssertNoError 在 err 不为 nil 时终止测试
 func AssertNoError(t testing.TB, err error) {
 	t.Helper()
 	if err != nil {
@@ -17,7 +17,7 @@ func AssertNoError(t testing.TB, err error) {
 	}
 }
 
-// AssertErrorIs 使用 errors.Is 校验 err 是否匹配 target。
+// AssertErrorIs 使用 errors.Is 校验 err 是否匹配 target
 func AssertErrorIs(t testing.TB, err error, target error) {
 	t.Helper()
 	if !errors.Is(err, target) {
@@ -25,7 +25,7 @@ func AssertErrorIs(t testing.TB, err error, target error) {
 	}
 }
 
-// AssertListResult 校验列表查询结果的 items 和 total。
+// AssertListResult 校验列表查询结果的 items 和 total
 func AssertListResult[T any](
 	t testing.TB,
 	got *core.ListResult[T],
@@ -39,7 +39,7 @@ func AssertListResult[T any](
 	assertResultPayload(t, got, wantItems, wantTotal)
 }
 
-// AssertCursorPageResult 校验游标分页结果的公共 payload 和游标元信息。
+// AssertCursorPageResult 校验游标分页结果的公共 payload 和游标元信息
 func AssertCursorPageResult[T any](
 	t testing.TB,
 	got *core.CursorPageResult[T],
@@ -61,7 +61,7 @@ func AssertCursorPageResult[T any](
 	}
 }
 
-// AssertStringSliceEqual 校验两个字符串切片的长度和值是否一致。
+// AssertStringSliceEqual 校验两个字符串切片的长度和值是否一致
 func AssertStringSliceEqual(t testing.TB, got []string, want []string) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -74,7 +74,7 @@ func AssertStringSliceEqual(t testing.TB, got []string, want []string) {
 	}
 }
 
-// PassthroughMiddleware 返回一个直接调用 next 的中间件。
+// PassthroughMiddleware 返回一个直接调用 next 的中间件
 func PassthroughMiddleware[T any, Q any]() func(
 	context.Context,
 	Q,
@@ -89,7 +89,7 @@ func PassthroughMiddleware[T any, Q any]() func(
 	}
 }
 
-// ListResultMiddleware 返回一个短路并直接产出列表结果的中间件。
+// ListResultMiddleware 返回一个短路并直接产出列表结果的中间件
 func ListResultMiddleware[T any, Q any](items []*T, total int64) func(
 	context.Context,
 	Q,
@@ -104,7 +104,7 @@ func ListResultMiddleware[T any, Q any](items []*T, total int64) func(
 	}
 }
 
-// EmptyListMiddleware 返回一个短路并直接产出空列表结果的中间件。
+// EmptyListMiddleware 返回一个短路并直接产出空列表结果的中间件
 func EmptyListMiddleware[T any, Q any]() func(
 	context.Context,
 	Q,
@@ -113,7 +113,7 @@ func EmptyListMiddleware[T any, Q any]() func(
 	return ListResultMiddleware[T, Q](nil, 0)
 }
 
-// assertResultPayload 校验查询结果公共的 total 和 items 内容。
+// assertResultPayload 校验查询结果公共的 total 和 items 内容
 func assertResultPayload[T any](
 	t testing.TB,
 	got core.Result[T],

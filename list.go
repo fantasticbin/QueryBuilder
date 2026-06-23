@@ -23,15 +23,15 @@ type List[R any] struct {
 	scope       ScopeConfigurer[R] // 可选：构建器配置回调，用于自动设置 filter/sort
 }
 
-// NewList 创建一个未绑定数据源的 List。
-// 调用方可后续通过 SetDataSource/WithData 或 SetQuerier 提供查询后端。
+// NewList 创建一个未绑定数据源的 List
+// 调用方可后续通过 SetDataSource/WithData 或 SetQuerier 提供查询后端
 func NewList[R any]() *List[R] {
 	return &List[R]{}
 }
 
 // NewListWithData 通过指定数据源类型和数据实例创建 List
-// 内部会保留默认数据实例，并预创建一个元信息构建器。
-// 后续每次 Query/QueryCursor/QueryPage 都会使用新的构建器，避免查询状态串场。
+// 内部会保留默认数据实例，并预创建一个元信息构建器
+// 后续每次 Query/QueryCursor/QueryPage 都会使用新的构建器，避免查询状态串场
 func NewListWithData[R any](ds core.DataSource, data *core.DBProxy) *List[R] {
 	querier := NewBuilder[R](ds, data)
 	return &List[R]{
@@ -87,8 +87,8 @@ func (l *List[R]) SetAfterQueryHook(hook AfterQueryHook[R]) *List[R] {
 	return l
 }
 
-// buildQuerier 为单次查询准备 Querier。
-// 对内置构建器使用 Clone 隔离可变查询状态，对自定义 Querier 保持原样以兼容测试和扩展实现。
+// buildQuerier 为单次查询准备 Querier
+// 对内置构建器使用 Clone 隔离可变查询状态，对自定义 Querier 保持原样以兼容测试和扩展实现
 func (l *List[R]) buildQuerier(options BaseQueryListOptions) Querier[R] {
 	var querier Querier[R]
 	if l.querier != nil {
@@ -105,8 +105,8 @@ func (l *List[R]) buildQuerier(options BaseQueryListOptions) Querier[R] {
 	return querier
 }
 
-// cloneQuerier 在已知内置构建器上创建查询状态副本。
-// 未知 Querier 没有通用复制协议，直接返回原实例。
+// cloneQuerier 在已知内置构建器上创建查询状态副本
+// 未知 Querier 没有通用复制协议，直接返回原实例
 func cloneQuerier[R any](querier Querier[R]) Querier[R] {
 	switch q := querier.(type) {
 	case *GormBuilder[R]:
@@ -120,7 +120,7 @@ func cloneQuerier[R any](querier Querier[R]) Querier[R] {
 	}
 }
 
-// applyBackendOptions 应用通用 QueryOption 中承载的后端专属配置。
+// applyBackendOptions 应用通用 QueryOption 中承载的后端专属配置
 func (l *List[R]) applyBackendOptions(querier Querier[R], options BaseQueryListOptions) {
 	if es, ok := querier.(*ElasticSearchBuilder[R]); ok {
 		if options.esIndex != "" {
@@ -255,8 +255,8 @@ func (l *List[R]) QueryPage(
 	return querier.QueryPage(ctx)
 }
 
-// QueryPageWithPIT 执行 Elasticsearch PIT + search_after 单批次分页查询。
-// 该方法仅支持 ElasticSearchBuilder，用于需要跨请求维持 PIT ID 的分页场景。
+// QueryPageWithPIT 执行 Elasticsearch PIT + search_after 单批次分页查询
+// 该方法仅支持 ElasticSearchBuilder，用于需要跨请求维持 PIT ID 的分页场景
 func (l *List[R]) QueryPageWithPIT(
 	ctx context.Context,
 	opts ...QueryOption,

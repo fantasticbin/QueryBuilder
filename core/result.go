@@ -22,7 +22,7 @@ const (
 	ResultKindCursorPage
 )
 
-// String 返回 ResultKind 的稳定字符串表示。
+// String 返回 ResultKind 的稳定字符串表示
 func (k ResultKind) String() string {
 	switch k {
 	case ResultKindList:
@@ -123,8 +123,8 @@ func (r *CursorPageResult[R]) GetNextCursorValues() []any {
 	return r.NextCursorValues
 }
 
-// ESPITPageResult ES PIT 分页查询结果。
-// 内嵌 CursorPageResult 复用通用游标分页字段，额外提供 PitID 用于跨请求续查。
+// ESPITPageResult ES PIT 分页查询结果
+// 内嵌 CursorPageResult 复用通用游标分页字段，额外提供 PitID 用于跨请求续查
 type ESPITPageResult[R any] struct {
 	CursorPageResult[R]
 	PitID string // Point-in-Time ID，用于下一批查询（HasMore=false 时为空）

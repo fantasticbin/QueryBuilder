@@ -35,28 +35,28 @@ var (
 	ErrPITCursorWithoutPITID = errors.New("PIT ID is required when cursor values are provided")
 )
 
-// NewGormAdapter 创建 GORM 数据源适配器。
+// NewGormAdapter 创建 GORM 数据源适配器
 func NewGormAdapter(db *gorm.DB) core.GormAdapter {
 	return core.NewGormAdapter(db)
 }
 
-// NewMongoAdapter 创建 MongoDB 数据源适配器。
+// NewMongoAdapter 创建 MongoDB 数据源适配器
 func NewMongoAdapter(collection *mongo.Collection) core.MongoAdapter {
 	return core.NewMongoAdapter(collection)
 }
 
-// NewElasticSearchAdapter 创建 ElasticSearch 数据源适配器。
+// NewElasticSearchAdapter 创建 ElasticSearch 数据源适配器
 func NewElasticSearchAdapter(client *elastic.Client) core.ElasticSearchAdapter {
 	return core.NewElasticSearchAdapter(client)
 }
 
-// NewDBProxy 创建数据实例。
-// 保留旧构造函数签名以兼容现有调用；新数据源请使用 NewDBProxyWithAdapters 或 RegisterAdapter。
+// NewDBProxy 创建数据实例
+// 保留旧构造函数签名以兼容现有调用；新数据源请使用 NewDBProxyWithAdapters 或 RegisterAdapter
 func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *core.DBProxy {
 	return core.NewDBProxy(db, mongodb, elasticsearch)
 }
 
-// NewDBProxyWithAdapters 通过适配器创建数据源注册表。
+// NewDBProxyWithAdapters 通过适配器创建数据源注册表
 func NewDBProxyWithAdapters(adapters ...core.DataSourceAdapter) *core.DBProxy {
 	return core.NewDBProxyWithAdapters(adapters...)
 }
@@ -119,7 +119,7 @@ type Querier[R any] interface {
 	SetLimit(limit uint32) Querier[R]
 	// SetNeedTotal 设置是否需要查询总数
 	SetNeedTotal(needTotal bool) Querier[R]
-	// SetTotalLimit 设置总数统计上限，0 表示精确统计。
+	// SetTotalLimit 设置总数统计上限，0 表示精确统计
 	SetTotalLimit(totalLimit uint32) Querier[R]
 	// SetNeedPagination 设置是否需要分页
 	SetNeedPagination(needPagination bool) Querier[R]
@@ -270,7 +270,7 @@ func (b *builder[B, R]) GetQueryMeta() core.QueryMeta {
 	return meta
 }
 
-// QueryList 执行查询列表操作，封装列表查询的通用生命周期。
+// QueryList 执行查询列表操作，封装列表查询的通用生命周期
 func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
 	b.beginQueryMode(false)
 	if err := b.prepareAndValidate(); err != nil {
@@ -291,7 +291,7 @@ func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], err
 	return listResultFromResult(result), nil
 }
 
-// QueryCursor 执行游标分页查询，返回迭代器（实现 Querier 接口）。
+// QueryCursor 执行游标分页查询，返回迭代器（实现 Querier 接口）
 func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 	b.beginQueryMode(true)
 	if err := b.prepareAndValidate(); err != nil {
@@ -322,7 +322,7 @@ func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 	}
 }
 
-// QueryPage 执行单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）。
+// QueryPage 执行单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
 func (b *builder[B, R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
 	b.beginQueryMode(true)
 	defer b.finishCursorQuery()
@@ -377,8 +377,8 @@ func (b *builder[B, R]) prepareAndValidate() error {
 	return nil
 }
 
-// getParsedCursorFields 返回解析后的游标字段缓存。
-// 若缓存为空且 cursorFields 已设置，则延迟解析一次并写回缓存。
+// getParsedCursorFields 返回解析后的游标字段缓存
+// 若缓存为空且 cursorFields 已设置，则延迟解析一次并写回缓存
 func (b *builder[B, R]) getParsedCursorFields() []cursorSortField {
 	if len(b.parsedCursorFields) == 0 && len(b.cursorFields) > 0 {
 		b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
@@ -455,7 +455,7 @@ func (b *builder[B, R]) SetNeedTotal(needTotal bool) B {
 	return b.selfRef
 }
 
-// SetTotalLimit 设置总数统计上限，0 表示精确统计。
+// SetTotalLimit 设置总数统计上限，0 表示精确统计
 func (b *builder[B, R]) SetTotalLimit(totalLimit uint32) B {
 	b.totalLimit = totalLimit
 	return b.selfRef
@@ -500,17 +500,17 @@ func (b *builder[B, R]) SetCursorValue(values ...any) B {
 	return b.selfRef
 }
 
-// beginQueryMode 标记当前执行入口是否为游标查询。
+// beginQueryMode 标记当前执行入口是否为游标查询
 func (b *builder[B, R]) beginQueryMode(isCursorQuery bool) {
 	b.isCursorQuery = isCursorQuery
 }
 
-// finishCursorQuery 结束游标查询模式，避免复用 builder 时污染后续普通查询。
+// finishCursorQuery 结束游标查询模式，避免复用 builder 时污染后续普通查询
 func (b *builder[B, R]) finishCursorQuery() {
 	b.isCursorQuery = false
 }
 
-// ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker。
+// ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker
 func (b *builder[B, R]) ensureDefaultCursorField() error {
 	if len(b.cursorFields) > 0 {
 		return nil

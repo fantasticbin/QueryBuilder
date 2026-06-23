@@ -90,7 +90,7 @@ func (g *GormBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return g
 }
 
-// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）
 func (g *GormBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
 	g.builder.SetTotalLimit(totalLimit)
 	return g
@@ -137,7 +137,7 @@ func (g *GormBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return g.builder.GetQueryMeta()
 }
 
-// cleanupCursorQuery 清理 GORM 游标查询资源。
+// cleanupCursorQuery 清理 GORM 游标查询资源
 func (g *GormBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
 // buildQuery 构建公共的 GORM 查询对象（私有方法）
@@ -171,7 +171,7 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 		return nil, 0, err
 	}
 
-	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		query := g.buildQuery(db.WithContext(ctx))
 		return query.Find(&list).Error
@@ -188,7 +188,7 @@ func (g *GormBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, e
 	return list, total, nil
 }
 
-// countTotal 执行总数统计；配置 totalLimit 时通过子查询限制最多扫描的记录数。
+// countTotal 执行总数统计；配置 totalLimit 时通过子查询限制最多扫描的记录数
 func (g *GormBuilder[R]) countTotal(ctx context.Context, total *int64) error {
 	db, err := g.builder.data.GormDB()
 	if err != nil {
@@ -348,7 +348,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 			query = query.Where(fmt.Sprintf("%s %s ?", cursorFields[0].Field, op), cursorValues[0])
 		} else {
 			if asc, uniform := isUniformCursorDirection(cursorFields); uniform {
-				// 性能优化：方向一致时使用行值比较，通常比 OR 组合条件更利于索引与执行计划。
+				// 性能优化：方向一致时使用行值比较，通常比 OR 组合条件更利于索引与执行计划
 				op := ">"
 				if !asc {
 					op = "<"
@@ -360,7 +360,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 				placeholders := strings.TrimRight(strings.Repeat("?,", len(cursorValues)), ",")
 				query = query.Where(fmt.Sprintf("(%s) %s (%s)", strings.Join(fieldList, ", "), op, placeholders), cursorValues...)
 			} else {
-				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件。
+				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件
 				var orParts []string
 				args := make([]any, 0, len(cursorFields)*(len(cursorFields)+1)/2)
 				for i := 0; i < len(cursorFields); i++ {

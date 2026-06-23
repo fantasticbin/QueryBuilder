@@ -24,8 +24,8 @@ import (
 //	error: 错误信息
 type cursorFetchBatch[R any] func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error)
 
-// cursorSortField 表示单个游标排序字段及其方向。
-// Asc=true 表示升序，Asc=false 表示降序。
+// cursorSortField 表示单个游标排序字段及其方向
+// Asc=true 表示升序，Asc=false 表示降序
 type cursorSortField struct {
 	Field string
 	Asc   bool
@@ -50,7 +50,7 @@ func parseCursorSortFields(rawFields []string) []cursorSortField {
 	return parsed
 }
 
-// isUniformCursorDirection 判断游标排序方向是否一致（全升序或全降序）。
+// isUniformCursorDirection 判断游标排序方向是否一致（全升序或全降序）
 // 返回:
 //
 //	asc: 统一方向时的方向值（true=ASC, false=DESC）

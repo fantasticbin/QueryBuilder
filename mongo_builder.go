@@ -99,7 +99,7 @@ func (m *MongoBuilder[R]) SetNeedTotal(needTotal bool) Querier[R] {
 	return m
 }
 
-// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）。
+// SetTotalLimit 设置总数统计上限，0 表示精确统计（实现 Querier 扩展配置）
 func (m *MongoBuilder[R]) SetTotalLimit(totalLimit uint32) Querier[R] {
 	m.builder.SetTotalLimit(totalLimit)
 	return m
@@ -146,7 +146,7 @@ func (m *MongoBuilder[R]) GetQueryMeta() core.QueryMeta {
 	return m.builder.GetQueryMeta()
 }
 
-// cleanupCursorQuery 清理 MongoDB 游标查询资源。
+// cleanupCursorQuery 清理 MongoDB 游标查询资源
 func (m *MongoBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
 // doQuery 执行实际的 MongoDB 查询逻辑
@@ -161,7 +161,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 		filter = bson.D{}
 	}
 
-	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务。
+	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
 		findOpt := options.Find().SetSort(m.sort)
 
@@ -205,7 +205,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 	return list, total, nil
 }
 
-// countDocuments 执行 MongoDB 总数统计；配置 totalLimit 时使用 CountOptions.Limit 限制扫描数量。
+// countDocuments 执行 MongoDB 总数统计；配置 totalLimit 时使用 CountOptions.Limit 限制扫描数量
 func (m *MongoBuilder[R]) countDocuments(ctx context.Context, filter MongoFilter) (int64, error) {
 	collection, err := m.builder.data.MongoCollection()
 	if err != nil {

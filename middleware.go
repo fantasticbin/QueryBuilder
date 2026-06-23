@@ -158,7 +158,7 @@ func executeCursorWithMiddlewares[R any](
 	mc *middlewareContext[R],
 	cursorQueryFn cursorFetchBatch[R],
 ) iter.Seq2[*R, error] {
-	// 游标字段默认值/合法性已在 prepareAndValidate 中统一处理。
+	// 游标字段默认值/合法性已在 prepareAndValidate 中统一处理
 	ctx, batchSize, initialCursorValues, runChain := prepareCursorPipeline[R](ctx, mc)
 
 	// 包装 fetchBatch，使每批次查询经过中间件链
