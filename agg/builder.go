@@ -33,22 +33,49 @@ type PipelineConfigurer[A any] interface {
 	SetAfterHook(AfterHook[A]) Builder[A]
 }
 
-// SpecConfigurer 定义聚合规范配置能力
+// SpecConfigurer 定义聚合规范批量配置能力
 type SpecConfigurer[A any] interface {
+	ConfigureSpec(...SpecOption) Builder[A]
+}
+
+// SpecSetter 定义聚合规范整体替换能力
+type SpecSetter[A any] interface {
 	SetSpec(Spec) Builder[A]
+}
+
+// GroupConfigurer 定义聚合分组配置能力
+type GroupConfigurer[A any] interface {
 	SetGroups(...Group) Builder[A]
 	AddGroup(Group) Builder[A]
 	GroupBy(field, alias string) Builder[A]
 	GroupByDesc(field, alias string) Builder[A]
+}
+
+// MetricConfigurer 定义聚合指标配置能力
+type MetricConfigurer[A any] interface {
 	SetMetrics(...Metric) Builder[A]
 	AddMetric(Metric) Builder[A]
 	Metric(fn Func, field, alias string) Builder[A]
 	Count(alias string) Builder[A]
+	CountDistinct(field, alias string) Builder[A]
 	Sum(field, alias string) Builder[A]
+	SumDistinct(field, alias string) Builder[A]
 	Avg(field, alias string) Builder[A]
 	Min(field, alias string) Builder[A]
 	Max(field, alias string) Builder[A]
+}
+
+// LimitConfigurer 定义聚合结果数量上限配置能力
+type LimitConfigurer[A any] interface {
 	SetLimit(limit uint32) Builder[A]
+}
+
+// SpecChainConfigurer 组合现有链式 Spec DSL，兼容已有 Builder 调用方式
+type SpecChainConfigurer[A any] interface {
+	SpecSetter[A]
+	GroupConfigurer[A]
+	MetricConfigurer[A]
+	LimitConfigurer[A]
 }
 
 // Builder 组合聚合构建器的配置、执行与元信息能力
@@ -56,6 +83,7 @@ type Builder[A any] interface {
 	Querier[A]
 	PipelineConfigurer[A]
 	SpecConfigurer[A]
+	SpecChainConfigurer[A]
 }
 
 type base[A any] struct {
@@ -92,88 +120,131 @@ func (b *base[A]) SetAfterHook(hook AfterHook[A]) Builder[A] {
 	return b.self
 }
 
+// ConfigureSpec 通过 SpecBuilder 批量配置聚合查询规范
+func (b *base[A]) ConfigureSpec(options ...SpecOption) Builder[A] {
+	if len(options) == 0 {
+		return b.self
+	}
+	spec := newSpecBuilder(b.spec)
+	for _, option := range options {
+		if option != nil {
+			option(spec)
+		}
+	}
+	b.spec = spec.Spec()
+	return b.self
+}
+
 // SetSpec 替换聚合查询规范
 func (b *base[A]) SetSpec(spec Spec) Builder[A] {
-	b.spec = normalizeSpec(spec)
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetSpec(spec)
+	})
 }
 
 // SetGroups 替换全部分组字段
 func (b *base[A]) SetGroups(groups ...Group) Builder[A] {
-	b.spec.Groups = append([]Group{}, groups...)
-	if len(b.spec.Groups) == 0 {
-		b.spec.Limit = 0
-	} else if b.spec.Limit == 0 {
-		b.spec.Limit = defaultLimit
-	}
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetGroups(groups...)
+	})
 }
 
 // AddGroup 追加一个完整分组配置
 func (b *base[A]) AddGroup(group Group) Builder[A] {
-	b.spec.Groups = append(b.spec.Groups, group)
-	if b.spec.Limit == 0 {
-		b.spec.Limit = defaultLimit
-	}
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.AddGroup(group)
+	})
 }
 
 // GroupBy 追加一个升序分组字段
 func (b *base[A]) GroupBy(field, alias string) Builder[A] {
-	return b.AddGroup(Group{Field: field, Alias: alias})
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.GroupBy(field, alias)
+	})
 }
 
 // GroupByDesc 追加一个降序分组字段
 func (b *base[A]) GroupByDesc(field, alias string) Builder[A] {
-	return b.AddGroup(Group{Field: field, Alias: alias, Descending: true})
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.GroupByDesc(field, alias)
+	})
 }
 
 // SetMetrics 替换全部聚合指标
 func (b *base[A]) SetMetrics(metrics ...Metric) Builder[A] {
-	b.spec.Metrics = append([]Metric{}, metrics...)
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetMetrics(metrics...)
+	})
 }
 
 // AddMetric 追加一个完整指标配置
 func (b *base[A]) AddMetric(metric Metric) Builder[A] {
-	b.spec.Metrics = append(b.spec.Metrics, metric)
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.AddMetric(metric)
+	})
 }
 
 // Metric 追加一个聚合指标
 func (b *base[A]) Metric(fn Func, field, alias string) Builder[A] {
-	return b.AddMetric(Metric{Func: fn, Field: field, Alias: alias})
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Metric(fn, field, alias)
+	})
 }
 
 // Count 追加记录数统计指标
 func (b *base[A]) Count(alias string) Builder[A] {
-	return b.Metric(Count, "", alias)
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Count(alias)
+	})
+}
+
+// CountDistinct 追加字段去重计数指标
+func (b *base[A]) CountDistinct(field, alias string) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.CountDistinct(field, alias)
+	})
 }
 
 // Sum 追加求和指标
 func (b *base[A]) Sum(field, alias string) Builder[A] {
-	return b.Metric(Sum, field, alias)
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Sum(field, alias)
+	})
+}
+
+// SumDistinct 追加字段去重求和指标
+func (b *base[A]) SumDistinct(field, alias string) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SumDistinct(field, alias)
+	})
 }
 
 // Avg 追加平均值指标
 func (b *base[A]) Avg(field, alias string) Builder[A] {
-	return b.Metric(Avg, field, alias)
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Avg(field, alias)
+	})
 }
 
 // Min 追加最小值指标
 func (b *base[A]) Min(field, alias string) Builder[A] {
-	return b.Metric(Min, field, alias)
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Min(field, alias)
+	})
 }
 
 // Max 追加最大值指标
 func (b *base[A]) Max(field, alias string) Builder[A] {
-	return b.Metric(Max, field, alias)
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Max(field, alias)
+	})
 }
 
 // SetLimit 设置分组结果数量上限
 func (b *base[A]) SetLimit(limit uint32) Builder[A] {
-	b.spec.Limit = limit
-	return b.self
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetLimit(limit)
+	})
 }
 
 // Meta 返回当前聚合查询元信息的防御性副本

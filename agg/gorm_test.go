@@ -38,7 +38,9 @@ func TestGormBuilderExplain(t *testing.T) {
 		Groups: []Group{{Field: "customer.region", Alias: "region", Descending: true}},
 		Metrics: []Metric{
 			{Func: Count, Alias: "total"},
+			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
 			{Func: Sum, Field: "amount", Alias: "amount_sum"},
+			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
 		},
 		Limit: 20,
 	})
@@ -52,7 +54,7 @@ func TestGormBuilderExplain(t *testing.T) {
 	}
 	normalized := strings.Join(strings.Fields(explanation), " ")
 	for _, fragment := range []string{
-		`SELECT "customer"."region" AS "region", COUNT(*) AS "total", SUM("amount") AS "amount_sum"`,
+		`SELECT "customer"."region" AS "region", COUNT(*) AS "total", COUNT(DISTINCT "customer"."id") AS "buyer_count", SUM("amount") AS "amount_sum", SUM(DISTINCT "amount") AS "unique_amount_sum"`,
 		`FROM "orders"`,
 		`WHERE "customer"."region" IS NOT NULL AND status = ?`,
 		`GROUP BY "customer"."region"`,

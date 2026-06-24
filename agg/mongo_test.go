@@ -11,9 +11,10 @@ import (
 )
 
 type mongoSummary struct {
-	Region string  `bson:"region"`
-	Total  int64   `bson:"total"`
-	Amount float64 `bson:"amount_avg"`
+	Region     string  `bson:"region"`
+	Total      int64   `bson:"total"`
+	BuyerCount int64   `bson:"buyer_count"`
+	Amount     float64 `bson:"amount_avg"`
 }
 
 func TestMongoBuilderExplain(t *testing.T) {
@@ -60,6 +61,83 @@ func TestMongoBuilderExplain(t *testing.T) {
 	regionOrder := sort["region"].(map[string]any)["$numberInt"]
 	channelOrder := sort["channel"].(map[string]any)["$numberInt"]
 	if regionOrder != "-1" || channelOrder != "1" {
+		t.Fatalf("unexpected sort stage: %v", sort)
+	}
+}
+
+func TestMongoBuilderExplainDistinctMetrics(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data, Spec{
+		Groups: []Group{{Field: "region", Alias: "region", Descending: true}},
+		Metrics: []Metric{
+			{Func: Count, Alias: "total"},
+			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
+			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
+			{Func: Avg, Field: "amount", Alias: "amount_avg"},
+		},
+		Limit: 10,
+	})
+	builder.SetFilter(bson.D{{Key: "status", Value: "paid"}})
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(explanation), &payload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+	pipeline := payload["pipeline"].([]any)
+	if len(pipeline) != 9 {
+		t.Fatalf("expected nine pipeline stages, got %d: %s", len(pipeline), explanation)
+	}
+
+	facet := pipeline[1].(map[string]any)["$facet"].(map[string]any)
+	if _, ok := facet[mongoBaseFacet].([]any); !ok {
+		t.Fatalf("expected base facet: %s", explanation)
+	}
+	distinct := facet["_distinct_1"].([]any)
+	if len(distinct) != 4 {
+		t.Fatalf("expected four distinct facet stages, got %d: %v", len(distinct), distinct)
+	}
+	match := distinct[0].(map[string]any)["$match"].(map[string]any)
+	if _, ok := match["customer.id"]; !ok {
+		t.Fatalf("expected distinct field non-empty match: %v", match)
+	}
+	if _, ok := distinct[1].(map[string]any)["$group"]; !ok {
+		t.Fatalf("expected first distinct group stage: %v", distinct[1])
+	}
+	if _, ok := distinct[2].(map[string]any)["$group"]; !ok {
+		t.Fatalf("expected second distinct group stage: %v", distinct[2])
+	}
+	distinctSum := facet["_distinct_2"].([]any)
+	sumGroup := distinctSum[2].(map[string]any)["$group"].(map[string]any)
+	if sumGroup["unique_amount_sum"].(map[string]any)["$sum"] != "$_id.value" {
+		t.Fatalf("expected sum distinct to add unique values: %v", sumGroup)
+	}
+
+	project := pipeline[2].(map[string]any)["$project"].(map[string]any)
+	concat := project[mongoRowsField].(map[string]any)["$concatArrays"].([]any)
+	if len(concat) != 3 || concat[0] != "$"+mongoBaseFacet || concat[1] != "$_distinct_1" || concat[2] != "$_distinct_2" {
+		t.Fatalf("unexpected concat arrays: %v", concat)
+	}
+
+	merge := pipeline[5].(map[string]any)["$group"].(map[string]any)
+	if _, ok := merge["total"].(map[string]any)["$max"]; !ok {
+		t.Fatalf("expected regular metrics to use max during facet merge: %v", merge["total"])
+	}
+	buyerCount := merge["buyer_count"].(map[string]any)["$sum"].(map[string]any)
+	if _, ok := buyerCount["$ifNull"]; !ok {
+		t.Fatalf("expected distinct count to default missing values to zero: %v", buyerCount)
+	}
+	uniqueAmountSum := merge["unique_amount_sum"].(map[string]any)["$sum"].(map[string]any)
+	if _, ok := uniqueAmountSum["$ifNull"]; !ok {
+		t.Fatalf("expected sum distinct to preserve negative values while defaulting missing branches: %v", uniqueAmountSum)
+	}
+	sort := pipeline[7].(map[string]any)["$sort"].(map[string]any)
+	if sort["region"].(map[string]any)["$numberInt"] != "-1" {
 		t.Fatalf("unexpected sort stage: %v", sort)
 	}
 }

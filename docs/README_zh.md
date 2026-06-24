@@ -1359,11 +1359,11 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 
 ### 聚合统计
 
-需要统计订单数量、销售总额或平均值时，可以使用 `agg` 包。先用 `agg.Spec` 描述“按什么分组、计算什么指标”，再选择对应的数据源构建器执行查询。
+当普通列表查询不够用，需要做一张小汇总表时，可以使用 `agg` 包。例如按地区统计订单数、销售额、平均金额、独立买家数等。你可以在构造器里传入完整的 `agg.Spec`，也可以先传空 `Spec`，再通过链式方法逐步补充分组和指标。
 
 #### 基本用法
 
-下面的例子统计每个地区已支付订单的数量和总金额：
+下面的例子按地区统计已支付订单：包含订单总数、去重买家数、支付总金额和去重金额求和。
 
 ```go
 import (
@@ -1376,15 +1376,18 @@ import (
 )
 
 type Order struct {
-    ID     uint64
-    Region string
-    Amount float64
+    ID         uint64
+    Region     string
+    CustomerID uint64
+    Amount     float64
 }
 
 type SalesSummary struct {
-    Region string  `gorm:"column:region" bson:"region" json:"region"`
-    Count  int64   `gorm:"column:order_count" bson:"order_count" json:"order_count"`
-    Amount float64 `gorm:"column:amount_sum" bson:"amount_sum" json:"amount_sum"`
+    Region          string  `gorm:"column:region" bson:"region" json:"region"`
+    Count           int64   `gorm:"column:order_count" bson:"order_count" json:"order_count"`
+    BuyerCount      int64   `gorm:"column:buyer_count" bson:"buyer_count" json:"buyer_count"`
+    UniqueAmountSum float64 `gorm:"column:unique_amount_sum" bson:"unique_amount_sum" json:"unique_amount_sum"`
+    Amount          float64 `gorm:"column:amount_sum" bson:"amount_sum" json:"amount_sum"`
 }
 
 func summarize(ctx context.Context, db *gorm.DB) error {
@@ -1392,7 +1395,9 @@ func summarize(ctx context.Context, db *gorm.DB) error {
     query := agg.NewGormBuilder[Order, SalesSummary](data, agg.Spec{})
     query.GroupBy("region", "region").
         Count("order_count").
+        CountDistinct("customer_id", "buyer_count").
         Sum("amount", "amount_sum").
+        SumDistinct("amount", "unique_amount_sum").
         SetLimit(100)
     query.SetFilter(func(db *gorm.DB) *gorm.DB {
         return db.Where("status = ?", "paid")
@@ -1403,22 +1408,28 @@ func summarize(ctx context.Context, db *gorm.DB) error {
         return err
     }
     for _, row := range result.Rows {
-        fmt.Println(row.Region, row.Count, row.Amount)
+        fmt.Println(row.Region, row.Count, row.BuyerCount, row.UniqueAmountSum, row.Amount)
     }
     return nil
 }
 ```
 
-`GroupBy` 会在 builder 内部的 `Spec` 上追加分组字段，`Count`、`Sum` 等方法会追加统计指标。更喜欢结构体写法时，也可以把 `agg.Spec{Groups: ..., Metrics: ..., Limit: ...}` 直接传给构造器，之后仍然能继续用这些 builder 方法调整它。每个 `Alias` 都要和结果结构体的字段标签对应，例如 `amount_sum` 会写入 `SalesSummary.Amount`。同一个结果结构体需要兼容多个数据源时，可以同时声明 `gorm`、`bson` 和 `json` 标签。分组默认升序排列，需要倒序时可使用 `GroupByDesc`，或通过 `AddGroup(agg.Group{...})` 传入 `Descending: true`。
+`GroupBy` 用来添加分组字段。`Count`、`CountDistinct`、`Sum`、`SumDistinct`、`Avg`、`Min`、`Max` 用来添加需要输出的统计值。每个 `Alias` 都要和结果结构体的字段标签对应，例如上面的 `buyer_count` 会写入 `SalesSummary.BuyerCount`。同一个结果结构体需要兼容多个数据源时，可以同时声明 `gorm`、`bson` 和 `json` 标签。
+
+分组默认按升序排列。需要倒序时，可以使用 `GroupByDesc`，或通过 `AddGroup(agg.Group{...})` 设置 `Descending: true`。
 
 #### 切换数据源
 
-`Spec` 可以复用，只需要更换构建器：
+同一个 `Spec` 可以在不同数据源构建器之间复用：
 
 ```go
 spec := agg.Spec{
-    Groups:  []agg.Group{{Field: "region", Alias: "region"}},
-    Metrics: []agg.Metric{{Func: agg.Count, Alias: "order_count"}},
+    Groups: []agg.Group{{Field: "region", Alias: "region"}},
+    Metrics: []agg.Metric{
+        {Func: agg.Count, Alias: "order_count"},
+        {Func: agg.Count, Field: "customer_id", Alias: "buyer_count", Distinct: true},
+        {Func: agg.Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
+    },
 }
 
 gormQuery := agg.NewGormBuilder[Order, SalesSummary](data, spec)
@@ -1426,14 +1437,16 @@ mongoQuery := agg.NewMongoBuilder[SalesSummary](data, spec)
 esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
 ```
 
-三个构建器都提供 `SetFilter`、`Clone`、`Use`、`Query` 和 `Explain`。其中 `SetFilter` 的参数类型会随数据源变化，分别使用 GORM、MongoDB 和 Elasticsearch 的过滤写法。
+三个构建器都提供 `SetFilter`、`Clone`、`Use`、`Query` 和 `Explain`。`SetFilter` 保留各数据源自己的写法：GORM 使用 `func(*gorm.DB) *gorm.DB`，MongoDB 使用 `bson.D`，Elasticsearch 使用 `elastic.Query`。
 
 #### 支持的统计函数
 
 | 函数 | 构建器方法 | 用途 | `Field` |
 |------|------------|------|---------|
-| `agg.Count` | `.Count(alias)` | 统计记录数 | 不填写 |
+| `agg.Count` | `.Count(alias)` | 统计匹配记录数 | 不填写 |
+| `agg.Count` 且 `Distinct: true` | `.CountDistinct(field, alias)` | 统计字段的非空去重数量 | 必填 |
 | `agg.Sum` | `.Sum(field, alias)` | 求和 | 必填 |
+| `agg.Sum` 且 `Distinct: true` | `.SumDistinct(field, alias)` | 对字段的非空去重值求和 | 必填 |
 | `agg.Avg` | `.Avg(field, alias)` | 求平均值 | 必填 |
 | `agg.Min` | `.Min(field, alias)` | 求最小值 | 必填 |
 | `agg.Max` | `.Max(field, alias)` | 求最大值 | 必填 |
@@ -1442,20 +1455,22 @@ esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
 
 #### 查看生成的查询
 
-调试时可以调用 `Explain`。它只返回生成的 SQL、MongoDB pipeline 或 Elasticsearch DSL，不会执行查询：
+想确认底层会发出什么查询时，可以调用 `Explain`。它只返回 SQL、MongoDB aggregation pipeline 或 Elasticsearch DSL，不会执行查询：
 
 ```go
 statement, err := query.Explain(ctx)
 ```
+
+对于去重计数和去重求和，GORM 会生成 `COUNT(DISTINCT field)` 或 `SUM(DISTINCT field)`，MongoDB 使用精确的两阶段 `$group` 分支。Elasticsearch 的去重计数使用近似的 `cardinality`，去重求和使用 `scripted_metric`；高基数字段会把去重值保存在聚合状态里，因此建议只用于取值范围受控的数值字段。
 
 #### 使用限制
 
 - 分组查询默认最多返回 100 行，`Limit` 最大为 5000
 - 没有配置 `Groups` 时返回一行汇总结果
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
-- 当前不支持 HAVING、distinct、按指标排序、原始表达式和分组游标分页
+- 目前只有 `Count` 和 `Sum` 支持 distinct
+- 当前不支持 HAVING、按指标排序、原始表达式和分组游标分页
 - 聚合查询的缓存和可观测中间件位于 `middleware/agg`
-
 ---
 
 ## API 参考

@@ -70,11 +70,12 @@ type Group struct {
 	Descending bool   `json:"descending"`
 }
 
-// Metric 定义聚合计算及其输出别名
+// Metric 定义聚合计算、去重选项及其输出别名
 type Metric struct {
-	Func  Func   `json:"func"`
-	Field string `json:"field,omitempty"`
-	Alias string `json:"alias"`
+	Func     Func   `json:"func"`
+	Field    string `json:"field,omitempty"`
+	Alias    string `json:"alias"`
+	Distinct bool   `json:"distinct,omitempty"`
 }
 
 // Spec 定义跨数据源通用的聚合查询规范
@@ -141,8 +142,15 @@ func validateSpec(spec Spec) error {
 		if err := validateFunc(metric.Func); err != nil {
 			return fmt.Errorf("%w: metric %d: %v", ErrInvalidSpec, i, err)
 		}
+		if metric.Distinct && !supportsDistinct(metric.Func) {
+			return fmt.Errorf("%w: metric %d distinct is only supported by count and sum", ErrInvalidSpec, i)
+		}
 		if metric.Func == Count {
-			if metric.Field != "" {
+			if metric.Distinct {
+				if err := validateField(metric.Field); err != nil {
+					return fmt.Errorf("%w: metric %d field: %v", ErrInvalidSpec, i, err)
+				}
+			} else if metric.Field != "" {
 				return fmt.Errorf("%w: metric %d count field must be empty", ErrInvalidSpec, i)
 			}
 		} else if err := validateField(metric.Field); err != nil {
@@ -154,6 +162,31 @@ func validateSpec(spec Spec) error {
 	}
 
 	return nil
+}
+
+// isDistinctCount 判断指标是否为去重计数
+func isDistinctCount(metric Metric) bool {
+	return metric.Func == Count && metric.Distinct
+}
+
+// isDistinctSum 判断指标是否为去重求和
+func isDistinctSum(metric Metric) bool {
+	return metric.Func == Sum && metric.Distinct
+}
+
+// isDistinctMetric 判断指标是否为已支持的去重指标
+func isDistinctMetric(metric Metric) bool {
+	return metric.Distinct && supportsDistinct(metric.Func)
+}
+
+// supportsDistinct 判断聚合函数是否支持去重修饰
+func supportsDistinct(fn Func) bool {
+	switch fn {
+	case Count, Sum:
+		return true
+	default:
+		return false
+	}
 }
 
 // validateField 校验字段是否为安全的点分标识符

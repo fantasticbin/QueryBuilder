@@ -15,7 +15,11 @@ func (minimalQuerier) Query(context.Context) (*Result[specChainRow], error) { re
 func (minimalQuerier) Explain(context.Context) (string, error)              { return "", nil }
 func (minimalQuerier) Meta() Meta                                           { return Meta{} }
 
-var _ Querier[specChainRow] = minimalQuerier{}
+var (
+	_ Querier[specChainRow]             = minimalQuerier{}
+	_ SpecConfigurer[specChainRow]      = (*MongoBuilder[specChainRow])(nil)
+	_ SpecChainConfigurer[specChainRow] = (*MongoBuilder[specChainRow])(nil)
+)
 
 func TestBuilderSpecChain(t *testing.T) {
 	t.Parallel()
@@ -24,7 +28,9 @@ func TestBuilderSpecChain(t *testing.T) {
 	builder.GroupBy("region", "region").
 		GroupByDesc("customer.tier", "tier").
 		Count("order_count").
+		CountDistinct("customer.id", "customer_count").
 		Sum("amount", "amount_sum").
+		SumDistinct("amount", "unique_amount_sum").
 		Avg("amount", "amount_avg").
 		Min("amount", "amount_min").
 		Max("amount", "amount_max").
@@ -37,7 +43,9 @@ func TestBuilderSpecChain(t *testing.T) {
 		},
 		Metrics: []Metric{
 			{Func: Count, Alias: "order_count"},
+			{Func: Count, Field: "customer.id", Alias: "customer_count", Distinct: true},
 			{Func: Sum, Field: "amount", Alias: "amount_sum"},
+			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
 			{Func: Avg, Field: "amount", Alias: "amount_avg"},
 			{Func: Min, Field: "amount", Alias: "amount_min"},
 			{Func: Max, Field: "amount", Alias: "amount_max"},
@@ -68,6 +76,27 @@ func TestBuilderSpecSetters(t *testing.T) {
 		Groups:  []Group{{Field: "region", Alias: "region", Descending: true}},
 		Metrics: []Metric{{Func: Count, Alias: "total"}},
 		Limit:   10,
+	}
+	got := builder.Meta().Spec
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("unexpected spec: %#v", got)
+	}
+}
+
+func TestBuilderConfigureSpec(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[specChainRow](nil, Spec{})
+	builder.ConfigureSpec(func(spec *SpecBuilder) {
+		spec.GroupBy("region", "region").
+			Count("total").
+			SetLimit(30)
+	}, nil)
+
+	expected := Spec{
+		Groups:  []Group{{Field: "region", Alias: "region"}},
+		Metrics: []Metric{{Func: Count, Alias: "total"}},
+		Limit:   30,
 	}
 	got := builder.Meta().Spec
 	if !reflect.DeepEqual(got, expected) {
@@ -136,6 +165,36 @@ func TestBuilderSpecChainIsolation(t *testing.T) {
 		t.Fatalf("meta spec shares slices with builder: %#v", got)
 	}
 }
+
+func TestSpecBuilderIsolation(t *testing.T) {
+	t.Parallel()
+
+	initial := Spec{
+		Groups:  make([]Group, 1, 2),
+		Metrics: make([]Metric, 1, 2),
+	}
+	initial.Groups[0] = Group{Field: "region", Alias: "region"}
+	initial.Metrics[0] = Metric{Func: Count, Alias: "total"}
+
+	builder := NewSpecBuilder(initial)
+	builder.GroupBy("customer.tier", "tier").Sum("amount", "amount_sum")
+
+	if len(initial.Groups) != 1 || len(initial.Metrics) != 1 || initial.Limit != 0 {
+		t.Fatalf("initial spec was mutated: %#v", initial)
+	}
+
+	built := builder.Spec()
+	if len(built.Groups) != 2 || len(built.Metrics) != 2 || built.Limit != defaultLimit {
+		t.Fatalf("unexpected built spec: %#v", built)
+	}
+
+	built.Groups[0].Alias = "changed"
+	built.Metrics[0].Alias = "changed"
+	if got := builder.Spec(); got.Groups[0].Alias != "region" || got.Metrics[0].Alias != "total" {
+		t.Fatalf("SpecBuilder shares slices with returned spec: %#v", got)
+	}
+}
+
 func TestValidateSpec(t *testing.T) {
 	t.Parallel()
 
@@ -153,6 +212,18 @@ func TestValidateSpec(t *testing.T) {
 					{Func: Sum, Field: "amount", Alias: "amount_sum"},
 				},
 				Limit: 50,
+			},
+		},
+		{
+			name: "valid distinct count",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Field: "customer.id", Alias: "customer_count", Distinct: true}},
+			},
+		},
+		{
+			name: "valid distinct sum",
+			spec: Spec{
+				Metrics: []Metric{{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true}},
 			},
 		},
 		{
@@ -187,6 +258,27 @@ func TestValidateSpec(t *testing.T) {
 			name: "count rejects field",
 			spec: Spec{
 				Metrics: []Metric{{Func: Count, Field: "id", Alias: "total"}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "distinct count requires field",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Alias: "customer_count", Distinct: true}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "distinct count rejects unsafe field",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Field: "customer.id; DROP", Alias: "customer_count", Distinct: true}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "distinct rejects unsupported metric",
+			spec: Spec{
+				Metrics: []Metric{{Func: Avg, Field: "amount", Alias: "amount_avg", Distinct: true}},
 			},
 			err: ErrInvalidSpec,
 		},

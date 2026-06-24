@@ -111,11 +111,21 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 	for _, metric := range b.spec.Metrics {
 		alias := quoteGormIdentifier(db, metric.Alias)
 		if metric.Func == Count {
-			selects = append(selects, "COUNT(*) AS "+alias)
+			if isDistinctCount(metric) {
+				field := quoteGormIdentifier(db, metric.Field)
+				selects = append(selects, "COUNT(DISTINCT "+field+") AS "+alias)
+			} else {
+				selects = append(selects, "COUNT(*) AS "+alias)
+			}
 			continue
 		}
 		field := quoteGormIdentifier(db, metric.Field)
-		selects = append(selects, strings.ToUpper(metric.Func.String())+"("+field+") AS "+alias)
+		fn := strings.ToUpper(metric.Func.String())
+		if isDistinctSum(metric) {
+			selects = append(selects, fn+"(DISTINCT "+field+") AS "+alias)
+		} else {
+			selects = append(selects, fn+"("+field+") AS "+alias)
+		}
 	}
 
 	query = query.Select(strings.Join(selects, ", "))

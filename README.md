@@ -1361,11 +1361,11 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 
 ### Aggregate Statistics
 
-Use the `agg` package when you need counts, totals, averages, or similar summaries. Describe the grouping and metrics with an `agg.Spec`, then run it with the builder for your data source.
+Use `agg` when a normal list query is not enough and you need a small summary table: orders by region, total sales, average amount, unique buyers, and similar report-style numbers. You can pass a complete `agg.Spec` to the constructor, or start with an empty spec and build it through the chain methods.
 
 #### Basic Usage
 
-This example counts paid orders and sums their amount for each region:
+This example summarizes paid orders by region. It counts all orders, counts unique buyers, sums the paid amount, and sums unique amount values:
 
 ```go
 import (
@@ -1378,15 +1378,18 @@ import (
 )
 
 type Order struct {
-    ID     uint64
-    Region string
-    Amount float64
+    ID         uint64
+    Region     string
+    CustomerID uint64
+    Amount     float64
 }
 
 type SalesSummary struct {
-    Region string  `gorm:"column:region" bson:"region" json:"region"`
-    Count  int64   `gorm:"column:order_count" bson:"order_count" json:"order_count"`
-    Amount float64 `gorm:"column:amount_sum" bson:"amount_sum" json:"amount_sum"`
+    Region          string  `gorm:"column:region" bson:"region" json:"region"`
+    Count           int64   `gorm:"column:order_count" bson:"order_count" json:"order_count"`
+    BuyerCount      int64   `gorm:"column:buyer_count" bson:"buyer_count" json:"buyer_count"`
+    UniqueAmountSum float64 `gorm:"column:unique_amount_sum" bson:"unique_amount_sum" json:"unique_amount_sum"`
+    Amount          float64 `gorm:"column:amount_sum" bson:"amount_sum" json:"amount_sum"`
 }
 
 func summarize(ctx context.Context, db *gorm.DB) error {
@@ -1394,7 +1397,9 @@ func summarize(ctx context.Context, db *gorm.DB) error {
     query := agg.NewGormBuilder[Order, SalesSummary](data, agg.Spec{})
     query.GroupBy("region", "region").
         Count("order_count").
+        CountDistinct("customer_id", "buyer_count").
         Sum("amount", "amount_sum").
+        SumDistinct("amount", "unique_amount_sum").
         SetLimit(100)
     query.SetFilter(func(db *gorm.DB) *gorm.DB {
         return db.Where("status = ?", "paid")
@@ -1405,22 +1410,28 @@ func summarize(ctx context.Context, db *gorm.DB) error {
         return err
     }
     for _, row := range result.Rows {
-        fmt.Println(row.Region, row.Count, row.Amount)
+        fmt.Println(row.Region, row.Count, row.BuyerCount, row.UniqueAmountSum, row.Amount)
     }
     return nil
 }
 ```
 
-`GroupBy` adds grouping fields to the builder, and methods such as `Count` and `Sum` add metrics to the builder's internal `Spec`. If you prefer the explicit form, pass `agg.Spec{Groups: ..., Metrics: ..., Limit: ...}` to the constructor and keep using the same builder methods to adjust it later. Each `Alias` must match a tag on the result struct. For example, `amount_sum` is decoded into `SalesSummary.Amount`. Add `gorm`, `bson`, and `json` tags when the same result type is used with more than one data source. Groups are sorted in ascending order by default; use `GroupByDesc` or `AddGroup(agg.Group{...})` with `Descending: true` for descending order.
+`GroupBy` adds the fields you want to summarize by. `Count`, `CountDistinct`, `Sum`, `SumDistinct`, `Avg`, `Min`, and `Max` add the numbers you want in the result. Each alias must match a tag on the result struct, so `buyer_count` above is decoded into `SalesSummary.BuyerCount`. Add `gorm`, `bson`, and `json` tags when one result type is shared across multiple data sources.
+
+Groups are sorted in ascending order by default. Use `GroupByDesc` or `AddGroup(agg.Group{...})` with `Descending: true` when a group key should be sorted descending.
 
 #### Switching Data Sources
 
-The same `Spec` works with each builder:
+The same `Spec` can be reused with different builders:
 
 ```go
 spec := agg.Spec{
-    Groups:  []agg.Group{{Field: "region", Alias: "region"}},
-    Metrics: []agg.Metric{{Func: agg.Count, Alias: "order_count"}},
+    Groups: []agg.Group{{Field: "region", Alias: "region"}},
+    Metrics: []agg.Metric{
+        {Func: agg.Count, Alias: "order_count"},
+        {Func: agg.Count, Field: "customer_id", Alias: "buyer_count", Distinct: true},
+        {Func: agg.Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
+    },
 }
 
 gormQuery := agg.NewGormBuilder[Order, SalesSummary](data, spec)
@@ -1428,14 +1439,16 @@ mongoQuery := agg.NewMongoBuilder[SalesSummary](data, spec)
 esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
 ```
 
-All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. The `SetFilter` argument is specific to GORM, MongoDB, or Elasticsearch, so filters keep the native syntax of each data source.
+All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. `SetFilter` stays native to the data source: GORM uses `func(*gorm.DB) *gorm.DB`, MongoDB uses `bson.D`, and Elasticsearch uses `elastic.Query`.
 
 #### Supported Functions
 
 | Function | Builder method | Purpose | `Field` |
 |----------|----------------|---------|---------|
 | `agg.Count` | `.Count(alias)` | Count matching records | Omit |
+| `agg.Count` with `Distinct: true` | `.CountDistinct(field, alias)` | Count unique non-null field values | Required |
 | `agg.Sum` | `.Sum(field, alias)` | Calculate a sum | Required |
+| `agg.Sum` with `Distinct: true` | `.SumDistinct(field, alias)` | Sum unique non-null field values | Required |
 | `agg.Avg` | `.Avg(field, alias)` | Calculate an average | Required |
 | `agg.Min` | `.Min(field, alias)` | Find the minimum | Required |
 | `agg.Max` | `.Max(field, alias)` | Find the maximum | Required |
@@ -1444,20 +1457,22 @@ At least one metric is required, and aliases must be unique across groups and me
 
 #### Inspecting the Query
 
-Call `Explain` while debugging. It returns the generated SQL, MongoDB pipeline, or Elasticsearch DSL without executing the query:
+Call `Explain` when you want to see what will be sent to the data source. It returns SQL, a MongoDB aggregation pipeline, or Elasticsearch DSL without executing the query:
 
 ```go
 statement, err := query.Explain(ctx)
 ```
+
+For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINCT field)`, and MongoDB uses exact two-stage `$group` branches. Elasticsearch uses approximate `cardinality` for distinct counts and `scripted_metric` for distinct sums; high-cardinality distinct sums keep unique values in aggregation state, so use them only on bounded numeric fields.
 
 #### Current Limits
 
 - Grouped queries return at most 100 rows by default; `Limit` cannot exceed 5000
 - A query without `Groups` returns one summary row
 - Records with a null or missing group field are excluded; null metric values are ignored
-- HAVING, distinct metrics, metric ordering, raw expressions, and grouped cursor pagination are not supported yet
+- Distinct is currently supported only for `Count` and `Sum`
+- HAVING, metric ordering, raw expressions, and grouped cursor pagination are not supported yet
 - Cache and observability middleware for aggregate queries lives in `middleware/agg`
-
 ---
 
 ## API Reference
