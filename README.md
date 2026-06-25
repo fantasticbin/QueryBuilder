@@ -11,6 +11,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 ## Features
 
 - **Multi-DataSource Builders**: Dedicated `GormBuilder`, `MongoBuilder`, and `ElasticSearchBuilder` with strongly-typed `SetFilter` / `SetSort` methods.
+- **Aggregate Query Builders**: The `agg` package provides dedicated builders for grouped statistics on GORM, MongoDB, and ElasticSearch, including `Count`, `CountDistinct`, `Sum`, `SumDistinct`, `Avg`, `Min`, `Max`, typed result decoding, `Explain`, and aggregate middleware in `middleware`.
 - **Self-Referential Generics**: Uses Go 1.26 self-referential generic constraints for type-safe fluent chaining.
 - **Zero Type Assertions**: All filter/sort operations are fully typed — no `any` casts at runtime.
 - **Scope Helpers**: Built-in `SetScope` + `NewGormScope` / `NewMongoScope` / `NewElasticSearchScope` — set filter/sort in one line under `List` mode, no manual middleware or type assertions needed.
@@ -79,7 +80,6 @@ import (
     "context"
     "gorm.io/gorm"
     builder "github.com/fantasticbin/QueryBuilder/v2"
-    "github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 func main() {
@@ -87,7 +87,7 @@ func main() {
     db := &gorm.DB{} // your GORM instance
 
     // Create a GORM builder
-    b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+    b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
     // Set strongly-typed filter & sort (GormScope = func(*gorm.DB) *gorm.DB)
     b.SetFilter(func(db *gorm.DB) *gorm.DB {
@@ -120,15 +120,15 @@ type User struct {
 
 ### Data Source Adapter Registration
 
-Register data sources through `core.NewDBProxyWithAdapters(...)` and the corresponding adapter type:
+Register data sources through top-level `builder.NewDBProxyWithAdapters(...)` and the corresponding `builder.New*Adapter(...)`; adapter-only setup usually does not need an extra `core` import:
 
 ```go
-gormData := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
-mongoData := core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection))
-esData := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient))
+gormData := builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))
+mongoData := builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection))
+esData := builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient))
 ```
 
-`builder.NewDBProxy(db, mongo, es)` is kept only for backward compatibility with earlier versions. New code should use adapter registration via `core.NewDBProxyWithAdapters(...)`; the compatibility constructor will be removed in a future release.
+`builder.NewDBProxy(db, mongo, es)` is kept only for backward compatibility with earlier versions. New code should use adapter registration via `builder.NewDBProxyWithAdapters(...)`; the compatibility constructor will be removed in a future release.
 
 ### 2. Using List with Options Pattern
 
@@ -161,7 +161,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) (*core.ListResult[mo
 
     result, err := list.Query(
         ctx,
-        builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(model.DB))),
+        builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(model.DB))),
         builder.WithStart(req.Start),
         builder.WithLimit(req.Limit),
     )
@@ -206,13 +206,13 @@ Use `SetFields` to select only specific fields, reducing bandwidth and memory us
 
 ```go
 // Direct builder usage
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFields("id", "name", "email")
 result, err := b.QueryList(ctx)
 
 // Via List options
 result, err := list.Query(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithFields("id", "name", "email"),
 )
 ```
@@ -230,7 +230,7 @@ Field selection works across all data sources:
 Use `BeforeQueryHook` and `AfterQueryHook` for lightweight pre/post query logic:
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
 // Before hook: inject trace ID into context
 b.SetBeforeQueryHook(func(ctx context.Context) context.Context {
@@ -258,7 +258,7 @@ QueryBuilder follows Go's standard `context` pattern for timeout control — no 
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 defer cancel()
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -296,7 +296,7 @@ Each dedicated builder provides a `Clone()` method that creates a fully independ
 
 ```go
 // Build a "template" with common configuration
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 }).SetSort(func(db *gorm.DB) *gorm.DB {
@@ -311,7 +311,7 @@ page2 := base.Clone().SetStart(50).SetLimit(50)
 #### Concurrent Forked Queries (Best Practice)
 
 ```go
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 }).SetFields("id", "name", "email").SetNeedTotal(true)
@@ -341,7 +341,7 @@ wg.Wait()
 #### Clone with Different Filters
 
 ```go
-base := builder.NewMongoBuilder[Order](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+base := builder.NewMongoBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 base.SetFields("id", "user_id", "amount").SetLimit(20)
 
 // Fork into different filter conditions
@@ -355,7 +355,7 @@ go func() { completedOrders, _ := completed.QueryList(ctx) }()
 #### Clone with Additional Middleware
 
 ```go
-base := builder.NewGormBuilder[Product](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[Product](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(filterScope).SetLimit(100)
 
 // Each clone can have its own middleware stack
@@ -435,7 +435,7 @@ Use it with the cache middleware:
 ```go
 cache := NewGCacheProvider(1000) // LRU cache with 1000 entries
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
     meta := b.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
@@ -499,7 +499,7 @@ keyBuilder := middleware.DefaultCacheKeyBuilder{
 ```go
 cache := NewGCacheProvider(1000)
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ? AND role = ?", "active", "admin")
 })
@@ -548,7 +548,7 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
 Since `CacheKeyHints` is managed by `DefaultCacheKeyBuilder` (not by the builder base class), each `Clone` instance can safely use its own cache middleware with different hints — no shared state, no data corruption:
 
 ```go
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFields("id", "name", "email").SetNeedTotal(true)
 
 // Each clone uses its own cache middleware with different hints
@@ -647,7 +647,7 @@ obs := middleware.ObservabilityMiddleware[User](middleware.ObservabilityOptions{
     },
 })
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.Use(obs)
 result, err := b.QueryList(ctx)
 ```
@@ -771,7 +771,7 @@ Each dedicated builder provides an `Explain` method to preview the generated que
 
 ```go
 // GORM — returns SQL statement
-gormBuilder := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+gormBuilder := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 gormBuilder.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -779,12 +779,12 @@ sql, err := gormBuilder.Explain(ctx)
 // Output: SELECT * FROM `users` WHERE status = ? | args: [1]
 
 // MongoDB — returns JSON filter/sort/projection
-mongoBuilder := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+mongoBuilder := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 mongoBuilder.SetFilter(bson.D{{Key: "status", Value: "active"}})
 jsonStr, err := mongoBuilder.Explain(ctx)
 
 // ElasticSearch — returns Query DSL JSON
-esBuilder := builder.NewElasticSearchBuilder[Doc](core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index")
+esBuilder := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index")
 esBuilder.SetFilter(elastic.NewTermQuery("status", "active"))
 dsl, err := esBuilder.Explain(ctx)
 ```
@@ -869,7 +869,7 @@ This keeps cursor pagination deterministic and avoids missing cursor-field confi
 ctx := context.Background()
 db := &gorm.DB{} // your GORM instance
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -894,7 +894,7 @@ for user, err := range b.QueryCursor(ctx) {
 For composite sorting scenarios (e.g., `created_at` + `id`):
 
 ```go
-b := builder.NewGormBuilder[Order](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("created_at", "id") // multi-field cursor
 b.SetLimit(50)
 
@@ -917,7 +917,7 @@ list.SetScope(builder.NewGormScope[User](
 ))
 
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(100),
 ) {
@@ -931,7 +931,7 @@ for user, err := range list.QueryCursor(ctx,
 #### MongoDB Cursor Pagination
 
 ```go
-b := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 b.SetFilter(bson.D{{Key: "status", Value: "active"}})
 b.SetCursorField("created_at", "_id")
 b.SetLimit(100)
@@ -950,7 +950,7 @@ ES cursor pagination uses the `search_after` API internally. Sort values from th
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
-    core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index",
+    builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index",
 )
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at")
@@ -975,7 +975,7 @@ By default, cursor pagination starts from the beginning of the dataset. You can 
 
 ```go
 // Direct builder usage
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("id")
 b.SetStart(100) // Start from id > 100
 b.SetLimit(10)
@@ -989,7 +989,7 @@ for user, err := range b.QueryCursor(ctx) {
 
 // Via List options
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithStart(100), // Start from id > 100
     builder.WithLimit(10),
@@ -1005,7 +1005,7 @@ for user, err := range list.QueryCursor(ctx,
 
 ```go
 // Direct builder usage — multi-field cursor
-b := builder.NewGormBuilder[Order](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("created_at", "id")
 b.SetCursorValue(int64(1700000000), uint32(500)) // Resume from (created_at > 1700000000, id > 500)
 b.SetLimit(10)
@@ -1019,7 +1019,7 @@ for order, err := range b.QueryCursor(ctx) {
 
 // Via List options
 for order, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("created_at", "id"),
     builder.WithCursorValue(int64(1700000000), uint32(500)),
     builder.WithLimit(10),
@@ -1048,7 +1048,7 @@ for order, err := range list.QueryCursor(ctx,
 ```go
 // Fetch one page of data with total count
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithCursorValue(uint32(lastSeenID)),
     builder.WithLimit(20),
@@ -1069,7 +1069,7 @@ for user, err := range list.QueryCursor(ctx,
 ```go
 // Stream all records without counting — best for batch processing / export
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(500),
     builder.WithNeedPagination(false), // iterate all batches
@@ -1090,7 +1090,7 @@ Exact total counts can dominate latency on large datasets. Keep `needTotal=true`
 
 ```go
 result, err := list.Query(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithLimit(20),
     builder.WithNeedTotal(true),
     builder.WithTotalLimit(10000),
@@ -1131,7 +1131,7 @@ This option applies to `QueryList`, `QueryCursor` first-batch totals, `QueryPage
 ##### Direct Builder Usage
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -1167,14 +1167,14 @@ list.SetScope(builder.NewGormScope[User](
 
 // First page
 page, err := list.QueryPage(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(20),
 )
 
 // Next page with cursor values
 nextPage, err := list.QueryPage(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithCursorValue(page.NextCursorValues...),
     builder.WithLimit(20),
@@ -1184,7 +1184,7 @@ nextPage, err := list.QueryPage(ctx,
 ##### MongoDB QueryPage
 
 ```go
-b := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 b.SetFilter(bson.D{{Key: "status", Value: "active"}})
 b.SetCursorField("created_at", "_id")
 b.SetLimit(20)
@@ -1207,7 +1207,7 @@ For ElasticSearch, `QueryPage` internally manages PIT (Point-in-Time) lifecycle 
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
-    core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index",
+    builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index",
 )
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at", "_id")
@@ -1241,7 +1241,7 @@ for user, err := range b.QueryCursor(ctx) {
 When cursor fields are configured, `Explain` outputs the cursor query mode's first-batch query:
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -1270,7 +1270,7 @@ list.SetDataSource(builder.ElasticSearch)
 list.SetScope(builder.NewElasticSearchScope[Doc](elastic.NewMatchAllQuery()))
 
 page, err := list.QueryPageWithPIT(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient))),
     builder.WithESIndex("my_index"),
     builder.WithCursorField("created_at", "id"),
     builder.WithPITID(prevPitID),
@@ -1288,7 +1288,7 @@ page, err := list.QueryPageWithPIT(ctx,
 | `PitID` | `string` | Point-in-Time ID for next request (empty when `HasMore=false`) |
 
 ```go
-es := builder.NewElasticSearchBuilder[Doc](core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index")
+es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index")
 es.SetFilter(elastic.NewMatchAllQuery()).
    SetCursorField("created_at", "id").
    SetLimit(20)
@@ -1372,8 +1372,8 @@ import (
     "context"
     "fmt"
 
+    builder "github.com/fantasticbin/QueryBuilder/v2"
     "github.com/fantasticbin/QueryBuilder/v2/agg"
-    "github.com/fantasticbin/QueryBuilder/v2/core"
     "gorm.io/gorm"
 )
 
@@ -1393,8 +1393,8 @@ type SalesSummary struct {
 }
 
 func summarize(ctx context.Context, db *gorm.DB) error {
-    data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
-    query := agg.NewGormBuilder[Order, SalesSummary](data, agg.Spec{})
+    data := builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))
+    query := agg.NewGormBuilder[Order, SalesSummary](data)
     query.GroupBy("region", "region").
         Count("order_count").
         CountDistinct("customer_id", "buyer_count").
@@ -1422,7 +1422,7 @@ Groups are sorted in ascending order by default. Use `GroupByDesc` or `AddGroup(
 
 #### Switching Data Sources
 
-The same `Spec` can be reused with different builders:
+Builders start with an empty `Spec` so the common path is fluent configuration. When a `Spec` is built elsewhere, it can still be reused with `SetSpec`:
 
 ```go
 spec := agg.Spec{
@@ -1434,9 +1434,14 @@ spec := agg.Spec{
     },
 }
 
-gormQuery := agg.NewGormBuilder[Order, SalesSummary](data, spec)
-mongoQuery := agg.NewMongoBuilder[SalesSummary](data, spec)
-esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
+gormQuery := agg.NewGormBuilder[Order, SalesSummary](data)
+gormQuery.SetSpec(spec)
+
+mongoQuery := agg.NewMongoBuilder[SalesSummary](data)
+mongoQuery.SetSpec(spec)
+
+esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders")
+esQuery.SetSpec(spec)
 ```
 
 All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. `SetFilter` stays native to the data source: GORM uses `func(*gorm.DB) *gorm.DB`, MongoDB uses `bson.D`, and Elasticsearch uses `elastic.Query`.
@@ -1472,7 +1477,7 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 - Records with a null or missing group field are excluded; null metric values are ignored
 - Distinct is currently supported only for `Count` and `Sum`
 - HAVING, metric ordering, raw expressions, and grouped cursor pagination are not supported yet
-- Cache and observability middleware for aggregate queries lives in `middleware/agg`
+- Cache and observability middleware for aggregate queries lives in `middleware` as `AggregateCacheMiddleware` and `AggregateObservabilityMiddleware`
 ---
 
 ## API Reference

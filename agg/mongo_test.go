@@ -21,17 +21,12 @@ func TestMongoBuilderExplain(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := NewMongoBuilder[mongoSummary](data, Spec{
-		Groups: []Group{
-			{Field: "region", Alias: "region", Descending: true},
-			{Field: "channel", Alias: "channel"},
-		},
-		Metrics: []Metric{
-			{Func: Count, Alias: "total"},
-			{Func: Avg, Field: "amount", Alias: "amount_avg"},
-		},
-		Limit: 25,
-	})
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupByDesc("region", "region").
+		GroupBy("channel", "channel").
+		Count("total").
+		Avg("amount", "amount_avg").
+		SetLimit(25)
 	builder.SetFilter(bson.D{{Key: "status", Value: "paid"}})
 
 	explanation, err := builder.Explain(context.Background())
@@ -69,16 +64,13 @@ func TestMongoBuilderExplainDistinctMetrics(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := NewMongoBuilder[mongoSummary](data, Spec{
-		Groups: []Group{{Field: "region", Alias: "region", Descending: true}},
-		Metrics: []Metric{
-			{Func: Count, Alias: "total"},
-			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
-			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
-			{Func: Avg, Field: "amount", Alias: "amount_avg"},
-		},
-		Limit: 10,
-	})
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupByDesc("region", "region").
+		Count("total").
+		CountDistinct("customer.id", "buyer_count").
+		SumDistinct("amount", "unique_amount_sum").
+		Avg("amount", "amount_avg").
+		SetLimit(10)
 	builder.SetFilter(bson.D{{Key: "status", Value: "paid"}})
 
 	explanation, err := builder.Explain(context.Background())
@@ -146,9 +138,8 @@ func TestMongoBuilderNestedFilterCloneIsolation(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	original := NewMongoBuilder[mongoSummary](data, Spec{
-		Metrics: []Metric{{Func: Count, Alias: "total"}},
-	})
+	original := NewMongoBuilder[mongoSummary](data)
+	original.Count("total")
 	original.SetFilter(bson.D{{
 		Key: "status",
 		Value: bson.D{{

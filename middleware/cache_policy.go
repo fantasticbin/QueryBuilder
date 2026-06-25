@@ -42,7 +42,7 @@ type DefaultCacheKeyBuilder struct {
 // 再取 SHA1 摘要生成最终 key，格式为 "qb:cache:<hex>"
 func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) string {
 	payload := map[string]any{"prefix": b.Prefix}
-	payload["datasource"] = meta.DataSource
+	payload["datasource"] = meta.DataSource.String()
 	payload["fields"] = append([]string(nil), meta.Fields...)
 	payload["pagination"] = map[string]any{
 		"start":          meta.Start,
@@ -55,12 +55,33 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 		"cursorFields":   append([]string(nil), meta.CursorFields...),
 	}
 
-	// 确定 hints：优先使用静态 Hints，为空时尝试 HintsProvider
-	hints := b.Hints
-	if hints.Filter == nil && hints.Sort == nil && len(hints.Extra) == 0 && b.HintsProvider != nil {
-		hints = b.HintsProvider(ctx)
-	}
+	hints := resolveCacheKeyHints(ctx, b.Hints, b.HintsProvider)
+	appendCacheKeyHints(payload, hints)
 
+	canonical := canonicalCachePayload(payload)
+	h := sha1.Sum([]byte(canonical))
+	return fmt.Sprintf("qb:cache:%s", hex.EncodeToString(h[:]))
+}
+
+// resolveCacheKeyHints 在静态 hints 为空时延迟调用 provider
+func resolveCacheKeyHints(
+	ctx context.Context,
+	hints CacheKeyHints,
+	provider func(context.Context) CacheKeyHints,
+) CacheKeyHints {
+	if !hasCacheKeyHints(hints) && provider != nil {
+		return provider(ctx)
+	}
+	return hints
+}
+
+// hasCacheKeyHints 判断调用方是否显式提供了任一缓存键补充维度
+func hasCacheKeyHints(hints CacheKeyHints) bool {
+	return hints.Filter != nil || hints.Sort != nil || len(hints.Extra) > 0
+}
+
+// appendCacheKeyHints 将 filter、sort、extra 注入缓存键 payload
+func appendCacheKeyHints(payload map[string]any, hints CacheKeyHints) {
 	if hints.Filter != nil {
 		payload["filter"] = hints.Filter
 	}
@@ -70,16 +91,19 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 	if len(hints.Extra) > 0 {
 		payload["extra"] = hints.Extra
 	}
+}
 
+// canonicalCachePayload 将 payload 转换为稳定字符串，序列化失败时使用非空 fallback
+func canonicalCachePayload(payload map[string]any) string {
 	canonical, err := canonicalJSON(payload)
 	if err != nil {
 		// 兜底使用 fmt 格式，确保 key 不为空且低碰撞风险
-		canonical = fmt.Sprintf("fallback:%#v", normalizeValue(payload))
+		return fmt.Sprintf("fallback:%#v", normalizeValue(payload))
 	}
-	h := sha1.Sum([]byte(canonical))
-	return fmt.Sprintf("qb:cache:%s", hex.EncodeToString(h[:]))
+	return canonical
 }
 
+// canonicalJSON 先规范化不可序列化值，再生成稳定 JSON 字符串
 func canonicalJSON(v any) (string, error) {
 	n := normalizeValue(v)
 	buf, err := json.Marshal(n)

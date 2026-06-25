@@ -22,16 +22,13 @@ func TestElasticSearchBuilderExplain(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
-	builder := NewElasticSearchBuilder[elasticSummary](data, "orders", Spec{
-		Groups: []Group{{Field: "region.keyword", Alias: "region", Descending: true}},
-		Metrics: []Metric{
-			{Func: Count, Alias: "total"},
-			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
-			{Func: Sum, Field: "amount", Alias: "amount_sum"},
-			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
-		},
-		Limit: 30,
-	})
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupByDesc("region.keyword", "region").
+		Count("total").
+		CountDistinct("customer.id", "buyer_count").
+		Sum("amount", "amount_sum").
+		SumDistinct("amount", "unique_amount_sum").
+		SetLimit(30)
 	builder.SetFilter(elastic.NewTermQuery("status", "paid"))
 
 	explanation, err := builder.Explain(context.Background())
@@ -63,15 +60,12 @@ func TestElasticSearchBuilderDecodeResult(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
-	builder := NewElasticSearchBuilder[elasticSummary](data, "orders", Spec{
-		Groups: []Group{{Field: "region.keyword", Alias: "region"}},
-		Metrics: []Metric{
-			{Func: Count, Alias: "total"},
-			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
-			{Func: Sum, Field: "amount", Alias: "amount_sum"},
-			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
-		},
-	})
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		CountDistinct("customer.id", "buyer_count").
+		Sum("amount", "amount_sum").
+		SumDistinct("amount", "unique_amount_sum")
 
 	root := json.RawMessage(`{
 		"doc_count": 3,
@@ -104,9 +98,8 @@ func TestElasticSearchBuilderDecodeScalarEmptyValues(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
-	builder := NewElasticSearchBuilder[elasticSummary](data, "orders", Spec{
-		Metrics: []Metric{{Func: Count, Alias: "total"}, {Func: Sum, Field: "amount", Alias: "amount_sum"}},
-	})
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.Count("total").Sum("amount", "amount_sum")
 	root := json.RawMessage(`{"doc_count":0,"amount_sum":{"value":null}}`)
 	result, err := builder.decodeResult(&elastic.SearchResult{
 		Aggregations: elastic.Aggregations{elasticRootAggregation: root},

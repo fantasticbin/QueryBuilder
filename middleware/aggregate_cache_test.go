@@ -1,4 +1,4 @@
-package agg
+package middleware
 
 import (
 	"context"
@@ -10,39 +10,22 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-type memoryCache struct {
-	values map[string][]byte
-}
-
-func newMemoryCache() *memoryCache {
-	return &memoryCache{values: make(map[string][]byte)}
-}
-
-func (c *memoryCache) Get(_ context.Context, key string) ([]byte, bool) {
-	value, ok := c.values[key]
-	return value, ok
-}
-
-func (c *memoryCache) Set(_ context.Context, key string, value []byte, _ time.Duration) {
-	c.values[key] = append([]byte{}, value...)
-}
-
-type cacheRow struct {
+type aggregateCacheRow struct {
 	Total int64 `json:"total" bson:"total"`
 }
 
-func TestCacheMiddlewareHit(t *testing.T) {
+func TestAggregateCacheMiddlewareHit(t *testing.T) {
 	t.Parallel()
 
-	cache := newMemoryCache()
+	cache := newMockCache()
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := queryagg.NewMongoBuilder[cacheRow](data, queryagg.Spec{
+	builder := queryagg.NewMongoBuilder[aggregateCacheRow](data, queryagg.Spec{
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
-	builder.Use(CacheWithKeyBuilder[cacheRow](
+	builder.Use(AggregateCacheMiddlewareWithKeyBuilder[aggregateCacheRow](
 		cache,
 		time.Minute,
-		DefaultCacheKeyBuilder{
+		AggregateDefaultCacheKeyBuilder{
 			Prefix: "orders",
 			Hints:  CacheKeyHints{Filter: map[string]any{"status": "paid"}},
 		},
@@ -50,11 +33,11 @@ func TestCacheMiddlewareHit(t *testing.T) {
 	queryCount := 0
 	builder.Use(func(
 		context.Context,
-		queryagg.Querier[cacheRow],
-		queryagg.Handler[cacheRow],
-	) (*queryagg.Result[cacheRow], error) {
+		queryagg.Querier[aggregateCacheRow],
+		queryagg.Handler[aggregateCacheRow],
+	) (*queryagg.Result[aggregateCacheRow], error) {
 		queryCount++
-		return &queryagg.Result[cacheRow]{Rows: []*cacheRow{{Total: 7}}}, nil
+		return &queryagg.Result[aggregateCacheRow]{Rows: []*aggregateCacheRow{{Total: 7}}}, nil
 	})
 
 	for range 2 {
@@ -71,10 +54,10 @@ func TestCacheMiddlewareHit(t *testing.T) {
 	}
 }
 
-func TestDefaultCacheKeyBuilderIsolation(t *testing.T) {
+func TestAggregateDefaultCacheKeyBuilderIsolation(t *testing.T) {
 	t.Parallel()
 
-	builder := DefaultCacheKeyBuilder{Prefix: "orders"}
+	builder := AggregateDefaultCacheKeyBuilder{Prefix: "orders"}
 	base := queryagg.Meta{
 		DataSource: core.MongoDB,
 		Spec:       queryagg.Spec{Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}}},

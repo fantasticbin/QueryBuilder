@@ -3,7 +3,6 @@ package builder
 import (
 	"github.com/olivere/elastic/v7"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"gorm.io/gorm"
 )
 
 // ScopeConfigurer 构建器配置回调类型
@@ -19,7 +18,7 @@ type ScopeConfigurer[R any] func(querier Querier[R])
 //
 //	filter - GORM 过滤条件（GormScope 类型），可为 nil
 //	sort   - GORM 排序条件（GormScope 类型），可为 nil
-func NewGormScope[R any](filter func(*gorm.DB) *gorm.DB, sort func(*gorm.DB) *gorm.DB) ScopeConfigurer[R] {
+func NewGormScope[R any](filter GormScope, sort GormScope) ScopeConfigurer[R] {
 	return func(querier Querier[R]) {
 		if gb, ok := querier.(*GormBuilder[R]); ok {
 			if filter != nil {

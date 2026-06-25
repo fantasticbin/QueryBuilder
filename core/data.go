@@ -16,11 +16,11 @@ var (
 )
 
 // DataSource 数据源类型枚举
-type DataSource int
+type DataSource uint8
 
 const (
 	// Gorm 数据源
-	Gorm DataSource = iota
+	Gorm DataSource = iota + 1
 	// MongoDB 数据源
 	MongoDB
 	// ElasticSearch 数据源

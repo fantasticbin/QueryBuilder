@@ -8,18 +8,30 @@ import (
 )
 
 // Handler 表示聚合查询执行函数
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type Handler[A any] func(context.Context) (*Result[A], error)
 
 // Middleware 用于包装聚合查询执行过程
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type Middleware[A any] func(context.Context, Querier[A], Handler[A]) (*Result[A], error)
 
 // BeforeHook 在聚合中间件链执行前运行
 type BeforeHook func(context.Context) context.Context
 
 // AfterHook 在聚合中间件链执行后运行
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type AfterHook[A any] func(context.Context, *Result[A], error)
 
 // Querier 是所有聚合构建器共同实现的执行与元信息接口
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type Querier[A any] interface {
 	Query(context.Context) (*Result[A], error)
 	Explain(context.Context) (string, error)
@@ -27,6 +39,9 @@ type Querier[A any] interface {
 }
 
 // PipelineConfigurer 定义聚合中间件与钩子配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type PipelineConfigurer[A any] interface {
 	Use(Middleware[A]) Builder[A]
 	SetBeforeHook(BeforeHook) Builder[A]
@@ -34,16 +49,25 @@ type PipelineConfigurer[A any] interface {
 }
 
 // SpecConfigurer 定义聚合规范批量配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type SpecConfigurer[A any] interface {
 	ConfigureSpec(...SpecOption) Builder[A]
 }
 
 // SpecSetter 定义聚合规范整体替换能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type SpecSetter[A any] interface {
 	SetSpec(Spec) Builder[A]
 }
 
 // GroupConfigurer 定义聚合分组配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type GroupConfigurer[A any] interface {
 	SetGroups(...Group) Builder[A]
 	AddGroup(Group) Builder[A]
@@ -52,6 +76,9 @@ type GroupConfigurer[A any] interface {
 }
 
 // MetricConfigurer 定义聚合指标配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type MetricConfigurer[A any] interface {
 	SetMetrics(...Metric) Builder[A]
 	AddMetric(Metric) Builder[A]
@@ -66,11 +93,17 @@ type MetricConfigurer[A any] interface {
 }
 
 // LimitConfigurer 定义聚合结果数量上限配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type LimitConfigurer[A any] interface {
 	SetLimit(limit uint32) Builder[A]
 }
 
 // SpecChainConfigurer 组合现有链式 Spec DSL，兼容已有 Builder 调用方式
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type SpecChainConfigurer[A any] interface {
 	SpecSetter[A]
 	GroupConfigurer[A]
@@ -79,6 +112,9 @@ type SpecChainConfigurer[A any] interface {
 }
 
 // Builder 组合聚合构建器的配置、执行与元信息能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type Builder[A any] interface {
 	Querier[A]
 	PipelineConfigurer[A]
@@ -86,6 +122,10 @@ type Builder[A any] interface {
 	SpecChainConfigurer[A]
 }
 
+// base 保存聚合构建器共享的配置、钩子和中间件状态
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type base[A any] struct {
 	data        *core.DBProxy
 	dataSource  core.DataSource

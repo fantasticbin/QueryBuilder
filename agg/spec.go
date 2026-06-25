@@ -94,6 +94,9 @@ func (s Spec) Clone() Spec {
 }
 
 // Result 保存解码为调用方 DTO 类型的聚合结果行
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type Result[A any] struct {
 	Rows []*A `json:"rows"`
 }

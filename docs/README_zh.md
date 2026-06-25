@@ -11,6 +11,7 @@
 ## 特性
 
 - **多数据源专属构建器**：提供 `GormBuilder`、`MongoBuilder`、`ElasticSearchBuilder`，各自拥有强类型的 `SetFilter` / `SetSort` 方法。
+- **聚合统计查询构建器**：`agg` 包提供 GORM、MongoDB、ElasticSearch 专属统计构建器，用来编写按地区、渠道、状态等维度分组的统计查询，支持 `Count` / `CountDistinct` / `Sum` / `SumDistinct` / `Avg` / `Min` / `Max`、类型安全结果解码、`Explain` 预览，以及位于 `middleware` 的统计专用中间件。
 - **自引用泛型约束**：利用 Go 1.26 自引用泛型约束特性，实现类型安全的链式调用。
 - **零类型断言**：所有 filter/sort 操作均为强类型，运行时无需任何 `any` 类型转换。
 - **Scope 辅助函数**：提供 `SetScope` + `NewGormScope` / `NewMongoScope` / `NewElasticSearchScope`，在 `List` 模式下一行代码设置 filter/sort，无需手写中间件和类型断言。
@@ -79,7 +80,6 @@ import (
     "context"
     "gorm.io/gorm"
     builder "github.com/fantasticbin/QueryBuilder/v2"
-    "github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 func main() {
@@ -87,7 +87,7 @@ func main() {
     db := &gorm.DB{} // 你的 GORM 实例
 
     // 创建 GORM 构建器
-    b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+    b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
     // 设置强类型的 filter 和 sort（GormScope = func(*gorm.DB) *gorm.DB）
     b.SetFilter(func(db *gorm.DB) *gorm.DB {
@@ -120,15 +120,15 @@ type User struct {
 
 ### 数据源 Adapter 注册
 
-通过 `core.NewDBProxyWithAdapters(...)` 和对应的数据源 adapter 注册数据源：
+通过顶层 `builder.NewDBProxyWithAdapters(...)` 和对应的 `builder.New*Adapter(...)` 注册数据源；仅创建数据源适配器时，通常无需额外引入 `core` 包：
 
 ```go
-gormData := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
-mongoData := core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection))
-esData := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient))
+gormData := builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))
+mongoData := builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection))
+esData := builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient))
 ```
 
-`builder.NewDBProxy(db, mongo, es)` 仅用于兼容旧版本。新代码应使用 `core.NewDBProxyWithAdapters(...)` 注册 adapter；该兼容构造函数会在后续版本移除。
+`builder.NewDBProxy(db, mongo, es)` 仅用于兼容旧版本。新代码应使用 `builder.NewDBProxyWithAdapters(...)` 注册 adapter；该兼容构造函数会在后续版本移除。
 
 ### 2. 使用 List 与选项模式
 
@@ -161,7 +161,7 @@ func ListUser(ctx context.Context, req *pb.ListUserRequest) (*core.ListResult[mo
 
     result, err := list.Query(
         ctx,
-        builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(model.DB))),
+        builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(model.DB))),
         builder.WithStart(req.Start),
         builder.WithLimit(req.Limit),
     )
@@ -206,13 +206,13 @@ result, err := list.Query(ctx, opts...)
 
 ```go
 // 直接使用构建器
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFields("id", "name", "email")
 result, err := b.QueryList(ctx)
 
 // 通过 List 选项
 result, err := list.Query(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithFields("id", "name", "email"),
 )
 ```
@@ -230,7 +230,7 @@ result, err := list.Query(ctx,
 通过 `BeforeQueryHook` 和 `AfterQueryHook` 实现轻量级的查询前后置逻辑：
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
 // 前置钩子：向 context 注入 trace ID
 b.SetBeforeQueryHook(func(ctx context.Context) context.Context {
@@ -258,7 +258,7 @@ QueryBuilder 遵循 Go 标准的 `context` 模式进行超时控制——无需�
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 defer cancel()
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -296,7 +296,7 @@ b.Use(func(ctx context.Context, q builder.Querier[User], next func(context.Conte
 
 ```go
 // 构建一个"模板"，配置公共参数
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 }).SetSort(func(db *gorm.DB) *gorm.DB {
@@ -311,7 +311,7 @@ page2 := base.Clone().SetStart(50).SetLimit(50)
 #### 并发分叉查询（最佳实践）
 
 ```go
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 }).SetFields("id", "name", "email").SetNeedTotal(true)
@@ -341,7 +341,7 @@ wg.Wait()
 #### Clone 后使用不同过滤条件
 
 ```go
-base := builder.NewMongoBuilder[Order](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+base := builder.NewMongoBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 base.SetFields("id", "user_id", "amount").SetLimit(20)
 
 // 分叉为不同的过滤条件
@@ -355,7 +355,7 @@ go func() { completedOrders, _ := completed.QueryList(ctx) }()
 #### Clone 后追加不同中间件
 
 ```go
-base := builder.NewGormBuilder[Product](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[Product](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFilter(filterScope).SetLimit(100)
 
 // 每个 Clone 可以拥有独立的中间件栈
@@ -435,7 +435,7 @@ func (g *GCacheProvider) Set(ctx context.Context, key string, value []byte, ttl 
 ```go
 cache := NewGCacheProvider(1000) // 1000 条目的 LRU 缓存
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
     meta := b.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
@@ -498,7 +498,7 @@ keyBuilder := middleware.DefaultCacheKeyBuilder{
 ```go
 cache := NewGCacheProvider(1000)
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", "active")
 })
@@ -547,7 +547,7 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](
 由于 `CacheKeyHints` 由 `DefaultCacheKeyBuilder` 自身管理（而非构建器基类），每个 `Clone` 实例可以安全地使用各自的缓存中间件携带不同的 hints——无共享状态，无数据混乱：
 
 ```go
-base := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+base := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 base.SetFields("id", "name", "email").SetNeedTotal(true)
 
 // 每个 Clone 使用各自的缓存中间件，携带不同的 hints
@@ -645,7 +645,7 @@ obs := middleware.ObservabilityMiddleware[User](middleware.ObservabilityOptions{
     },
 })
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.Use(obs)
 result, err := b.QueryList(ctx)
 ```
@@ -769,7 +769,7 @@ func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
 
 ```go
 // GORM — 返回 SQL 语句
-gormBuilder := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+gormBuilder := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 gormBuilder.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -777,12 +777,12 @@ sql, err := gormBuilder.Explain(ctx)
 // 输出: SELECT * FROM `users` WHERE status = ? | args: [1]
 
 // MongoDB — 返回 JSON 格式的 filter/sort/projection
-mongoBuilder := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+mongoBuilder := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 mongoBuilder.SetFilter(bson.D{{Key: "status", Value: "active"}})
 jsonStr, err := mongoBuilder.Explain(ctx)
 
 // ElasticSearch — 返回 Query DSL JSON
-esBuilder := builder.NewElasticSearchBuilder[Doc](core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index")
+esBuilder := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index")
 esBuilder.SetFilter(elastic.NewTermQuery("status", "active"))
 dsl, err := esBuilder.Explain(ctx)
 ```
@@ -867,7 +867,7 @@ b.SetCursorField("-created_at", "id") // created_at DESC, id ASC
 ctx := context.Background()
 db := &gorm.DB{} // 你的 GORM 实例
 
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -892,7 +892,7 @@ for user, err := range b.QueryCursor(ctx) {
 适用于复合排序场景（如 `created_at` + `id`）：
 
 ```go
-b := builder.NewGormBuilder[Order](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("created_at", "id") // 多字段游标
 b.SetLimit(50)
 
@@ -915,7 +915,7 @@ list.SetScope(builder.NewGormScope[User](
 ))
 
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(100),
 ) {
@@ -929,7 +929,7 @@ for user, err := range list.QueryCursor(ctx,
 #### MongoDB 游标分页
 
 ```go
-b := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 b.SetFilter(bson.D{{Key: "status", Value: "active"}})
 b.SetCursorField("created_at", "_id")
 b.SetLimit(100)
@@ -948,7 +948,7 @@ ES 游标分页内部使用 `search_after` API。最后一条文档的 sort valu
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
-    core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index",
+    builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index",
 )
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at")
@@ -973,7 +973,7 @@ for doc, err := range b.QueryCursor(ctx) {
 
 ```go
 // 直接使用构建器
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("id")
 b.SetStart(100) // 从 id > 100 开始
 b.SetLimit(10)
@@ -987,7 +987,7 @@ for user, err := range b.QueryCursor(ctx) {
 
 // 通过 List 选项
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithStart(100), // 从 id > 100 开始
     builder.WithLimit(10),
@@ -1003,7 +1003,7 @@ for user, err := range list.QueryCursor(ctx,
 
 ```go
 // 直接使用构建器——多字段游标
-b := builder.NewGormBuilder[Order](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[Order](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetCursorField("created_at", "id")
 b.SetCursorValue(int64(1700000000), uint32(500)) // 从 (created_at > 1700000000, id > 500) 恢复
 b.SetLimit(10)
@@ -1017,7 +1017,7 @@ for order, err := range b.QueryCursor(ctx) {
 
 // 通过 List 选项
 for order, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("created_at", "id"),
     builder.WithCursorValue(int64(1700000000), uint32(500)),
     builder.WithLimit(10),
@@ -1046,7 +1046,7 @@ for order, err := range list.QueryCursor(ctx,
 ```go
 // 获取一页数据并返回总数
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithCursorValue(uint32(lastSeenID)),
     builder.WithLimit(20),
@@ -1067,7 +1067,7 @@ for user, err := range list.QueryCursor(ctx,
 ```go
 // 流式遍历全部记录，不查总数——适用于批处理/数据导出
 for user, err := range list.QueryCursor(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(500),
     builder.WithNeedPagination(false), // 遍历所有批次
@@ -1088,7 +1088,7 @@ for user, err := range list.QueryCursor(ctx,
 
 ```go
 result, err := list.Query(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithLimit(20),
     builder.WithNeedTotal(true),
     builder.WithTotalLimit(10000),
@@ -1129,7 +1129,7 @@ result, err := list.Query(ctx,
 ##### 直接使用构建器
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -1165,14 +1165,14 @@ list.SetScope(builder.NewGormScope[User](
 
 // 第一页
 page, err := list.QueryPage(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithLimit(20),
 )
 
 // 下一页：传入游标值
 nextPage, err := list.QueryPage(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewGormAdapter(db))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))),
     builder.WithCursorField("id"),
     builder.WithCursorValue(page.NextCursorValues...),
     builder.WithLimit(20),
@@ -1182,7 +1182,7 @@ nextPage, err := list.QueryPage(ctx,
 ##### MongoDB QueryPage
 
 ```go
-b := builder.NewMongoBuilder[Doc](core.NewDBProxyWithAdapters(core.NewMongoAdapter(collection)))
+b := builder.NewMongoBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewMongoAdapter(collection)))
 b.SetFilter(bson.D{{Key: "status", Value: "active"}})
 b.SetCursorField("created_at", "_id")
 b.SetLimit(20)
@@ -1205,7 +1205,7 @@ if page.HasMore {
 
 ```go
 b := builder.NewElasticSearchBuilder[Doc](
-    core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index",
+    builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index",
 )
 b.SetFilter(elastic.NewTermQuery("status", "active"))
 b.SetCursorField("created_at", "_id")
@@ -1239,7 +1239,7 @@ for user, err := range b.QueryCursor(ctx) {
 配置了游标字段后，`Explain` 会输出游标查询模式的首批查询语句：
 
 ```go
-b := builder.NewGormBuilder[User](core.NewDBProxyWithAdapters(core.NewGormAdapter(db)))
+b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 b.SetFilter(func(db *gorm.DB) *gorm.DB {
     return db.Where("status = ?", 1)
 })
@@ -1268,7 +1268,7 @@ list.SetDataSource(builder.ElasticSearch)
 list.SetScope(builder.NewElasticSearchScope[Doc](elastic.NewMatchAllQuery()))
 
 page, err := list.QueryPageWithPIT(ctx,
-    builder.WithData(core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient))),
+    builder.WithData(builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient))),
     builder.WithESIndex("my_index"),
     builder.WithCursorField("created_at", "id"),
     builder.WithPITID(prevPitID),
@@ -1286,7 +1286,7 @@ page, err := list.QueryPageWithPIT(ctx,
 | `PitID` | `string` | Point-in-Time ID，用于下一次请求（`HasMore=false` 时为空） |
 
 ```go
-es := builder.NewElasticSearchBuilder[Doc](core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(esClient)), "my_index")
+es := builder.NewElasticSearchBuilder[Doc](builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClient)), "my_index")
 es.SetFilter(elastic.NewMatchAllQuery()).
    SetCursorField("created_at", "id").
    SetLimit(20)
@@ -1370,8 +1370,8 @@ import (
     "context"
     "fmt"
 
+    builder "github.com/fantasticbin/QueryBuilder/v2"
     "github.com/fantasticbin/QueryBuilder/v2/agg"
-    "github.com/fantasticbin/QueryBuilder/v2/core"
     "gorm.io/gorm"
 )
 
@@ -1391,8 +1391,8 @@ type SalesSummary struct {
 }
 
 func summarize(ctx context.Context, db *gorm.DB) error {
-    data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
-    query := agg.NewGormBuilder[Order, SalesSummary](data, agg.Spec{})
+    data := builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db))
+    query := agg.NewGormBuilder[Order, SalesSummary](data)
     query.GroupBy("region", "region").
         Count("order_count").
         CountDistinct("customer_id", "buyer_count").
@@ -1420,7 +1420,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 
 #### 切换数据源
 
-同一个 `Spec` 可以在不同数据源构建器之间复用：
+构建器默认从空 `Spec` 开始，常用写法是直接链式配置。如果 `Spec` 来自公共配置或业务模板，也可以通过 `SetSpec` 复用：
 
 ```go
 spec := agg.Spec{
@@ -1432,9 +1432,14 @@ spec := agg.Spec{
     },
 }
 
-gormQuery := agg.NewGormBuilder[Order, SalesSummary](data, spec)
-mongoQuery := agg.NewMongoBuilder[SalesSummary](data, spec)
-esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders", spec)
+gormQuery := agg.NewGormBuilder[Order, SalesSummary](data)
+gormQuery.SetSpec(spec)
+
+mongoQuery := agg.NewMongoBuilder[SalesSummary](data)
+mongoQuery.SetSpec(spec)
+
+esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders")
+esQuery.SetSpec(spec)
 ```
 
 三个构建器都提供 `SetFilter`、`Clone`、`Use`、`Query` 和 `Explain`。`SetFilter` 保留各数据源自己的写法：GORM 使用 `func(*gorm.DB) *gorm.DB`，MongoDB 使用 `bson.D`，Elasticsearch 使用 `elastic.Query`。
@@ -1470,7 +1475,7 @@ statement, err := query.Explain(ctx)
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
 - 目前只有 `Count` 和 `Sum` 支持 distinct
 - 当前不支持 HAVING、按指标排序、原始表达式和分组游标分页
-- 聚合查询的缓存和可观测中间件位于 `middleware/agg`
+- 聚合查询的缓存和可观测中间件位于 `middleware`，入口为 `AggregateCacheMiddleware` 和 `AggregateObservabilityMiddleware`
 ---
 
 ## API 参考

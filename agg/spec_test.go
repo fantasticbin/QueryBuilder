@@ -24,7 +24,7 @@ var (
 func TestBuilderSpecChain(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[specChainRow](nil, Spec{})
+	builder := NewMongoBuilder[specChainRow](nil)
 	builder.GroupBy("region", "region").
 		GroupByDesc("customer.tier", "tier").
 		Count("order_count").
@@ -64,9 +64,8 @@ func TestBuilderSpecChain(t *testing.T) {
 func TestBuilderSpecSetters(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[specChainRow](nil, Spec{
-		Metrics: []Metric{{Func: Count, Alias: "old_total"}},
-	})
+	builder := NewMongoBuilder[specChainRow](nil)
+	builder.Count("old_total")
 	builder.SetSpec(Spec{}).
 		SetGroups(Group{Field: "region", Alias: "region", Descending: true}).
 		SetMetrics(Metric{Func: Count, Alias: "total"}).
@@ -86,7 +85,7 @@ func TestBuilderSpecSetters(t *testing.T) {
 func TestBuilderConfigureSpec(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[specChainRow](nil, Spec{})
+	builder := NewMongoBuilder[specChainRow](nil)
 	builder.ConfigureSpec(func(spec *SpecBuilder) {
 		spec.GroupBy("region", "region").
 			Count("total").
@@ -107,7 +106,7 @@ func TestBuilderConfigureSpec(t *testing.T) {
 func TestBuilderSpecChainDefaultLimit(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[specChainRow](nil, Spec{})
+	builder := NewMongoBuilder[specChainRow](nil)
 	builder.SetLimit(25).
 		GroupBy("region", "region").
 		Count("total")
@@ -138,7 +137,8 @@ func TestBuilderSpecChainIsolation(t *testing.T) {
 	initial.Groups[0] = Group{Field: "region", Alias: "region"}
 	initial.Metrics[0] = Metric{Func: Count, Alias: "total"}
 
-	builder := NewMongoBuilder[specChainRow](nil, initial)
+	builder := NewMongoBuilder[specChainRow](nil)
+	builder.SetSpec(initial)
 	builder.GroupBy("customer.tier", "tier").
 		Sum("amount", "amount_sum").
 		SetLimit(20)

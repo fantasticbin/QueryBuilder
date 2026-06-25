@@ -18,7 +18,8 @@ func TestPipelineOrderAndMetaIsolation(t *testing.T) {
 
 	spec := Spec{Metrics: []Metric{{Func: Count, Alias: "total"}}}
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := NewMongoBuilder[pipelineRow](data, spec)
+	builder := NewMongoBuilder[pipelineRow](data)
+	builder.SetSpec(spec)
 	events := make([]string, 0, 7)
 	builder.SetBeforeHook(func(ctx context.Context) context.Context {
 		events = append(events, "before")
@@ -75,9 +76,8 @@ func TestCloneStateIsolation(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	original := NewMongoBuilder[pipelineRow](data, Spec{
-		Metrics: []Metric{{Func: Count, Alias: "total"}},
-	})
+	original := NewMongoBuilder[pipelineRow](data)
+	original.Count("total")
 	original.SetFilter(MongoFilter{{Key: "status", Value: "active"}})
 	cloned := original.Clone()
 	cloned.filter[0].Value = "inactive"

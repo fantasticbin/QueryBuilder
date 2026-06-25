@@ -14,6 +14,9 @@ import (
 type MongoFilter = bson.D
 
 // MongoBuilder 用于构建 MongoDB 聚合管道
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type MongoBuilder[A any] struct {
 	base[A]
 	filter MongoFilter
@@ -25,11 +28,13 @@ const (
 )
 
 // NewMongoBuilder 创建 MongoDB 聚合查询构建器
-func NewMongoBuilder[A any](data *core.DBProxy, spec Spec) *MongoBuilder[A] {
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
+func NewMongoBuilder[A any](data *core.DBProxy) *MongoBuilder[A] {
 	b := &MongoBuilder[A]{}
 	b.data = data
 	b.dataSource = core.MongoDB
-	b.spec = normalizeSpec(spec)
 	b.setSelf(b)
 	return b
 }

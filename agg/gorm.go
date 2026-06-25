@@ -14,17 +14,24 @@ import (
 type GormFilter = func(*gorm.DB) *gorm.DB
 
 // GormBuilder 用于构建兼容 GORM 数据库的聚合查询
+// 泛型参数:
+//
+//	M: GORM 源模型类型，用于 db.Model(new(M)) 推导源表和字段映射
+//	A: 聚合结果行 DTO 类型，用于 Scan 解码聚合输出
 type GormBuilder[M any, A any] struct {
 	base[A]
 	filter GormFilter
 }
 
 // NewGormBuilder 创建 GORM 聚合查询构建器
-func NewGormBuilder[M any, A any](data *core.DBProxy, spec Spec) *GormBuilder[M, A] {
+// 泛型参数:
+//
+//	M: GORM 源模型类型，用于推导聚合查询的数据来源
+//	A: 聚合结果行 DTO 类型
+func NewGormBuilder[M any, A any](data *core.DBProxy) *GormBuilder[M, A] {
 	b := &GormBuilder[M, A]{}
 	b.data = data
 	b.dataSource = core.Gorm
-	b.spec = normalizeSpec(spec)
 	b.setSelf(b)
 	return b
 }

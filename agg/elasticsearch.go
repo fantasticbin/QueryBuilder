@@ -16,6 +16,9 @@ const (
 )
 
 // ElasticSearchBuilder 用于构建 Elasticsearch 聚合查询
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 type ElasticSearchBuilder[A any] struct {
 	base[A]
 	index  string
@@ -23,15 +26,16 @@ type ElasticSearchBuilder[A any] struct {
 }
 
 // NewElasticSearchBuilder 创建 Elasticsearch 聚合查询构建器
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 func NewElasticSearchBuilder[A any](
 	data *core.DBProxy,
 	index string,
-	spec Spec,
 ) *ElasticSearchBuilder[A] {
 	b := &ElasticSearchBuilder[A]{index: index}
 	b.data = data
 	b.dataSource = core.ElasticSearch
-	b.spec = normalizeSpec(spec)
 	b.setSelf(b)
 	return b
 }
@@ -318,6 +322,9 @@ func elasticNumericValue(value any, alias string) (float64, error) {
 }
 
 // decodeElasticRow 通过 JSON 标签将聚合值映射到结果 DTO
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
 func decodeElasticRow[A any](values map[string]any) (*A, error) {
 	encoded, err := json.Marshal(values)
 	if err != nil {

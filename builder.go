@@ -61,14 +61,18 @@ func NewDBProxyWithAdapters(adapters ...core.DataSourceAdapter) *core.DBProxy {
 	return core.NewDBProxyWithAdapters(adapters...)
 }
 
-// queryBuilder 构建器接口约束，利用 Go 1.26 自引用泛型约束特性
+// selfBuilder 表示能返回自身具体类型的构建器。
+type selfBuilder[B any] interface {
+	self() B
+}
+
+// queryBuilder 构建器接口约束，利用自引用泛型约束保证链式调用返回具体构建器类型
 // 泛型参数:
 //
 //	B: 具体构建器类型（自引用）
 //	R: 查询结果的实体类型
-type queryBuilder[B any, R any] interface {
-	// self 返回具体构建器自身引用，用于链式调用返回具体子类型
-	self() B
+type queryBuilder[B selfBuilder[B], R any] interface {
+	selfBuilder[B]
 	// doQuery 执行后端专属的列表查询逻辑
 	doQuery(ctx context.Context) ([]*R, int64, error)
 	// doCursorQuery 执行后端专属的单批次游标查询逻辑

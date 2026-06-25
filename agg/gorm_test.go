@@ -34,16 +34,13 @@ func TestGormBuilderExplain(t *testing.T) {
 		t.Fatalf("opening test gorm db: %v", err)
 	}
 	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
-	builder := NewGormBuilder[gormOrder, gormSummary](data, Spec{
-		Groups: []Group{{Field: "customer.region", Alias: "region", Descending: true}},
-		Metrics: []Metric{
-			{Func: Count, Alias: "total"},
-			{Func: Count, Field: "customer.id", Alias: "buyer_count", Distinct: true},
-			{Func: Sum, Field: "amount", Alias: "amount_sum"},
-			{Func: Sum, Field: "amount", Alias: "unique_amount_sum", Distinct: true},
-		},
-		Limit: 20,
-	})
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupByDesc("customer.region", "region").
+		Count("total").
+		CountDistinct("customer.id", "buyer_count").
+		Sum("amount", "amount_sum").
+		SumDistinct("amount", "unique_amount_sum").
+		SetLimit(20)
 	builder.SetFilter(func(db *gorm.DB) *gorm.DB {
 		return db.Where("status = ?", "paid")
 	})
