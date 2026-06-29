@@ -19,7 +19,8 @@ func TestAggregateCacheMiddlewareHit(t *testing.T) {
 
 	cache := newMockCache()
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := queryagg.NewMongoBuilder[aggregateCacheRow](data, queryagg.Spec{
+	builder := queryagg.NewMongoBuilder[aggregateCacheRow](data)
+	builder.SetSpec(queryagg.Spec{
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
 	builder.Use(AggregateCacheMiddlewareWithKeyBuilder[aggregateCacheRow](

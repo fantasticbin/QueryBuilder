@@ -11,7 +11,7 @@ A Go library for building type-safe list queries across multiple data sources. L
 ## Features
 
 - **Multi-DataSource Builders**: Dedicated `GormBuilder`, `MongoBuilder`, and `ElasticSearchBuilder` with strongly-typed `SetFilter` / `SetSort` methods.
-- **Aggregate Query Builders**: The `agg` package provides dedicated builders for grouped statistics on GORM, MongoDB, and ElasticSearch, including `Count`, `CountDistinct`, `Sum`, `SumDistinct`, `Avg`, `Min`, `Max`, typed result decoding, `Explain`, and aggregate middleware in `middleware`.
+- **Aggregate Query Builders**: The `agg` package provides dedicated builders for grouped statistics on GORM, MongoDB, and ElasticSearch, including `Count`, `CountDistinct`, `Sum`, `SumDistinct`, `Avg`, `Min`, `Max`, conditional metrics, HAVING filters, result ordering, typed result decoding, `Explain`, and aggregate middleware in `middleware`.
 - **Self-Referential Generics**: Uses Go 1.26 self-referential generic constraints for type-safe fluent chaining.
 - **Zero Type Assertions**: All filter/sort operations are fully typed — no `any` casts at runtime.
 - **Scope Helpers**: Built-in `SetScope` + `NewGormScope` / `NewMongoScope` / `NewElasticSearchScope` — set filter/sort in one line under `List` mode, no manual middleware or type assertions needed.
@@ -1361,7 +1361,7 @@ Passing `nil` for filter or sort will be ignored and won't affect the query flow
 
 ### Aggregate Statistics
 
-Use `agg` when a normal list query is not enough and you need a small summary table: orders by region, total sales, average amount, unique buyers, and similar report-style numbers. You can pass a complete `agg.Spec` to the constructor, or start with an empty spec and build it through the chain methods.
+Use `agg` when a normal list query is not enough and you need a small summary table: orders by region, total sales, average amount, unique buyers, and similar report-style numbers. You can reuse a complete `agg.Spec` with `SetSpec`, or start with an empty spec and build it through the chain methods.
 
 #### Basic Usage
 
@@ -1382,6 +1382,7 @@ type Order struct {
     Region     string
     CustomerID uint64
     Amount     float64
+    Status     string
 }
 
 type SalesSummary struct {
@@ -1460,6 +1461,24 @@ All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. 
 
 At least one metric is required, and aliases must be unique across groups and metrics. Field names may be regular identifiers or dotted paths such as `amount` and `customer.region`; raw expressions are not accepted.
 
+#### Conditional Metrics, HAVING, and Ordering
+
+Use GORM-like comparison expressions with the `*If` methods to compute metrics over only the records that match a simple field comparison:
+
+```go
+query.GroupBy("region", "region").
+    Count("total").
+    CountIf("paid_total", "status = ?", "paid").
+    SumIf("amount", "paid_amount", "status = ?", "paid").
+    Having("paid_amount >= ?", 10000).
+    OrderByDesc("paid_amount").
+    SetLimit(20)
+```
+
+`CountIf`, `CountDistinctIf`, `SumIf`, `SumDistinctIf`, `AvgIf`, `MinIf`, and `MaxIf` accept single-placeholder comparison expressions such as `status = ?` or `amount >= ?`. Supported operators are `=`, `==`, `!=`, `<>`, `>`, `>=`, `<`, and `<=`.
+
+`OrderBy` and `OrderByDesc` accept either a group alias or a metric alias. `Having` filters grouped results by metric alias and uses the same comparison expression form, with numeric comparison values. For Elasticsearch grouped `Having`, the builder pages composite buckets and filters client-side before applying limit. Ordering stays in composite source order when it is a prefix of the group aliases; metric ordering or non-prefix group ordering requires collecting all buckets before sorting and limiting. `Explain` marks client work with `client_post_processing` and uses `full_scan` to show whether all buckets must be collected.
+
 #### Inspecting the Query
 
 Call `Explain` when you want to see what will be sent to the data source. It returns SQL, a MongoDB aggregation pipeline, or Elasticsearch DSL without executing the query:
@@ -1476,8 +1495,9 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 - A query without `Groups` returns one summary row
 - Records with a null or missing group field are excluded; null metric values are ignored
 - Distinct is currently supported only for `Count` and `Sum`
-- HAVING, metric ordering, raw expressions, and grouped cursor pagination are not supported yet
+- HAVING currently filters metric aliases only and accepts numeric values; raw expressions and grouped cursor pagination are not supported yet
 - Cache and observability middleware for aggregate queries lives in `middleware` as `AggregateCacheMiddleware` and `AggregateObservabilityMiddleware`
+
 ---
 
 ## API Reference

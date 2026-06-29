@@ -26,7 +26,8 @@ func TestAggregateObservabilityMiddlewareRecordsSignals(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data, queryagg.Spec{
+	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data)
+	builder.SetSpec(queryagg.Spec{
 		Groups:  []queryagg.Group{{Field: "region", Alias: "region"}},
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
@@ -74,7 +75,8 @@ func TestAggregateObservabilityMiddlewareSignalFilters(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data, queryagg.Spec{
+	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data)
+	builder.SetSpec(queryagg.Spec{
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
 	var logged []AggregateEvent
@@ -129,7 +131,8 @@ func TestAggregateObservabilityMiddlewareRecordsPanics(t *testing.T) {
 	t.Parallel()
 
 	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
-	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data, queryagg.Spec{
+	builder := queryagg.NewMongoBuilder[aggregateObservationRow](data)
+	builder.SetSpec(queryagg.Spec{
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
 	var event AggregateEvent

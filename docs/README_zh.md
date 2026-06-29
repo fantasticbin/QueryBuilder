@@ -11,7 +11,7 @@
 ## 特性
 
 - **多数据源专属构建器**：提供 `GormBuilder`、`MongoBuilder`、`ElasticSearchBuilder`，各自拥有强类型的 `SetFilter` / `SetSort` 方法。
-- **聚合统计查询构建器**：`agg` 包提供 GORM、MongoDB、ElasticSearch 专属统计构建器，用来编写按地区、渠道、状态等维度分组的统计查询，支持 `Count` / `CountDistinct` / `Sum` / `SumDistinct` / `Avg` / `Min` / `Max`、类型安全结果解码、`Explain` 预览，以及位于 `middleware` 的统计专用中间件。
+- **聚合统计查询构建器**：`agg` 包提供 GORM、MongoDB、ElasticSearch 专属统计构建器，用来编写按地区、渠道、状态等维度分组的统计查询，支持 `Count` / `CountDistinct` / `Sum` / `SumDistinct` / `Avg` / `Min` / `Max`、条件指标、HAVING 过滤、结果排序、类型安全结果解码、`Explain` 预览，以及位于 `middleware` 的统计专用中间件。
 - **自引用泛型约束**：利用 Go 1.26 自引用泛型约束特性，实现类型安全的链式调用。
 - **零类型断言**：所有 filter/sort 操作均为强类型，运行时无需任何 `any` 类型转换。
 - **Scope 辅助函数**：提供 `SetScope` + `NewGormScope` / `NewMongoScope` / `NewElasticSearchScope`，在 `List` 模式下一行代码设置 filter/sort，无需手写中间件和类型断言。
@@ -1359,7 +1359,7 @@ filter 或 sort 参数传 `nil` 时将被忽略，不会影响查询流程。
 
 ### 聚合统计
 
-当普通列表查询不够用，需要做一张小汇总表时，可以使用 `agg` 包。例如按地区统计订单数、销售额、平均金额、独立买家数等。你可以在构造器里传入完整的 `agg.Spec`，也可以先传空 `Spec`，再通过链式方法逐步补充分组和指标。
+当普通列表查询不够用，需要做一张小汇总表时，可以使用 `agg` 包。例如按地区统计订单数、销售额、平均金额、独立买家数等。你可以通过 `SetSpec` 复用完整的 `agg.Spec`，也可以从空配置开始，通过链式方法逐步补充分组和指标。
 
 #### 基本用法
 
@@ -1380,6 +1380,7 @@ type Order struct {
     Region     string
     CustomerID uint64
     Amount     float64
+    Status     string
 }
 
 type SalesSummary struct {
@@ -1458,6 +1459,24 @@ esQuery.SetSpec(spec)
 
 至少要配置一个指标，指标和分组的别名不能重复。字段名只支持普通字段或点分字段，例如 `amount`、`customer.region`，不支持直接传入表达式。
 
+#### 条件指标、HAVING 与排序
+
+通过类似 GORM 的比较表达式配合 `*If` 方法，可以只统计满足简单字段比较条件的记录：
+
+```go
+query.GroupBy("region", "region").
+    Count("total").
+    CountIf("paid_total", "status = ?", "paid").
+    SumIf("amount", "paid_amount", "status = ?", "paid").
+    Having("paid_amount >= ?", 10000).
+    OrderByDesc("paid_amount").
+    SetLimit(20)
+```
+
+`CountIf`、`CountDistinctIf`、`SumIf`、`SumDistinctIf`、`AvgIf`、`MinIf`、`MaxIf` 支持 `status = ?`、`amount >= ?` 这类单占位符比较表达式。支持的操作符包括 `=`、`==`、`!=`、`<>`、`>`、`>=`、`<`、`<=`。
+
+`OrderBy` 和 `OrderByDesc` 可以引用分组别名或指标别名。`Having` 用于按指标别名过滤分组后的结果，支持同样的比较表达式写法，比较值要求为数值。对 Elasticsearch 的分组 `Having`，构建器会分页读取 composite buckets，并在客户端过滤后再应用 limit。排序如果是分组别名的前缀顺序，会继续交给 composite source；按指标排序或按非前缀分组别名排序时，需要读取完整 bucket 集合后再排序和截断。`Explain` 会通过 `client_post_processing` 标记客户端处理，并用 `full_scan` 标明是否必须收集全部 buckets。
+
 #### 查看生成的查询
 
 想确认底层会发出什么查询时，可以调用 `Explain`。它只返回 SQL、MongoDB aggregation pipeline 或 Elasticsearch DSL，不会执行查询：
@@ -1474,8 +1493,9 @@ statement, err := query.Explain(ctx)
 - 没有配置 `Groups` 时返回一行汇总结果
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
 - 目前只有 `Count` 和 `Sum` 支持 distinct
-- 当前不支持 HAVING、按指标排序、原始表达式和分组游标分页
+- HAVING 当前只支持按指标别名过滤且比较值需为数值；原始表达式和分组游标分页暂不支持
 - 聚合查询的缓存和可观测中间件位于 `middleware`，入口为 `AggregateCacheMiddleware` 和 `AggregateObservabilityMiddleware`
+
 ---
 
 ## API 参考

@@ -111,3 +111,201 @@ func TestElasticSearchBuilderDecodeScalarEmptyValues(t *testing.T) {
 		t.Fatalf("unexpected scalar row: %+v", result.Rows)
 	}
 }
+
+type elasticAdvancedSummary struct {
+	Region     string   `json:"region"`
+	Total      int64    `json:"total"`
+	PaidTotal  int64    `json:"paid_total"`
+	PaidAmount *float64 `json:"paid_amount"`
+}
+
+func TestElasticSearchBuilderExplainAdvancedSpec(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		CountIf("paid_total", "status = ?", "paid").
+		SumIf("amount", "paid_amount", "status = ?", "paid").
+		Having("paid_amount >= ?", 100).
+		OrderByDesc("paid_amount").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{
+		`"paid_total"`,
+		`"filter"`,
+		`"term"`,
+		`"paid_amount"`,
+		`"client_post_processing"`,
+		`"full_scan": true`,
+		`"havings": true`,
+		`"orders": true`,
+		`"limit": 5`,
+		`"size": 5000`,
+	} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
+	}
+	for _, fragment := range []string{`"bucket_selector"`, `"bucket_sort"`} {
+		if strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation not to contain %q: %s", fragment, explanation)
+		}
+	}
+}
+
+func TestElasticSearchBuilderExplainGroupAliasOrderUsesComposite(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		GroupBy("channel.keyword", "channel").
+		Count("total").
+		OrderByDesc("region").
+		SetLimit(5)
+
+	if builder.needsElasticClientPostProcessing() {
+		t.Fatalf("group-prefix ordering should be handled by composite source order")
+	}
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{`"order": "desc"`, `"size": 5`} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
+	}
+	for _, fragment := range []string{`"client_post_processing"`, `"bucket_sort"`} {
+		if strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation not to contain %q: %s", fragment, explanation)
+		}
+	}
+}
+
+func TestElasticSearchBuilderExplainHavingOnlyAvoidsFullScan(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		Having("total >= ?", 2).
+		SetLimit(5)
+
+	if !builder.needsElasticClientPostProcessing() {
+		t.Fatalf("having still needs client-side filtering before limit")
+	}
+	if builder.needsElasticFullClientPostProcessing() {
+		t.Fatalf("having-only filtering should not require collecting all buckets")
+	}
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{`"client_post_processing"`, `"full_scan": false`, `"havings": true`, `"size": 5000`} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
+	}
+	if strings.Contains(explanation, `"bucket_sort"`) {
+		t.Fatalf("expected having-only explanation not to contain bucket_sort: %s", explanation)
+	}
+}
+func TestElasticSearchBuilderDecodeConditionalMetrics(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		CountIf("paid_total", "status = ?", "paid").
+		SumIf("amount", "paid_amount", "status = ?", "paid")
+
+	root := json.RawMessage(`{
+		"doc_count": 4,
+		"_querybuilder_groups": {
+			"buckets": [{
+				"key": {"region": "east"},
+				"doc_count": 4,
+				"paid_total": {"doc_count": 3},
+				"paid_amount": {"doc_count": 3, "paid_amount": {"value": 42.5}}
+			}]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one row, got %d", len(result.Rows))
+	}
+	row := result.Rows[0]
+	if row.Region != "east" || row.Total != 4 || row.PaidTotal != 3 || row.PaidAmount == nil || *row.PaidAmount != 42.5 {
+		t.Fatalf("unexpected decoded row: %+v", row)
+	}
+}
+
+func TestElasticSearchBuilderDecodeAdvancedSpecPostProcessing(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		Sum("amount", "paid_amount").
+		Having("paid_amount >= ?", 100).
+		OrderByDesc("paid_amount").
+		SetLimit(1)
+
+	root := json.RawMessage(`{
+		"doc_count": 9,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3, "paid_amount": {"value": 90}},
+				{"key": {"region": "west"}, "doc_count": 2, "paid_amount": {"value": 200}},
+				{"key": {"region": "north"}, "doc_count": 4, "paid_amount": {"value": 150}}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected one row after post-processing, got %d", len(result.Rows))
+	}
+	row := result.Rows[0]
+	if row.Region != "west" || row.Total != 2 || row.PaidAmount == nil || *row.PaidAmount != 200 {
+		t.Fatalf("unexpected post-processed row: %+v", row)
+	}
+}
+
+func TestElasticConditionNotEqualRequiresExistingField(t *testing.T) {
+	t.Parallel()
+
+	source, err := elasticConditionQuery(Condition{Field: "status", Op: Ne, Value: "paid"}).Source()
+	if err != nil {
+		t.Fatalf("building query source: %v", err)
+	}
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("encoding query source: %v", err)
+	}
+	query := string(encoded)
+	for _, fragment := range []string{`"exists"`, `"field":"status"`, `"must_not"`, `"term"`} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("expected not-equal query to contain %q: %s", fragment, query)
+		}
+	}
+}

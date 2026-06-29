@@ -83,13 +83,42 @@ type MetricConfigurer[A any] interface {
 	SetMetrics(...Metric) Builder[A]
 	AddMetric(Metric) Builder[A]
 	Metric(fn Func, field, alias string) Builder[A]
+	MetricIf(fn Func, field, alias, expression string, value any) Builder[A]
 	Count(alias string) Builder[A]
+	CountIf(alias, expression string, value any) Builder[A]
 	CountDistinct(field, alias string) Builder[A]
+	CountDistinctIf(field, alias, expression string, value any) Builder[A]
 	Sum(field, alias string) Builder[A]
+	SumIf(field, alias, expression string, value any) Builder[A]
 	SumDistinct(field, alias string) Builder[A]
+	SumDistinctIf(field, alias, expression string, value any) Builder[A]
 	Avg(field, alias string) Builder[A]
+	AvgIf(field, alias, expression string, value any) Builder[A]
 	Min(field, alias string) Builder[A]
+	MinIf(field, alias, expression string, value any) Builder[A]
 	Max(field, alias string) Builder[A]
+	MaxIf(field, alias, expression string, value any) Builder[A]
+}
+
+// OrderConfigurer 定义聚合结果排序配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
+type OrderConfigurer[A any] interface {
+	SetOrders(...Order) Builder[A]
+	AddOrder(Order) Builder[A]
+	OrderBy(alias string) Builder[A]
+	OrderByDesc(alias string) Builder[A]
+}
+
+// HavingConfigurer 定义聚合后过滤配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
+type HavingConfigurer[A any] interface {
+	SetHavings(...Having) Builder[A]
+	AddHaving(Having) Builder[A]
+	Having(expression string, value any) Builder[A]
 }
 
 // LimitConfigurer 定义聚合结果数量上限配置能力
@@ -108,6 +137,8 @@ type SpecChainConfigurer[A any] interface {
 	SpecSetter[A]
 	GroupConfigurer[A]
 	MetricConfigurer[A]
+	OrderConfigurer[A]
+	HavingConfigurer[A]
 	LimitConfigurer[A]
 }
 
@@ -231,10 +262,24 @@ func (b *base[A]) Metric(fn Func, field, alias string) Builder[A] {
 	})
 }
 
+// MetricIf 追加一个条件聚合指标，条件使用 "field = ?" 形式
+func (b *base[A]) MetricIf(fn Func, field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.MetricIf(fn, field, alias, expression, value)
+	})
+}
+
 // Count 追加记录数统计指标
 func (b *base[A]) Count(alias string) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
 		builder.Count(alias)
+	})
+}
+
+// CountIf 追加满足条件的记录数统计指标，条件使用 "field = ?" 形式
+func (b *base[A]) CountIf(alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.CountIf(alias, expression, value)
 	})
 }
 
@@ -245,10 +290,24 @@ func (b *base[A]) CountDistinct(field, alias string) Builder[A] {
 	})
 }
 
+// CountDistinctIf 追加满足条件的字段去重计数指标，条件使用 "field = ?" 形式
+func (b *base[A]) CountDistinctIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.CountDistinctIf(field, alias, expression, value)
+	})
+}
+
 // Sum 追加求和指标
 func (b *base[A]) Sum(field, alias string) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
 		builder.Sum(field, alias)
+	})
+}
+
+// SumIf 追加满足条件的求和指标，条件使用 "field = ?" 形式
+func (b *base[A]) SumIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SumIf(field, alias, expression, value)
 	})
 }
 
@@ -259,10 +318,24 @@ func (b *base[A]) SumDistinct(field, alias string) Builder[A] {
 	})
 }
 
+// SumDistinctIf 追加满足条件的字段去重求和指标，条件使用 "field = ?" 形式
+func (b *base[A]) SumDistinctIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SumDistinctIf(field, alias, expression, value)
+	})
+}
+
 // Avg 追加平均值指标
 func (b *base[A]) Avg(field, alias string) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
 		builder.Avg(field, alias)
+	})
+}
+
+// AvgIf 追加满足条件的平均值指标，条件使用 "field = ?" 形式
+func (b *base[A]) AvgIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.AvgIf(field, alias, expression, value)
 	})
 }
 
@@ -273,10 +346,73 @@ func (b *base[A]) Min(field, alias string) Builder[A] {
 	})
 }
 
+// MinIf 追加满足条件的最小值指标，条件使用 "field = ?" 形式
+func (b *base[A]) MinIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.MinIf(field, alias, expression, value)
+	})
+}
+
 // Max 追加最大值指标
 func (b *base[A]) Max(field, alias string) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
 		builder.Max(field, alias)
+	})
+}
+
+// MaxIf 追加满足条件的最大值指标，条件使用 "field = ?" 形式
+func (b *base[A]) MaxIf(field, alias, expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.MaxIf(field, alias, expression, value)
+	})
+}
+
+// SetOrders 替换全部聚合结果排序规则
+func (b *base[A]) SetOrders(orders ...Order) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetOrders(orders...)
+	})
+}
+
+// AddOrder 追加一个聚合结果排序规则
+func (b *base[A]) AddOrder(order Order) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.AddOrder(order)
+	})
+}
+
+// OrderBy 追加一个升序聚合结果排序规则
+func (b *base[A]) OrderBy(alias string) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.OrderBy(alias)
+	})
+}
+
+// OrderByDesc 追加一个降序聚合结果排序规则
+func (b *base[A]) OrderByDesc(alias string) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.OrderByDesc(alias)
+	})
+}
+
+// SetHavings 替换全部聚合后过滤条件
+func (b *base[A]) SetHavings(havings ...Having) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetHavings(havings...)
+	})
+}
+
+// AddHaving 追加一个聚合后过滤条件
+func (b *base[A]) AddHaving(having Having) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.AddHaving(having)
+	})
+}
+
+// Having 追加一个聚合后指标过滤条件，条件使用 "alias >= ?" 形式
+func (b *base[A]) Having(expression string, value any) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.Having(expression, value)
 	})
 }
 

@@ -13,6 +13,7 @@ func NewSpecBuilder(spec Spec) *SpecBuilder {
 	return newSpecBuilder(normalizeSpec(spec))
 }
 
+// newSpecBuilder 创建一个不额外规范化输入的聚合规范构建器
 func newSpecBuilder(spec Spec) *SpecBuilder {
 	return &SpecBuilder{spec: spec.Clone()}
 }
@@ -54,13 +55,13 @@ func (b *SpecBuilder) GroupByDesc(field, alias string) *SpecBuilder {
 
 // SetMetrics 替换全部聚合指标
 func (b *SpecBuilder) SetMetrics(metrics ...Metric) *SpecBuilder {
-	b.spec.Metrics = append([]Metric{}, metrics...)
+	b.spec.Metrics = cloneMetrics(metrics)
 	return b
 }
 
 // AddMetric 追加一个完整指标配置
 func (b *SpecBuilder) AddMetric(metric Metric) *SpecBuilder {
-	b.spec.Metrics = append(b.spec.Metrics, metric)
+	b.spec.Metrics = append(b.spec.Metrics, cloneMetric(metric))
 	return b
 }
 
@@ -69,9 +70,20 @@ func (b *SpecBuilder) Metric(fn Func, field, alias string) *SpecBuilder {
 	return b.AddMetric(Metric{Func: fn, Field: field, Alias: alias})
 }
 
+// MetricIf 追加一个条件聚合指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) MetricIf(fn Func, field, alias, expression string, value any) *SpecBuilder {
+	condition := conditionFromExpression(expression, value)
+	return b.AddMetric(Metric{Func: fn, Field: field, Alias: alias, Condition: conditionPtr(condition)})
+}
+
 // Count 追加记录数统计指标
 func (b *SpecBuilder) Count(alias string) *SpecBuilder {
 	return b.Metric(Count, "", alias)
+}
+
+// CountIf 追加满足条件的记录数统计指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) CountIf(alias, expression string, value any) *SpecBuilder {
+	return b.MetricIf(Count, "", alias, expression, value)
 }
 
 // CountDistinct 追加字段去重计数指标
@@ -79,9 +91,20 @@ func (b *SpecBuilder) CountDistinct(field, alias string) *SpecBuilder {
 	return b.AddMetric(Metric{Func: Count, Field: field, Alias: alias, Distinct: true})
 }
 
+// CountDistinctIf 追加满足条件的字段去重计数指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) CountDistinctIf(field, alias, expression string, value any) *SpecBuilder {
+	condition := conditionFromExpression(expression, value)
+	return b.AddMetric(Metric{Func: Count, Field: field, Alias: alias, Distinct: true, Condition: conditionPtr(condition)})
+}
+
 // Sum 追加求和指标
 func (b *SpecBuilder) Sum(field, alias string) *SpecBuilder {
 	return b.Metric(Sum, field, alias)
+}
+
+// SumIf 追加满足条件的求和指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) SumIf(field, alias, expression string, value any) *SpecBuilder {
+	return b.MetricIf(Sum, field, alias, expression, value)
 }
 
 // SumDistinct 追加字段去重求和指标
@@ -89,9 +112,20 @@ func (b *SpecBuilder) SumDistinct(field, alias string) *SpecBuilder {
 	return b.AddMetric(Metric{Func: Sum, Field: field, Alias: alias, Distinct: true})
 }
 
+// SumDistinctIf 追加满足条件的字段去重求和指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) SumDistinctIf(field, alias, expression string, value any) *SpecBuilder {
+	condition := conditionFromExpression(expression, value)
+	return b.AddMetric(Metric{Func: Sum, Field: field, Alias: alias, Distinct: true, Condition: conditionPtr(condition)})
+}
+
 // Avg 追加平均值指标
 func (b *SpecBuilder) Avg(field, alias string) *SpecBuilder {
 	return b.Metric(Avg, field, alias)
+}
+
+// AvgIf 追加满足条件的平均值指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) AvgIf(field, alias, expression string, value any) *SpecBuilder {
+	return b.MetricIf(Avg, field, alias, expression, value)
 }
 
 // Min 追加最小值指标
@@ -99,9 +133,58 @@ func (b *SpecBuilder) Min(field, alias string) *SpecBuilder {
 	return b.Metric(Min, field, alias)
 }
 
+// MinIf 追加满足条件的最小值指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) MinIf(field, alias, expression string, value any) *SpecBuilder {
+	return b.MetricIf(Min, field, alias, expression, value)
+}
+
 // Max 追加最大值指标
 func (b *SpecBuilder) Max(field, alias string) *SpecBuilder {
 	return b.Metric(Max, field, alias)
+}
+
+// MaxIf 追加满足条件的最大值指标，条件使用 "field = ?" 形式
+func (b *SpecBuilder) MaxIf(field, alias, expression string, value any) *SpecBuilder {
+	return b.MetricIf(Max, field, alias, expression, value)
+}
+
+// SetOrders 替换全部聚合结果排序规则
+func (b *SpecBuilder) SetOrders(orders ...Order) *SpecBuilder {
+	b.spec.Orders = append([]Order{}, orders...)
+	return b
+}
+
+// AddOrder 追加一个聚合结果排序规则
+func (b *SpecBuilder) AddOrder(order Order) *SpecBuilder {
+	b.spec.Orders = append(b.spec.Orders, order)
+	return b
+}
+
+// OrderBy 追加一个升序聚合结果排序规则
+func (b *SpecBuilder) OrderBy(alias string) *SpecBuilder {
+	return b.AddOrder(Order{Alias: alias})
+}
+
+// OrderByDesc 追加一个降序聚合结果排序规则
+func (b *SpecBuilder) OrderByDesc(alias string) *SpecBuilder {
+	return b.AddOrder(Order{Alias: alias, Descending: true})
+}
+
+// SetHavings 替换全部聚合后过滤条件
+func (b *SpecBuilder) SetHavings(havings ...Having) *SpecBuilder {
+	b.spec.Havings = append([]Having{}, havings...)
+	return b
+}
+
+// AddHaving 追加一个聚合后过滤条件
+func (b *SpecBuilder) AddHaving(having Having) *SpecBuilder {
+	b.spec.Havings = append(b.spec.Havings, having)
+	return b
+}
+
+// Having 追加一个聚合后指标过滤条件，条件使用 "alias >= ?" 形式
+func (b *SpecBuilder) Having(expression string, value any) *SpecBuilder {
+	return b.AddHaving(havingFromExpression(expression, value))
 }
 
 // SetLimit 设置分组结果数量上限
@@ -110,6 +193,7 @@ func (b *SpecBuilder) SetLimit(limit uint32) *SpecBuilder {
 	return b
 }
 
+// normalizeLimitAfterGroups 在分组变更后同步默认 limit 语义
 func (b *SpecBuilder) normalizeLimitAfterGroups() {
 	if len(b.spec.Groups) == 0 {
 		b.spec.Limit = 0

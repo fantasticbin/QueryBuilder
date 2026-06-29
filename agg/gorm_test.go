@@ -91,3 +91,40 @@ func (aggregateTestDialector) QuoteTo(writer clause.Writer, value string) {
 }
 
 func (aggregateTestDialector) Explain(sql string, _ ...any) string { return sql }
+
+func TestGormBuilderExplainAdvancedSpec(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupBy("region", "region").
+		Count("total").
+		CountIf("paid_total", "status = ?", "paid").
+		SumIf("amount", "paid_amount", "status = ?", "paid").
+		SumDistinctIf("amount", "unique_paid_amount", "status = ?", "paid").
+		Having("paid_amount >= ?", 100).
+		OrderByDesc("paid_amount").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(explanation), " ")
+	for _, fragment := range []string{
+		`COUNT(CASE WHEN "status" = ? THEN 1 END) AS "paid_total"`,
+		`SUM(CASE WHEN "status" = ? THEN "amount" ELSE 0 END) AS "paid_amount"`,
+		`SUM(DISTINCT CASE WHEN "status" = ? THEN "amount" ELSE 0 END) AS "unique_paid_amount"`,
+		`HAVING SUM(CASE WHEN "status" = ? THEN "amount" ELSE 0 END) >= ?`,
+		`ORDER BY "paid_amount" DESC`,
+		`args: [paid, paid, paid, paid, 100, 5]`,
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("expected explanation %q to contain %q", normalized, fragment)
+		}
+	}
+}

@@ -109,6 +109,7 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 	}
 
 	selects := make([]string, 0, len(b.spec.Groups)+len(b.spec.Metrics))
+	selectArgs := make([]any, 0)
 	for _, group := range b.spec.Groups {
 		field := quoteGormIdentifier(db, group.Field)
 		alias := quoteGormIdentifier(db, group.Alias)
@@ -116,26 +117,12 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 		query = query.Where(field + " IS NOT NULL")
 	}
 	for _, metric := range b.spec.Metrics {
-		alias := quoteGormIdentifier(db, metric.Alias)
-		if metric.Func == Count {
-			if isDistinctCount(metric) {
-				field := quoteGormIdentifier(db, metric.Field)
-				selects = append(selects, "COUNT(DISTINCT "+field+") AS "+alias)
-			} else {
-				selects = append(selects, "COUNT(*) AS "+alias)
-			}
-			continue
-		}
-		field := quoteGormIdentifier(db, metric.Field)
-		fn := strings.ToUpper(metric.Func.String())
-		if isDistinctSum(metric) {
-			selects = append(selects, fn+"(DISTINCT "+field+") AS "+alias)
-		} else {
-			selects = append(selects, fn+"("+field+") AS "+alias)
-		}
+		selection, args := gormMetricSelection(db, metric)
+		selects = append(selects, selection)
+		selectArgs = append(selectArgs, args...)
 	}
 
-	query = query.Select(strings.Join(selects, ", "))
+	query = query.Select(strings.Join(selects, ", "), selectArgs...)
 	if len(b.spec.Groups) == 0 {
 		return query
 	}
@@ -147,13 +134,107 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 		})
 	}
 	query = query.Clauses(clause.GroupBy{Columns: groupColumns})
-	for _, group := range b.spec.Groups {
+	for _, having := range b.spec.Havings {
+		expression, args := gormHavingExpression(db, b.spec, having)
+		query = query.Having(expression, args...)
+	}
+	for _, order := range effectiveOrders(b.spec) {
 		query = query.Order(clause.OrderByColumn{
-			Column: clause.Column{Name: group.Alias},
-			Desc:   group.Descending,
+			Column: clause.Column{Name: order.Alias},
+			Desc:   order.Descending,
 		})
 	}
 	return query.Limit(int(b.spec.Limit))
+}
+
+// gormMetricSelection 构建单个指标的 SELECT 表达式和绑定参数
+func gormMetricSelection(db *gorm.DB, metric Metric) (string, []any) {
+	alias := quoteGormIdentifier(db, metric.Alias)
+	expression, args := gormMetricExpression(db, metric)
+	return expression + " AS " + alias, args
+}
+
+// gormMetricExpression 构建单个指标的聚合表达式和绑定参数
+func gormMetricExpression(db *gorm.DB, metric Metric) (string, []any) {
+	if metric.Condition != nil {
+		return gormConditionalMetricExpression(db, metric)
+	}
+	if metric.Func == Count {
+		if isDistinctCount(metric) {
+			field := quoteGormIdentifier(db, metric.Field)
+			return "COUNT(DISTINCT " + field + ")", nil
+		}
+		return "COUNT(*)", nil
+	}
+	field := quoteGormIdentifier(db, metric.Field)
+	fn := strings.ToUpper(metric.Func.String())
+	if isDistinctSum(metric) {
+		return fn + "(DISTINCT " + field + ")", nil
+	}
+	return fn + "(" + field + ")", nil
+}
+
+// gormConditionalMetricExpression 构建带条件指标的聚合表达式和绑定参数
+func gormConditionalMetricExpression(db *gorm.DB, metric Metric) (string, []any) {
+	condition, args := gormConditionExpression(db, *metric.Condition)
+	if metric.Func == Count {
+		if isDistinctCount(metric) {
+			field := quoteGormIdentifier(db, metric.Field)
+			return "COUNT(DISTINCT CASE WHEN " + condition + " THEN " + field + " END)", args
+		}
+		return "COUNT(CASE WHEN " + condition + " THEN 1 END)", args
+	}
+
+	field := quoteGormIdentifier(db, metric.Field)
+	valueExpression := "CASE WHEN " + condition + " THEN " + field
+	if metric.Func == Sum {
+		valueExpression += " ELSE 0"
+	}
+	valueExpression += " END"
+
+	fn := strings.ToUpper(metric.Func.String())
+	if isDistinctSum(metric) {
+		return fn + "(DISTINCT " + valueExpression + ")", args
+	}
+	return fn + "(" + valueExpression + ")", args
+}
+
+// gormConditionExpression 构建字段级条件的 SQL 片段和绑定参数
+func gormConditionExpression(db *gorm.DB, condition Condition) (string, []any) {
+	field := quoteGormIdentifier(db, condition.Field)
+	return field + " " + gormOperator(condition.Op) + " ?", []any{condition.Value}
+}
+
+// gormHavingExpression 构建 HAVING 条件的 SQL 片段和绑定参数
+func gormHavingExpression(db *gorm.DB, spec Spec, having Having) (string, []any) {
+	metric, ok := metricByAlias(spec.Metrics, having.Alias)
+	if !ok {
+		alias := quoteGormIdentifier(db, having.Alias)
+		return alias + " " + gormOperator(having.Op) + " ?", []any{having.Value}
+	}
+	expression, args := gormMetricExpression(db, metric)
+	args = append(args, having.Value)
+	return expression + " " + gormOperator(having.Op) + " ?", args
+}
+
+// gormOperator 将通用比较操作符转换为 SQL 操作符
+func gormOperator(op Operator) string {
+	switch op {
+	case Eq:
+		return "="
+	case Ne:
+		return "<>"
+	case Gt:
+		return ">"
+	case Gte:
+		return ">="
+	case Lt:
+		return "<"
+	case Lte:
+		return "<="
+	default:
+		return "="
+	}
 }
 
 // quoteGormIdentifier 使用当前 GORM 方言引用点分标识符

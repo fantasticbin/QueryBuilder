@@ -340,3 +340,177 @@ func TestNormalizeSpec(t *testing.T) {
 		t.Fatalf("expected scalar limit 0, got %d", scalar.Limit)
 	}
 }
+
+func TestBuilderAdvancedSpecChain(t *testing.T) {
+	t.Parallel()
+
+	paid := conditionFromExpression("status = ?", "paid")
+	builder := NewMongoBuilder[specChainRow](nil)
+	builder.GroupBy("region", "region").
+		Count("total").
+		CountIf("paid_total", "status = ?", "paid").
+		CountDistinctIf("customer.id", "paid_customers", "status = ?", "paid").
+		SumIf("amount", "paid_amount", "status = ?", "paid").
+		SumDistinctIf("amount", "unique_paid_amount", "status = ?", "paid").
+		AvgIf("amount", "paid_avg", "status = ?", "paid").
+		MinIf("amount", "paid_min", "status = ?", "paid").
+		MaxIf("amount", "paid_max", "status = ?", "paid").
+		OrderByDesc("paid_amount").
+		Having("paid_amount >= ?", 100.5).
+		SetLimit(10)
+
+	expected := Spec{
+		Groups: []Group{{Field: "region", Alias: "region"}},
+		Metrics: []Metric{
+			{Func: Count, Alias: "total"},
+			{Func: Count, Alias: "paid_total", Condition: &paid},
+			{Func: Count, Field: "customer.id", Alias: "paid_customers", Distinct: true, Condition: &paid},
+			{Func: Sum, Field: "amount", Alias: "paid_amount", Condition: &paid},
+			{Func: Sum, Field: "amount", Alias: "unique_paid_amount", Distinct: true, Condition: &paid},
+			{Func: Avg, Field: "amount", Alias: "paid_avg", Condition: &paid},
+			{Func: Min, Field: "amount", Alias: "paid_min", Condition: &paid},
+			{Func: Max, Field: "amount", Alias: "paid_max", Condition: &paid},
+		},
+		Orders:  []Order{{Alias: "paid_amount", Descending: true}},
+		Havings: []Having{{Alias: "paid_amount", Op: Gte, Value: 100.5}},
+		Limit:   10,
+	}
+	got := builder.Meta().Spec
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("unexpected spec: %#v", got)
+	}
+	if err := validateSpec(normalizeSpec(got)); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	paid.Value = "refunded"
+	if got := builder.Meta().Spec; got.Metrics[1].Condition.Value != "paid" {
+		t.Fatalf("condition was not defensively copied: %#v", got.Metrics[1].Condition)
+	}
+}
+
+func TestComparisonExpressionParsing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		query    string
+		value    any
+		expected Condition
+	}{
+
+		{name: "equals", query: "status = ?", value: "paid", expected: Condition{Field: "status", Op: Eq, Value: "paid"}},
+		{name: "double equals", query: "status == ?", value: "paid", expected: Condition{Field: "status", Op: Eq, Value: "paid"}},
+		{name: "not equals", query: "status != ?", value: "refunded", expected: Condition{Field: "status", Op: Ne, Value: "refunded"}},
+		{name: "sql not equals", query: "status <> ?", value: "refunded", expected: Condition{Field: "status", Op: Ne, Value: "refunded"}},
+		{name: "greater than", query: "amount > ?", value: 10, expected: Condition{Field: "amount", Op: Gt, Value: 10}},
+		{name: "greater or equal", query: "amount >= ?", value: 10, expected: Condition{Field: "amount", Op: Gte, Value: 10}},
+		{name: "less than", query: "customer.score < ?", value: 100, expected: Condition{Field: "customer.score", Op: Lt, Value: 100}},
+		{name: "less or equal", query: "customer.score <= ?", value: 100, expected: Condition{Field: "customer.score", Op: Lte, Value: 100}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := conditionFromExpression(test.query, test.value)
+			if !reflect.DeepEqual(got, test.expected) {
+				t.Fatalf("unexpected condition: %#v", got)
+			}
+		})
+	}
+
+	if got := havingFromExpression("paid_amount >= ?", 100); !reflect.DeepEqual(got, Having{Alias: "paid_amount", Op: Gte, Value: 100}) {
+		t.Fatalf("unexpected having from expression: %#v", got)
+	}
+}
+
+func TestValidateAdvancedSpec(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		spec Spec
+		err  error
+	}{
+		{
+			name: "valid order having and condition",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Sum, Field: "amount", Alias: "paid_amount", Condition: conditionPtr(conditionFromExpression("status = ?", "paid"))}},
+				Orders:  []Order{{Alias: "paid_amount", Descending: true}},
+				Havings: []Having{havingFromExpression("paid_amount > ?", 10)},
+			},
+		},
+		{
+			name: "order rejects unknown alias",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Orders:  []Order{{Alias: "missing"}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "having rejects group alias",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Havings: []Having{{Alias: "region", Op: Eq, Value: 1}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "having requires groups",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Havings: []Having{{Alias: "total", Op: Gte, Value: 1}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "having requires numeric value",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Havings: []Having{{Alias: "total", Op: Gte, Value: "10"}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "condition rejects unsafe field",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status; DROP = ?", "paid"))}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "condition rejects unsupported expression",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status like ?", "paid"))}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "having rejects unsupported expression",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Havings: []Having{havingFromExpression("total like ?", 1)},
+			},
+			err: ErrInvalidSpec,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateSpec(normalizeSpec(test.spec))
+			if test.err == nil && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if test.err != nil && !errors.Is(err, test.err) {
+				t.Fatalf("expected error %v, got %v", test.err, err)
+			}
+		})
+	}
+}

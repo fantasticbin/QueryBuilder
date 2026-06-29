@@ -107,15 +107,15 @@ func (b *MongoBuilder[A]) Explain(context.Context) (string, error) {
 
 // buildPipeline 根据聚合规范构建 MongoDB pipeline
 func (b *MongoBuilder[A]) buildPipeline() mongo.Pipeline {
-	if b.hasDistinctMetric() {
-		return b.buildDistinctPipeline()
+	if b.hasFacetMetric() {
+		return b.buildFacetPipeline()
 	}
 	return b.buildSimplePipeline()
 }
 
-// buildSimplePipeline 构建不含去重指标的单阶段统计管道
+// buildSimplePipeline 构建不含去重或条件指标的单阶段统计管道
 func (b *MongoBuilder[A]) buildSimplePipeline() mongo.Pipeline {
-	pipeline := make(mongo.Pipeline, 0, 5)
+	pipeline := make(mongo.Pipeline, 0, 6)
 	if match := b.buildMatch(); len(match) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
@@ -125,12 +125,12 @@ func (b *MongoBuilder[A]) buildSimplePipeline() mongo.Pipeline {
 		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), b.spec.Metrics)}},
 		bson.D{{Key: "$project", Value: b.buildProjection(b.spec.Metrics)}},
 	)
-	return b.appendSortAndLimit(pipeline)
+	return b.appendHavingSortAndLimit(pipeline)
 }
 
-// buildDistinctPipeline 构建包含去重指标的精确统计管道
-func (b *MongoBuilder[A]) buildDistinctPipeline() mongo.Pipeline {
-	pipeline := make(mongo.Pipeline, 0, 9)
+// buildFacetPipeline 构建包含去重或条件指标的统计管道
+func (b *MongoBuilder[A]) buildFacetPipeline() mongo.Pipeline {
+	pipeline := make(mongo.Pipeline, 0, 10)
 	if match := b.buildMatch(); len(match) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
@@ -138,11 +138,11 @@ func (b *MongoBuilder[A]) buildDistinctPipeline() mongo.Pipeline {
 	facets := bson.D{{Key: mongoBaseFacet, Value: b.buildBaseFacetPipeline()}}
 	facetArrays := bson.A{"$" + mongoBaseFacet}
 	for index, metric := range b.spec.Metrics {
-		if !isDistinctMetric(metric) {
+		if !requiresMetricFacet(metric) {
 			continue
 		}
-		facetName := fmt.Sprintf("_distinct_%d", index)
-		facets = append(facets, bson.E{Key: facetName, Value: b.buildDistinctMetricFacetPipeline(metric)})
+		facetName := mongoMetricFacetName(index, metric)
+		facets = append(facets, bson.E{Key: facetName, Value: b.buildMetricFacetPipeline(metric)})
 		facetArrays = append(facetArrays, "$"+facetName)
 	}
 
@@ -158,7 +158,7 @@ func (b *MongoBuilder[A]) buildDistinctPipeline() mongo.Pipeline {
 	for _, metric := range b.spec.Metrics {
 		value := any("$" + metric.Alias)
 		operator := "$max"
-		if isDistinctMetric(metric) {
+		if requiresMetricFacet(metric) && usesSummingMerge(metric) {
 			value = bson.D{{Key: "$ifNull", Value: bson.A{"$" + metric.Alias, 0}}}
 			operator = "$sum"
 		}
@@ -176,14 +176,14 @@ func (b *MongoBuilder[A]) buildDistinctPipeline() mongo.Pipeline {
 		bson.D{{Key: "$group", Value: mergeGroup}},
 		bson.D{{Key: "$project", Value: b.buildProjection(b.spec.Metrics)}},
 	)
-	return b.appendSortAndLimit(pipeline)
+	return b.appendHavingSortAndLimit(pipeline)
 }
 
 // buildBaseFacetPipeline 构建保留原始统计语义的基础分支
 func (b *MongoBuilder[A]) buildBaseFacetPipeline() mongo.Pipeline {
 	metrics := make([]Metric, 0, len(b.spec.Metrics))
 	for _, metric := range b.spec.Metrics {
-		if !isDistinctMetric(metric) {
+		if !requiresMetricFacet(metric) {
 			metrics = append(metrics, metric)
 		}
 	}
@@ -191,6 +191,23 @@ func (b *MongoBuilder[A]) buildBaseFacetPipeline() mongo.Pipeline {
 		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), metrics)}},
 		bson.D{{Key: "$project", Value: b.buildProjection(metrics)}},
 	}
+}
+
+// buildMetricFacetPipeline 构建单个需要独立分支计算的指标管道
+func (b *MongoBuilder[A]) buildMetricFacetPipeline(metric Metric) mongo.Pipeline {
+	if isDistinctMetric(metric) {
+		return b.buildDistinctMetricFacetPipeline(metric)
+	}
+
+	pipeline := make(mongo.Pipeline, 0, 3)
+	if metric.Condition != nil {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: b.buildConditionMatch(*metric.Condition)}})
+	}
+	return append(
+		pipeline,
+		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), []Metric{metric})}},
+		bson.D{{Key: "$project", Value: b.buildProjection([]Metric{metric})}},
+	)
 }
 
 // buildDistinctMetricFacetPipeline 构建单个去重指标分支的两阶段分组
@@ -282,29 +299,54 @@ func (b *MongoBuilder[A]) buildProjection(metrics []Metric) bson.D {
 	return projection
 }
 
-// buildMetricMatch 构建单个指标字段的非空过滤条件
+// buildMetricMatch 构建单个去重指标字段的非空过滤条件
 func (b *MongoBuilder[A]) buildMetricMatch(metric Metric) bson.D {
-	return bson.D{{
+	clauses := bson.A{bson.D{{
 		Key: metric.Field,
 		Value: bson.D{
 			{Key: "$exists", Value: true},
 			{Key: "$ne", Value: nil},
 		},
-	}}
+	}}}
+	if metric.Condition != nil {
+		clauses = append(clauses, b.buildConditionMatch(*metric.Condition))
+	}
+	return mergeMongoClauses(clauses)
 }
 
-// appendSortAndLimit 为分组结果追加排序和数量限制
-func (b *MongoBuilder[A]) appendSortAndLimit(pipeline mongo.Pipeline) mongo.Pipeline {
+// buildConditionMatch 构建字段级条件过滤文档
+func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
+	expression := bson.D{{Key: "$expr", Value: mongoConditionExpression(condition)}}
+	if condition.Op != Ne {
+		return expression
+	}
+	return mergeMongoClauses(bson.A{
+		bson.D{{
+			Key: condition.Field,
+			Value: bson.D{
+				{Key: "$exists", Value: true},
+				{Key: "$ne", Value: nil},
+			},
+		}},
+		expression,
+	})
+}
+
+// appendHavingSortAndLimit 为分组结果追加 HAVING、排序和数量限制
+func (b *MongoBuilder[A]) appendHavingSortAndLimit(pipeline mongo.Pipeline) mongo.Pipeline {
+	if len(b.spec.Havings) > 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: b.buildHavingMatch()}})
+	}
 	if len(b.spec.Groups) == 0 {
 		return pipeline
 	}
 	sort := make(bson.D, 0, len(b.spec.Groups))
-	for _, group := range b.spec.Groups {
+	for _, order := range effectiveOrders(b.spec) {
 		direction := 1
-		if group.Descending {
+		if order.Descending {
 			direction = -1
 		}
-		sort = append(sort, bson.E{Key: group.Alias, Value: direction})
+		sort = append(sort, bson.E{Key: order.Alias, Value: direction})
 	}
 	return append(
 		pipeline,
@@ -313,10 +355,43 @@ func (b *MongoBuilder[A]) appendSortAndLimit(pipeline mongo.Pipeline) mongo.Pipe
 	)
 }
 
-// hasDistinctMetric 判断当前规范是否包含去重指标
-func (b *MongoBuilder[A]) hasDistinctMetric() bool {
+// buildHavingMatch 构建聚合后指标过滤文档
+func (b *MongoBuilder[A]) buildHavingMatch() bson.D {
+	clauses := make(bson.A, 0, len(b.spec.Havings))
+	for _, having := range b.spec.Havings {
+		clauses = append(clauses, b.buildHavingClause(having))
+	}
+	return mergeMongoClauses(clauses)
+}
+
+// buildHavingClause 构建单个 HAVING 过滤条件
+func (b *MongoBuilder[A]) buildHavingClause(having Having) bson.D {
+	comparison := bson.D{{
+		Key: having.Alias,
+		Value: bson.D{{
+			Key:   mongoOperator(having.Op),
+			Value: having.Value,
+		}},
+	}}
+	if having.Op != Ne {
+		return comparison
+	}
+	return mergeMongoClauses(bson.A{
+		bson.D{{
+			Key: having.Alias,
+			Value: bson.D{
+				{Key: "$exists", Value: true},
+				{Key: "$ne", Value: nil},
+			},
+		}},
+		comparison,
+	})
+}
+
+// hasFacetMetric 判断当前规范是否包含需要独立分支计算的指标
+func (b *MongoBuilder[A]) hasFacetMetric() bool {
 	for _, metric := range b.spec.Metrics {
-		if isDistinctMetric(metric) {
+		if requiresMetricFacet(metric) {
 			return true
 		}
 	}
@@ -338,6 +413,52 @@ func (b *MongoBuilder[A]) buildMatch() bson.D {
 			},
 		}})
 	}
+	return mergeMongoClauses(clauses)
+}
+
+// mongoMetricFacetName 返回需要独立分支计算的指标 facet 名称
+func mongoMetricFacetName(index int, metric Metric) string {
+	if isDistinctMetric(metric) {
+		return fmt.Sprintf("_distinct_%d", index)
+	}
+	return fmt.Sprintf("_conditional_%d", index)
+}
+
+// usesSummingMerge 判断 facet 合并阶段是否应累加指标值
+func usesSummingMerge(metric Metric) bool {
+	return metric.Func == Count || metric.Func == Sum
+}
+
+// mongoConditionExpression 构建 MongoDB $expr 条件表达式
+func mongoConditionExpression(condition Condition) bson.D {
+	return bson.D{{
+		Key:   mongoOperator(condition.Op),
+		Value: bson.A{"$" + condition.Field, condition.Value},
+	}}
+}
+
+// mongoOperator 将通用比较操作符转换为 MongoDB 表达式操作符
+func mongoOperator(op Operator) string {
+	switch op {
+	case Eq:
+		return "$eq"
+	case Ne:
+		return "$ne"
+	case Gt:
+		return "$gt"
+	case Gte:
+		return "$gte"
+	case Lt:
+		return "$lt"
+	case Lte:
+		return "$lte"
+	default:
+		return "$eq"
+	}
+}
+
+// mergeMongoClauses 合并多个 MongoDB 过滤条件
+func mergeMongoClauses(clauses bson.A) bson.D {
 	if len(clauses) == 0 {
 		return bson.D{}
 	}

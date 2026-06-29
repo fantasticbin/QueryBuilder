@@ -160,3 +160,96 @@ func TestMongoBuilderNestedFilterCloneIsolation(t *testing.T) {
 		t.Fatalf("nested filter was shared between clone and original: %#v", original.filter)
 	}
 }
+
+func TestMongoBuilderExplainAdvancedSpec(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupBy("region", "region").
+		Count("total").
+		CountIf("paid_total", "status = ?", "paid").
+		SumIf("amount", "paid_amount", "status = ?", "paid").
+		Having("paid_amount >= ?", 100).
+		OrderByDesc("paid_amount").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(explanation), &payload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+	pipeline := payload["pipeline"].([]any)
+	facet := pipeline[1].(map[string]any)["$facet"].(map[string]any)
+	if _, ok := facet[mongoBaseFacet].([]any); !ok {
+		t.Fatalf("expected base facet: %s", explanation)
+	}
+	conditional := facet["_conditional_1"].([]any)
+	match := conditional[0].(map[string]any)["$match"].(map[string]any)
+	if _, ok := match["$expr"]; !ok {
+		t.Fatalf("expected conditional metric match to use $expr: %v", match)
+	}
+	postHaving := pipeline[len(pipeline)-3].(map[string]any)["$match"].(map[string]any)
+	if _, ok := postHaving["paid_amount"]; !ok {
+		t.Fatalf("expected having match on paid_amount: %v", postHaving)
+	}
+	sort := pipeline[len(pipeline)-2].(map[string]any)["$sort"].(map[string]any)
+	if sort["paid_amount"].(map[string]any)["$numberInt"] != "-1" {
+		t.Fatalf("unexpected sort stage: %v", sort)
+	}
+}
+
+func TestMongoConditionNotEqualExcludesMissingAndNull(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[mongoSummary](nil)
+	match := builder.buildConditionMatch(Condition{Field: "status", Op: Ne, Value: "paid"})
+	if len(match) != 1 || match[0].Key != "$and" {
+		t.Fatalf("expected $and condition, got %#v", match)
+	}
+	clauses := match[0].Value.(bson.A)
+	if len(clauses) != 2 {
+		t.Fatalf("expected field existence and expression clauses, got %#v", clauses)
+	}
+	fieldClause := clauses[0].(bson.D)
+	if fieldClause[0].Key != "status" {
+		t.Fatalf("expected status field clause, got %#v", fieldClause)
+	}
+	operators := fieldClause[0].Value.(bson.D)
+	if operators[0].Key != "$exists" || operators[0].Value != true || operators[1].Key != "$ne" || operators[1].Value != nil {
+		t.Fatalf("unexpected field operators: %#v", operators)
+	}
+	exprClause := clauses[1].(bson.D)
+	if exprClause[0].Key != "$expr" {
+		t.Fatalf("expected expression clause, got %#v", exprClause)
+	}
+}
+func TestMongoHavingNotEqualExcludesMissingAndNull(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[mongoSummary](nil)
+	match := builder.buildHavingClause(Having{Alias: "paid_amount", Op: Ne, Value: 100})
+	if len(match) != 1 || match[0].Key != "$and" {
+		t.Fatalf("expected $and having condition, got %#v", match)
+	}
+	clauses := match[0].Value.(bson.A)
+	if len(clauses) != 2 {
+		t.Fatalf("expected field existence and comparison clauses, got %#v", clauses)
+	}
+	fieldClause := clauses[0].(bson.D)
+	if fieldClause[0].Key != "paid_amount" {
+		t.Fatalf("expected paid_amount field clause, got %#v", fieldClause)
+	}
+	operators := fieldClause[0].Value.(bson.D)
+	if operators[0].Key != "$exists" || operators[0].Value != true || operators[1].Key != "$ne" || operators[1].Value != nil {
+		t.Fatalf("unexpected field operators: %#v", operators)
+	}
+	comparisonClause := clauses[1].(bson.D)
+	comparison := comparisonClause[0].Value.(bson.D)
+	if comparisonClause[0].Key != "paid_amount" || comparison[0].Key != "$ne" || comparison[0].Value != 100 {
+		t.Fatalf("unexpected comparison clause: %#v", comparisonClause)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/olivere/elastic/v7"
@@ -13,6 +15,8 @@ import (
 const (
 	elasticRootAggregation   = "_querybuilder_aggregate"
 	elasticBucketAggregation = "_querybuilder_groups"
+	elasticOrderAggregation  = "_querybuilder_order"
+	elasticCompositePageSize = 5000
 )
 
 // ElasticSearchBuilder 用于构建 Elasticsearch 聚合查询
@@ -65,6 +69,10 @@ func (b *ElasticSearchBuilder[A]) Query(ctx context.Context) (*Result[A], error)
 		if err != nil {
 			return nil, err
 		}
+		if b.needsElasticClientPostProcessing() {
+			return b.queryGroupedWithClientPostProcessing(ctx, client)
+		}
+
 		root := b.buildAggregation()
 		searchResult, err := client.Search().
 			Index(b.index).
@@ -94,6 +102,14 @@ func (b *ElasticSearchBuilder[A]) Explain(context.Context) (string, error) {
 			elasticRootAggregation: rootSource,
 		},
 	}
+	if b.needsElasticClientPostProcessing() {
+		payload["client_post_processing"] = map[string]any{
+			"full_scan": b.needsElasticFullClientPostProcessing(),
+			"havings":   len(b.spec.Havings) > 0,
+			"orders":    len(b.spec.Orders) > 0,
+			"limit":     b.spec.Limit,
+		}
+	}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encoding elasticsearch aggregate dsl: %w", err)
@@ -112,8 +128,27 @@ func (b *ElasticSearchBuilder[A]) prepareElasticSearch() error {
 	return nil
 }
 
+// elasticAggregationOptions 定义一次 Elasticsearch 聚合请求的分页与管道选项
+type elasticAggregationOptions struct {
+	size            int
+	after           map[string]any
+	includePipeline bool
+}
+
 // buildAggregation 根据聚合规范构建 Elasticsearch filter 和 composite aggregation
 func (b *ElasticSearchBuilder[A]) buildAggregation() *elastic.FilterAggregation {
+	size := int(b.spec.Limit)
+	if b.needsElasticClientPostProcessing() {
+		size = elasticCompositePageSize
+	}
+	return b.buildAggregationWithOptions(elasticAggregationOptions{
+		size:            size,
+		includePipeline: !b.needsElasticClientPostProcessing(),
+	})
+}
+
+// buildAggregationWithOptions 根据聚合规范构建可分页的 Elasticsearch 聚合请求
+func (b *ElasticSearchBuilder[A]) buildAggregationWithOptions(options elasticAggregationOptions) *elastic.FilterAggregation {
 	filter := b.filter
 	if filter == nil {
 		filter = elastic.NewMatchAllQuery()
@@ -121,19 +156,19 @@ func (b *ElasticSearchBuilder[A]) buildAggregation() *elastic.FilterAggregation 
 	root := elastic.NewFilterAggregation().Filter(filter)
 	if len(b.spec.Groups) == 0 {
 		for _, metric := range b.spec.Metrics {
-			if metric.Func != Count || isDistinctCount(metric) {
+			if metric.Func != Count || isDistinctCount(metric) || metric.Condition != nil {
 				root = root.SubAggregation(metric.Alias, elasticMetric(metric))
 			}
 		}
 		return root
 	}
 
+	if options.size <= 0 {
+		options.size = int(b.spec.Limit)
+	}
 	sources := make([]elastic.CompositeAggregationValuesSource, 0, len(b.spec.Groups))
 	for _, group := range b.spec.Groups {
-		order := "asc"
-		if group.Descending {
-			order = "desc"
-		}
+		order := b.elasticGroupOrder(group)
 		sources = append(
 			sources,
 			elastic.NewCompositeAggregationTermsValuesSource(group.Alias).
@@ -144,10 +179,21 @@ func (b *ElasticSearchBuilder[A]) buildAggregation() *elastic.FilterAggregation 
 	}
 	buckets := elastic.NewCompositeAggregation().
 		Sources(sources...).
-		Size(int(b.spec.Limit))
+		Size(options.size)
+	if len(options.after) > 0 {
+		buckets = buckets.AggregateAfter(options.after)
+	}
 	for _, metric := range b.spec.Metrics {
-		if metric.Func != Count || isDistinctCount(metric) {
+		if metric.Func != Count || isDistinctCount(metric) || metric.Condition != nil {
 			buckets = buckets.SubAggregation(metric.Alias, elasticMetric(metric))
+		}
+	}
+	if options.includePipeline {
+		for i, having := range b.spec.Havings {
+			buckets = buckets.SubAggregation(elasticHavingAggregationName(i), b.elasticHavingAggregation(having))
+		}
+		if b.elasticOrdersNeedClientPostProcessing() {
+			buckets = buckets.SubAggregation(elasticOrderAggregation, b.elasticBucketSortAggregation())
 		}
 	}
 	return root.SubAggregation(elasticBucketAggregation, buckets)
@@ -155,6 +201,18 @@ func (b *ElasticSearchBuilder[A]) buildAggregation() *elastic.FilterAggregation 
 
 // elasticMetric 将通用指标转换为 Elasticsearch 指标聚合
 func elasticMetric(metric Metric) elastic.Aggregation {
+	if metric.Condition != nil {
+		filter := elastic.NewFilterAggregation().Filter(elasticConditionQuery(*metric.Condition))
+		if metricAggregation := elasticBaseMetric(metric); metricAggregation != nil {
+			filter = filter.SubAggregation(metric.Alias, metricAggregation)
+		}
+		return filter
+	}
+	return elasticBaseMetric(metric)
+}
+
+// elasticBaseMetric 将无条件指标转换为 Elasticsearch 指标聚合
+func elasticBaseMetric(metric Metric) elastic.Aggregation {
 	switch metric.Func {
 	case Count:
 		if isDistinctCount(metric) {
@@ -185,14 +243,355 @@ func elasticSumDistinctMetric(metric Metric) elastic.Aggregation {
 		Params(map[string]interface{}{"field": metric.Field})
 }
 
+// elasticConditionQuery 将通用字段条件转换为 Elasticsearch 查询
+func elasticConditionQuery(condition Condition) elastic.Query {
+	switch condition.Op {
+	case Eq:
+		return elastic.NewTermQuery(condition.Field, condition.Value)
+	case Ne:
+		return elastic.NewBoolQuery().Must(elastic.NewExistsQuery(condition.Field)).MustNot(elastic.NewTermQuery(condition.Field, condition.Value))
+	case Gt:
+		return elastic.NewRangeQuery(condition.Field).Gt(condition.Value)
+	case Gte:
+		return elastic.NewRangeQuery(condition.Field).Gte(condition.Value)
+	case Lt:
+		return elastic.NewRangeQuery(condition.Field).Lt(condition.Value)
+	case Lte:
+		return elastic.NewRangeQuery(condition.Field).Lte(condition.Value)
+	default:
+		return elastic.NewTermQuery(condition.Field, condition.Value)
+	}
+}
+
+// elasticGroupOrder 返回 composite 分组源使用的排序方向
+func (b *ElasticSearchBuilder[A]) elasticGroupOrder(group Group) string {
+	descending := group.Descending
+	for _, order := range b.spec.Orders {
+		if strings.EqualFold(order.Alias, group.Alias) {
+			descending = order.Descending
+			break
+		}
+	}
+	if descending {
+		return "desc"
+	}
+	return "asc"
+}
+
+// elasticBucketSortAggregation 构建用于显式结果排序的 bucket_sort 聚合
+func (b *ElasticSearchBuilder[A]) elasticBucketSortAggregation() elastic.Aggregation {
+	sort := elastic.NewBucketSortAggregation().Size(int(b.spec.Limit))
+	for _, order := range b.spec.Orders {
+		sort = sort.Sort(b.elasticBucketSortField(order.Alias), !order.Descending)
+	}
+	return sort
+}
+
+// elasticBucketSortField 返回 bucket_sort 引用的分组键或指标路径
+func (b *ElasticSearchBuilder[A]) elasticBucketSortField(alias string) string {
+	if b.hasGroupAlias(alias) {
+		return "_key." + alias
+	}
+	return b.elasticHavingBucketPath(alias)
+}
+
+// hasGroupAlias 判断别名是否引用分组输出
+func (b *ElasticSearchBuilder[A]) hasGroupAlias(alias string) bool {
+	for _, group := range b.spec.Groups {
+		if strings.EqualFold(group.Alias, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// elasticHavingAggregation 构建用于 HAVING 过滤的 bucket_selector 聚合
+func (b *ElasticSearchBuilder[A]) elasticHavingAggregation(having Having) elastic.Aggregation {
+	return elastic.NewBucketSelectorAggregation().
+		AddBucketsPath("value", b.elasticHavingBucketPath(having.Alias)).
+		Script(elastic.NewScript("params.value "+elasticScriptOperator(having.Op)+" params.threshold").Param("threshold", having.Value))
+}
+
+// elasticHavingBucketPath 返回 bucket_selector 引用的指标路径
+func (b *ElasticSearchBuilder[A]) elasticHavingBucketPath(alias string) string {
+	metric, ok := b.metricByAlias(alias)
+	if !ok {
+		return alias
+	}
+	if metric.Func == Count && !isDistinctCount(metric) {
+		if metric.Condition != nil {
+			return alias + ">_count"
+		}
+		return "_count"
+	}
+	if metric.Condition != nil {
+		return alias + ">" + alias
+	}
+	return alias
+}
+
+// metricByAlias 按别名查找指标配置
+func (b *ElasticSearchBuilder[A]) metricByAlias(alias string) (Metric, bool) {
+	for _, metric := range b.spec.Metrics {
+		if strings.EqualFold(metric.Alias, alias) {
+			return metric, true
+		}
+	}
+	return Metric{}, false
+}
+
+// elasticHavingAggregationName 返回 HAVING pipeline 聚合的内部名称
+func elasticHavingAggregationName(index int) string {
+	return fmt.Sprintf("_having_%d", index)
+}
+
+// elasticScriptOperator 将通用比较操作符转换为 painless 脚本操作符
+func elasticScriptOperator(op Operator) string {
+	switch op {
+	case Eq:
+		return "=="
+	case Ne:
+		return "!="
+	case Gt:
+		return ">"
+	case Gte:
+		return ">="
+	case Lt:
+		return "<"
+	case Lte:
+		return "<="
+	default:
+		return "=="
+	}
+}
+
+// needsElasticClientPostProcessing 判断是否需要在客户端完成完整分组后的后处理
+func (b *ElasticSearchBuilder[A]) needsElasticClientPostProcessing() bool {
+	return len(b.spec.Groups) > 0 && (len(b.spec.Havings) > 0 || b.needsElasticFullClientPostProcessing())
+}
+
+// needsElasticFullClientPostProcessing 判断是否必须读取完整 bucket 集合后才能排序或截断
+func (b *ElasticSearchBuilder[A]) needsElasticFullClientPostProcessing() bool {
+	return len(b.spec.Groups) > 0 && b.elasticOrdersNeedClientPostProcessing()
+}
+
+// elasticOrdersNeedClientPostProcessing 判断显式排序是否无法由 composite source 顺序表达
+func (b *ElasticSearchBuilder[A]) elasticOrdersNeedClientPostProcessing() bool {
+	if len(b.spec.Orders) == 0 {
+		return false
+	}
+	for i, order := range b.spec.Orders {
+		if i >= len(b.spec.Groups) || !strings.EqualFold(order.Alias, b.spec.Groups[i].Alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// queryGroupedWithClientPostProcessing 分页读取全部 composite bucket 后再执行 HAVING、排序和 limit
+func (b *ElasticSearchBuilder[A]) queryGroupedWithClientPostProcessing(ctx context.Context, client *elastic.Client) (*Result[A], error) {
+	rowValues := make([]map[string]any, 0)
+	fullPostProcessing := b.needsElasticFullClientPostProcessing()
+	var after map[string]any
+	for {
+		root := b.buildAggregationWithOptions(elasticAggregationOptions{
+			size:  elasticCompositePageSize,
+			after: after,
+		})
+		searchResult, err := client.Search().
+			Index(b.index).
+			Size(0).
+			Aggregation(elasticRootAggregation, root).
+			Do(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("executing elasticsearch aggregate query: %w", err)
+		}
+
+		buckets, err := b.decodeCompositeBuckets(searchResult)
+		if err != nil {
+			return nil, err
+		}
+		values, err := b.decodeCompositeRowValues(buckets.Buckets)
+		if err != nil {
+			return nil, err
+		}
+		if !fullPostProcessing {
+			values = b.filterElasticRowValues(values)
+		}
+		rowValues = append(rowValues, values...)
+		if !fullPostProcessing && b.spec.Limit > 0 && len(rowValues) >= int(b.spec.Limit) {
+			rowValues = rowValues[:int(b.spec.Limit)]
+			break
+		}
+		if len(buckets.Buckets) == 0 || len(buckets.AfterKey) == 0 {
+			break
+		}
+		after = buckets.AfterKey
+	}
+
+	if fullPostProcessing {
+		rowValues = b.postProcessElasticRowValues(rowValues)
+	}
+	return decodeElasticRows[A](rowValues)
+}
+
+// postProcessElasticRowValues 在完整分组结果上执行 HAVING、排序和 limit
+func (b *ElasticSearchBuilder[A]) postProcessElasticRowValues(rows []map[string]any) []map[string]any {
+	rows = b.filterElasticRowValues(rows)
+	b.sortElasticRowValues(rows)
+	if b.spec.Limit > 0 && len(rows) > int(b.spec.Limit) {
+		rows = rows[:int(b.spec.Limit)]
+	}
+	return rows
+}
+
+// filterElasticRowValues 执行聚合后的 HAVING 过滤
+func (b *ElasticSearchBuilder[A]) filterElasticRowValues(rows []map[string]any) []map[string]any {
+	if len(b.spec.Havings) == 0 {
+		return rows
+	}
+	filtered := rows[:0]
+	for _, row := range rows {
+		if b.elasticRowMatchesHavings(row) {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+// elasticRowMatchesHavings 判断一行聚合结果是否满足全部 HAVING 条件
+func (b *ElasticSearchBuilder[A]) elasticRowMatchesHavings(row map[string]any) bool {
+	for _, having := range b.spec.Havings {
+		if !elasticCompareNumeric(row[having.Alias], having.Op, having.Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// sortElasticRowValues 按显式排序规则排序聚合结果
+func (b *ElasticSearchBuilder[A]) sortElasticRowValues(rows []map[string]any) {
+	if len(b.spec.Orders) == 0 {
+		return
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		for _, order := range b.spec.Orders {
+			comparison := elasticCompareValues(rows[i][order.Alias], rows[j][order.Alias])
+			if comparison == 0 {
+				continue
+			}
+			if order.Descending {
+				return comparison > 0
+			}
+			return comparison < 0
+		}
+		return false
+	})
+}
+
+// elasticCompareNumeric 按通用操作符比较两个数值
+func elasticCompareNumeric(left any, op Operator, right any) bool {
+	leftNumber, ok := elasticNumber(left)
+	if !ok {
+		return false
+	}
+	rightNumber, ok := elasticNumber(right)
+	if !ok {
+		return false
+	}
+	switch op {
+	case Eq:
+		return leftNumber == rightNumber
+	case Ne:
+		return leftNumber != rightNumber
+	case Gt:
+		return leftNumber > rightNumber
+	case Gte:
+		return leftNumber >= rightNumber
+	case Lt:
+		return leftNumber < rightNumber
+	case Lte:
+		return leftNumber <= rightNumber
+	default:
+		return false
+	}
+}
+
+// elasticCompareValues 返回排序比较结果，数值按数值比，其他值按字符串比
+func elasticCompareValues(left any, right any) int {
+	if left == nil && right == nil {
+		return 0
+	}
+	if left == nil {
+		return -1
+	}
+	if right == nil {
+		return 1
+	}
+	leftNumber, leftOK := elasticNumber(left)
+	rightNumber, rightOK := elasticNumber(right)
+	if leftOK && rightOK {
+		switch {
+		case leftNumber < rightNumber:
+			return -1
+		case leftNumber > rightNumber:
+			return 1
+		default:
+			return 0
+		}
+	}
+	leftString := fmt.Sprint(left)
+	rightString := fmt.Sprint(right)
+	switch {
+	case leftString < rightString:
+		return -1
+	case leftString > rightString:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// elasticNumber 将常见数值类型转换为 float64 以便 HAVING 和排序比较
+func elasticNumber(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int8:
+		return float64(typed), true
+	case int16:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint:
+		return float64(typed), true
+	case uint8:
+		return float64(typed), true
+	case uint16:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	default:
+		return 0, false
+	}
+}
+
 // decodeResult 将 Elasticsearch 聚合响应解码为类型安全的结果
 func (b *ElasticSearchBuilder[A]) decodeResult(searchResult *elastic.SearchResult) (*Result[A], error) {
-	if searchResult == nil {
-		return nil, errors.New("decoding elasticsearch aggregate result: empty response")
-	}
-	root, ok := searchResult.Aggregations.Filter(elasticRootAggregation)
-	if !ok || root == nil {
-		return nil, errors.New("decoding elasticsearch aggregate result: root aggregation missing")
+	root, err := elasticRootBucket(searchResult)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(b.spec.Groups) == 0 {
@@ -203,19 +602,56 @@ func (b *ElasticSearchBuilder[A]) decodeResult(searchResult *elastic.SearchResul
 		return &Result[A]{Rows: []*A{row}}, nil
 	}
 
+	buckets, err := b.decodeCompositeBuckets(searchResult)
+	if err != nil {
+		return nil, err
+	}
+	rowValues, err := b.decodeCompositeRowValues(buckets.Buckets)
+	if err != nil {
+		return nil, err
+	}
+	if b.needsElasticClientPostProcessing() {
+		rowValues = b.postProcessElasticRowValues(rowValues)
+	}
+	return decodeElasticRows[A](rowValues)
+}
+
+// elasticRootBucket 读取根 filter 聚合结果
+func elasticRootBucket(searchResult *elastic.SearchResult) (*elastic.AggregationSingleBucket, error) {
+	if searchResult == nil {
+		return nil, errors.New("decoding elasticsearch aggregate result: empty response")
+	}
+	root, ok := searchResult.Aggregations.Filter(elasticRootAggregation)
+	if !ok || root == nil {
+		return nil, errors.New("decoding elasticsearch aggregate result: root aggregation missing")
+	}
+	return root, nil
+}
+
+// decodeCompositeBuckets 读取 composite 分组聚合结果
+func (b *ElasticSearchBuilder[A]) decodeCompositeBuckets(searchResult *elastic.SearchResult) (*elastic.AggregationBucketCompositeItems, error) {
+	root, err := elasticRootBucket(searchResult)
+	if err != nil {
+		return nil, err
+	}
 	buckets, ok := root.Aggregations.Composite(elasticBucketAggregation)
 	if !ok || buckets == nil {
 		return nil, errors.New("decoding elasticsearch aggregate result: group aggregation missing")
 	}
-	rows := make([]*A, 0, len(buckets.Buckets))
-	for _, bucket := range buckets.Buckets {
-		row, err := b.decodeRow(bucket.Key, bucket.DocCount, bucket.Aggregations)
+	return buckets, nil
+}
+
+// decodeCompositeRowValues 将 composite buckets 解码为中间 map 结果
+func (b *ElasticSearchBuilder[A]) decodeCompositeRowValues(buckets []*elastic.AggregationBucketCompositeItem) ([]map[string]any, error) {
+	rows := make([]map[string]any, 0, len(buckets))
+	for _, bucket := range buckets {
+		values, err := b.decodeRowValues(bucket.Key, bucket.DocCount, bucket.Aggregations)
 		if err != nil {
 			return nil, err
 		}
-		rows = append(rows, row)
+		rows = append(rows, values)
 	}
-	return &Result[A]{Rows: rows}, nil
+	return rows, nil
 }
 
 // decodeRow 合并分组键、文档数量和指标值，并解码为调用方结果类型
@@ -224,12 +660,25 @@ func (b *ElasticSearchBuilder[A]) decodeRow(
 	docCount int64,
 	aggregations elastic.Aggregations,
 ) (*A, error) {
+	values, err := b.decodeRowValues(keys, docCount, aggregations)
+	if err != nil {
+		return nil, err
+	}
+	return decodeElasticRow[A](values)
+}
+
+// decodeRowValues 合并分组键、文档数量和指标值为中间 map 结果
+func (b *ElasticSearchBuilder[A]) decodeRowValues(
+	keys map[string]any,
+	docCount int64,
+	aggregations elastic.Aggregations,
+) (map[string]any, error) {
 	values := make(map[string]any, len(b.spec.Groups)+len(b.spec.Metrics))
 	for _, group := range b.spec.Groups {
 		values[group.Alias] = keys[group.Alias]
 	}
 	for _, metric := range b.spec.Metrics {
-		if metric.Func == Count && !isDistinctCount(metric) {
+		if metric.Func == Count && !isDistinctCount(metric) && metric.Condition == nil {
 			values[metric.Alias] = docCount
 			continue
 		}
@@ -239,11 +688,31 @@ func (b *ElasticSearchBuilder[A]) decodeRow(
 		}
 		values[metric.Alias] = value
 	}
-	return decodeElasticRow[A](values)
+	return values, nil
 }
 
 // elasticMetricValue 读取单值指标聚合结果
 func elasticMetricValue(aggregations elastic.Aggregations, metric Metric) (any, error) {
+	if metric.Condition != nil {
+		return elasticConditionalMetricValue(aggregations, metric)
+	}
+	return elasticBaseMetricValue(aggregations, metric)
+}
+
+// elasticConditionalMetricValue 读取 filter 聚合包装的条件指标结果
+func elasticConditionalMetricValue(aggregations elastic.Aggregations, metric Metric) (any, error) {
+	filter, ok := aggregations.Filter(metric.Alias)
+	if !ok || filter == nil {
+		return nil, fmt.Errorf("decoding elasticsearch aggregate result: metric %q missing", metric.Alias)
+	}
+	if metric.Func == Count && !isDistinctCount(metric) {
+		return filter.DocCount, nil
+	}
+	return elasticBaseMetricValue(filter.Aggregations, metric)
+}
+
+// elasticBaseMetricValue 读取无条件指标聚合结果
+func elasticBaseMetricValue(aggregations elastic.Aggregations, metric Metric) (any, error) {
 	if isDistinctSum(metric) {
 		return elasticScriptedMetricValue(aggregations, metric)
 	}
@@ -319,6 +788,19 @@ func elasticNumericValue(value any, alias string) (float64, error) {
 	default:
 		return 0, fmt.Errorf("decoding elasticsearch aggregate result: metric %q value is not numeric", alias)
 	}
+}
+
+// decodeElasticRows 通过 JSON 标签将多行聚合值映射到结果 DTO
+func decodeElasticRows[A any](values []map[string]any) (*Result[A], error) {
+	rows := make([]*A, 0, len(values))
+	for _, value := range values {
+		row, err := decodeElasticRow[A](value)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	return &Result[A]{Rows: rows}, nil
 }
 
 // decodeElasticRow 通过 JSON 标签将聚合值映射到结果 DTO
