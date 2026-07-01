@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
 
 type specChainRow struct{}
@@ -347,6 +349,7 @@ func TestBuilderAdvancedSpecChain(t *testing.T) {
 	paid := conditionFromExpression("status = ?", "paid")
 	builder := NewMongoBuilder[specChainRow](nil)
 	builder.GroupBy("region", "region").
+		GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "Asia/Shanghai").
 		Count("total").
 		CountIf("paid_total", "status = ?", "paid").
 		CountDistinctIf("customer.id", "paid_customers", "status = ?", "paid").
@@ -360,7 +363,10 @@ func TestBuilderAdvancedSpecChain(t *testing.T) {
 		SetLimit(10)
 
 	expected := Spec{
-		Groups: []Group{{Field: "region", Alias: "region"}},
+		Groups: []Group{
+			{Field: "region", Alias: "region"},
+			{Field: "created_at", Alias: "created_day", Interval: TimeIntervalDay, TimeZone: "Asia/Shanghai"},
+		},
 		Metrics: []Metric{
 			{Func: Count, Alias: "total"},
 			{Func: Count, Alias: "paid_total", Condition: &paid},
@@ -389,6 +395,44 @@ func TestBuilderAdvancedSpecChain(t *testing.T) {
 	}
 }
 
+func TestBuilderConditionValuesAreDefensivelyCopied(t *testing.T) {
+	t.Parallel()
+
+	statuses := []string{"paid", "settled"}
+	window := &Range{Start: 10, End: 20}
+	builder := NewMongoBuilder[specChainRow](nil)
+	builder.CountIf("paid_total", "status IN ?", statuses).
+		SumIf("amount", "mid_amount", "amount BETWEEN ? AND ?", window)
+
+	statuses[0] = "refunded"
+	window.Start = 99
+
+	spec := builder.Meta().Spec
+	gotStatuses, ok := spec.Metrics[0].Condition.Value.([]string)
+	if !ok {
+		t.Fatalf("expected []string condition value, got %T", spec.Metrics[0].Condition.Value)
+	}
+	if gotStatuses[0] != "paid" {
+		t.Fatalf("condition slice was not defensively copied: %#v", gotStatuses)
+	}
+	gotWindow, ok := spec.Metrics[1].Condition.Value.(*Range)
+	if !ok {
+		t.Fatalf("expected *Range condition value, got %T", spec.Metrics[1].Condition.Value)
+	}
+	if gotWindow.Start != 10 || gotWindow.End != 20 {
+		t.Fatalf("condition range was not defensively copied: %#v", gotWindow)
+	}
+
+	gotStatuses[0] = "mutated"
+	gotWindow.Start = 77
+	if got := builder.Meta().Spec; got.Metrics[0].Condition.Value.([]string)[0] != "paid" {
+		t.Fatalf("meta condition slice shares state with builder: %#v", got.Metrics[0].Condition.Value)
+	}
+	if got := builder.Meta().Spec; got.Metrics[1].Condition.Value.(*Range).Start != 10 {
+		t.Fatalf("meta condition range shares state with builder: %#v", got.Metrics[1].Condition.Value)
+	}
+}
+
 func TestComparisonExpressionParsing(t *testing.T) {
 	t.Parallel()
 
@@ -407,6 +451,13 @@ func TestComparisonExpressionParsing(t *testing.T) {
 		{name: "greater or equal", query: "amount >= ?", value: 10, expected: Condition{Field: "amount", Op: Gte, Value: 10}},
 		{name: "less than", query: "customer.score < ?", value: 100, expected: Condition{Field: "customer.score", Op: Lt, Value: 100}},
 		{name: "less or equal", query: "customer.score <= ?", value: 100, expected: Condition{Field: "customer.score", Op: Lte, Value: 100}},
+		{name: "in", query: "status IN ?", value: []string{"paid", "settled"}, expected: Condition{Field: "status", Op: In, Value: []string{"paid", "settled"}}},
+		{name: "not in", query: "status NOT IN ?", value: []string{"refunded"}, expected: Condition{Field: "status", Op: NotIn, Value: []string{"refunded"}}},
+		{name: "between", query: "amount BETWEEN ? AND ?", value: Range{Start: 10, End: 20}, expected: Condition{Field: "amount", Op: Between, Value: Range{Start: 10, End: 20}}},
+		{name: "like", query: "customer.name LIKE ?", value: "A%", expected: Condition{Field: "customer.name", Op: Like, Value: "A%"}},
+		{name: "not like", query: "customer.name NOT LIKE ?", value: "%test%", expected: Condition{Field: "customer.name", Op: NotLike, Value: "%test%"}},
+		{name: "is null", query: "deleted_at IS NULL", expected: Condition{Field: "deleted_at", Op: IsNull}},
+		{name: "exists", query: "paid_at EXISTS", expected: Condition{Field: "paid_at", Op: Exists}},
 	}
 
 	for _, test := range tests {
@@ -439,6 +490,17 @@ func TestValidateAdvancedSpec(t *testing.T) {
 				Metrics: []Metric{{Func: Sum, Field: "amount", Alias: "paid_amount", Condition: conditionPtr(conditionFromExpression("status = ?", "paid"))}},
 				Orders:  []Order{{Alias: "paid_amount", Descending: true}},
 				Havings: []Having{havingFromExpression("paid_amount > ?", 10)},
+			},
+		},
+		{
+			name: "valid rich condition and date group",
+			spec: Spec{
+				Groups: []Group{{Field: "created_at", Alias: "created_day", Interval: TimeIntervalDay, TimeZone: "Asia/Shanghai"}},
+				Metrics: []Metric{
+					{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status IN ?", []string{"paid", "settled"}))},
+					{Func: Sum, Field: "amount", Alias: "mid_amount", Condition: conditionPtr(conditionFromExpression("amount BETWEEN ? AND ?", Range{Start: 10, End: 20}))},
+					{Func: Count, Alias: "deleted_total", Condition: conditionPtr(conditionFromExpression("deleted_at IS NULL", nil))},
+				},
 			},
 		},
 		{
@@ -477,6 +539,15 @@ func TestValidateAdvancedSpec(t *testing.T) {
 			err: ErrInvalidSpec,
 		},
 		{
+			name: "having rejects non-comparison operator",
+			spec: Spec{
+				Groups:  []Group{{Field: "region", Alias: "region"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
+				Havings: []Having{{Alias: "total", Op: In, Value: 1}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
 			name: "condition rejects unsafe field",
 			spec: Spec{
 				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status; DROP = ?", "paid"))}},
@@ -486,7 +557,22 @@ func TestValidateAdvancedSpec(t *testing.T) {
 		{
 			name: "condition rejects unsupported expression",
 			spec: Spec{
-				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status like ?", "paid"))}},
+				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: conditionPtr(conditionFromExpression("status contains ?", "paid"))}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "condition rejects empty in list",
+			spec: Spec{
+				Metrics: []Metric{{Func: Count, Alias: "paid_total", Condition: &Condition{Field: "status", Op: In, Value: []string{}}}},
+			},
+			err: ErrInvalidSpec,
+		},
+		{
+			name: "date group rejects timezone without interval",
+			spec: Spec{
+				Groups:  []Group{{Field: "created_at", Alias: "created_day", TimeZone: "Asia/Shanghai"}},
+				Metrics: []Metric{{Func: Count, Alias: "total"}},
 			},
 			err: ErrInvalidSpec,
 		},
@@ -512,5 +598,29 @@ func TestValidateAdvancedSpec(t *testing.T) {
 				t.Fatalf("expected error %v, got %v", test.err, err)
 			}
 		})
+	}
+}
+func TestAnalyzeSpec(t *testing.T) {
+	t.Parallel()
+
+	spec := normalizeSpec(Spec{
+		Groups: []Group{{Field: "created_at", Alias: "created_day", Interval: TimeIntervalDay}},
+		Metrics: []Metric{
+			{Func: Count, Alias: "total", Condition: conditionPtr(conditionFromExpression("status IN ?", []string{"paid"}))},
+			{Func: Sum, Field: "amount", Alias: "unique_amount", Distinct: true},
+		},
+		Orders:  []Order{{Alias: "unique_amount", Descending: true}},
+		Havings: []Having{{Alias: "total", Op: Gte, Value: 1}},
+	})
+
+	plan := AnalyzeSpec(core.Gorm, spec)
+	expectedFlags := PlanHasDateGroups | PlanHasDistinctMetrics | PlanHasConditionalMetrics
+	if plan.Flags != expectedFlags || !plan.Has(PlanHasDateGroups) || !plan.Has(PlanHasDistinctMetrics) || !plan.Has(PlanHasConditionalMetrics) {
+		t.Fatalf("unexpected generic plan: %+v", plan)
+	}
+	elasticPlan := AnalyzeSpec(core.ElasticSearch, spec)
+	expectedElasticFlags := expectedFlags | PlanUsesElasticScriptedMetric | PlanNeedsClientPostProcessing | PlanNeedsFullClientPostProcessing
+	if elasticPlan.Flags != expectedElasticFlags || !elasticPlan.Has(PlanNeedsClientPostProcessing) || !elasticPlan.Has(PlanNeedsFullClientPostProcessing) || !elasticPlan.Has(PlanUsesElasticScriptedMetric) {
+		t.Fatalf("unexpected elastic plan: %+v", elasticPlan)
 	}
 }

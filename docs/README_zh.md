@@ -1419,6 +1419,12 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 
 分组默认按升序排列。需要倒序时，可以使用 `GroupByDesc`，或通过 `AddGroup(agg.Group{...})` 设置 `Descending: true`。
 
+需要按时间字段截断后再分组时，可以使用 `GroupByDate` 或 `GroupByDateWithTimeZone`：
+
+```go
+query.GroupByDateWithTimeZone("created_at", "created_day", agg.TimeIntervalDay, "Asia/Shanghai")
+```
+
 #### 切换数据源
 
 构建器默认从空 `Spec` 开始，常用写法是直接链式配置。如果 `Spec` 来自公共配置或业务模板，也可以通过 `SetSpec` 复用：
@@ -1473,7 +1479,7 @@ query.GroupBy("region", "region").
     SetLimit(20)
 ```
 
-`CountIf`、`CountDistinctIf`、`SumIf`、`SumDistinctIf`、`AvgIf`、`MinIf`、`MaxIf` 支持 `status = ?`、`amount >= ?` 这类单占位符比较表达式。支持的操作符包括 `=`、`==`、`!=`、`<>`、`>`、`>=`、`<`、`<=`。
+`CountIf`、`CountDistinctIf`、`SumIf`、`SumDistinctIf`、`AvgIf`、`MinIf`、`MaxIf` 支持经过校验的字段谓词，例如 `status = ?`、`status IN ?`、`amount BETWEEN ? AND ?`、`name LIKE ?`、`deleted_at IS NULL`、`archived_at EXISTS`。支持的字段谓词操作符包括 `=`、`==`、`!=`、`<>`、`>`、`>=`、`<`、`<=`、`IN`、`NOT IN`、`BETWEEN`、`LIKE`、`NOT LIKE`、`EXISTS`、`NOT EXISTS`、`IS NULL`、`IS NOT NULL`。`BETWEEN` 使用 `agg.Range{Start: ..., End: ...}`，`IN` / `NOT IN` 需要传入非空切片；如果类型化写法更清晰，可以使用 `MetricWhere(fn, field, alias, agg.Condition{...})`。
 
 `OrderBy` 和 `OrderByDesc` 可以引用分组别名或指标别名。`Having` 用于按指标别名过滤分组后的结果，支持同样的比较表达式写法，比较值要求为数值。对 Elasticsearch 的分组 `Having`，构建器会分页读取 composite buckets，并在客户端过滤后再应用 limit。排序如果是分组别名的前缀顺序，会继续交给 composite source；按指标排序或按非前缀分组别名排序时，需要读取完整 bucket 集合后再排序和截断。`Explain` 会通过 `client_post_processing` 标记客户端处理，并用 `full_scan` 标明是否必须收集全部 buckets。
 
@@ -1487,13 +1493,16 @@ statement, err := query.Explain(ctx)
 
 对于去重计数和去重求和，GORM 会生成 `COUNT(DISTINCT field)` 或 `SUM(DISTINCT field)`，MongoDB 使用精确的两阶段 `$group` 分支。Elasticsearch 的去重计数使用近似的 `cardinality`，去重求和使用 `scripted_metric`；高基数字段会把去重值保存在聚合状态里，因此建议只用于取值范围受控的数值字段。
 
+`Explain` 输出还会包含一份紧凑的 `PlanFlags` 位掩码，用于标记是否使用时间桶、条件/去重指标、MongoDB facet、Elasticsearch scripted metric，以及 Elasticsearch 是否需要客户端后处理。同一份摘要可以通过 `Meta().Plan` 读取，单项判断使用 `Plan.Has(flag)`；`AggregateObservabilityMiddleware` 仍会记录展开后的聚合查询属性，其中分组、指标、HAVING、排序数量会从 spec 推导。
+
 #### 使用限制
 
 - 分组查询默认最多返回 100 行，`Limit` 最大为 5000
 - 没有配置 `Groups` 时返回一行汇总结果
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
 - 目前只有 `Count` 和 `Sum` 支持 distinct
-- HAVING 当前只支持按指标别名过滤且比较值需为数值；原始表达式和分组游标分页暂不支持
+- HAVING 当前只支持按指标别名过滤，且比较值需为数值；分组游标分页暂不支持
+- 字段谓词会经过结构化校验，不支持直接传入任意 SQL、MongoDB 或 Elasticsearch 原始表达式
 - 聚合查询的缓存和可观测中间件位于 `middleware`，入口为 `AggregateCacheMiddleware` 和 `AggregateObservabilityMiddleware`
 
 ---

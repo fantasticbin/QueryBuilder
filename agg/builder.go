@@ -73,6 +73,8 @@ type GroupConfigurer[A any] interface {
 	AddGroup(Group) Builder[A]
 	GroupBy(field, alias string) Builder[A]
 	GroupByDesc(field, alias string) Builder[A]
+	GroupByDate(field, alias string, interval TimeInterval) Builder[A]
+	GroupByDateWithTimeZone(field, alias string, interval TimeInterval, timeZone string) Builder[A]
 }
 
 // MetricConfigurer 定义聚合指标配置能力
@@ -84,6 +86,7 @@ type MetricConfigurer[A any] interface {
 	AddMetric(Metric) Builder[A]
 	Metric(fn Func, field, alias string) Builder[A]
 	MetricIf(fn Func, field, alias, expression string, value any) Builder[A]
+	MetricWhere(fn Func, field, alias string, condition Condition) Builder[A]
 	Count(alias string) Builder[A]
 	CountIf(alias, expression string, value any) Builder[A]
 	CountDistinct(field, alias string) Builder[A]
@@ -241,6 +244,20 @@ func (b *base[A]) GroupByDesc(field, alias string) Builder[A] {
 	})
 }
 
+// GroupByDate 追加一个升序时间桶分组字段
+func (b *base[A]) GroupByDate(field, alias string, interval TimeInterval) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.GroupByDate(field, alias, interval)
+	})
+}
+
+// GroupByDateWithTimeZone 追加一个带时区的升序时间桶分组字段
+func (b *base[A]) GroupByDateWithTimeZone(field, alias string, interval TimeInterval, timeZone string) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.GroupByDateWithTimeZone(field, alias, interval, timeZone)
+	})
+}
+
 // SetMetrics 替换全部聚合指标
 func (b *base[A]) SetMetrics(metrics ...Metric) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
@@ -262,10 +279,17 @@ func (b *base[A]) Metric(fn Func, field, alias string) Builder[A] {
 	})
 }
 
-// MetricIf 追加一个条件聚合指标，条件使用 "field = ?" 形式
+// MetricIf 追加一个条件聚合指标，条件使用比较表达式形式
 func (b *base[A]) MetricIf(fn Func, field, alias, expression string, value any) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
 		builder.MetricIf(fn, field, alias, expression, value)
+	})
+}
+
+// MetricWhere 追加一个使用类型化条件的聚合指标
+func (b *base[A]) MetricWhere(fn Func, field, alias string, condition Condition) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.MetricWhere(fn, field, alias, condition)
 	})
 }
 
@@ -428,6 +452,7 @@ func (b *base[A]) Meta() Meta {
 	return Meta{
 		DataSource: b.dataSource,
 		Spec:       b.spec.Clone(),
+		Plan:       AnalyzeSpec(b.dataSource, b.spec),
 		StartTime:  b.startTime,
 	}
 }

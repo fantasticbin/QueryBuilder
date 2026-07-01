@@ -101,6 +101,7 @@ func (b *ElasticSearchBuilder[A]) Explain(context.Context) (string, error) {
 		"aggregations": map[string]any{
 			elasticRootAggregation: rootSource,
 		},
+		"plan": b.Meta().Plan,
 	}
 	if b.needsElasticClientPostProcessing() {
 		payload["client_post_processing"] = map[string]any{
@@ -169,13 +170,7 @@ func (b *ElasticSearchBuilder[A]) buildAggregationWithOptions(options elasticAgg
 	sources := make([]elastic.CompositeAggregationValuesSource, 0, len(b.spec.Groups))
 	for _, group := range b.spec.Groups {
 		order := b.elasticGroupOrder(group)
-		sources = append(
-			sources,
-			elastic.NewCompositeAggregationTermsValuesSource(group.Alias).
-				Field(group.Field).
-				MissingBucket(false).
-				Order(order),
-		)
+		sources = append(sources, elasticGroupSource(group, order))
 	}
 	buckets := elastic.NewCompositeAggregation().
 		Sources(sources...).
@@ -258,6 +253,23 @@ func elasticConditionQuery(condition Condition) elastic.Query {
 		return elastic.NewRangeQuery(condition.Field).Lt(condition.Value)
 	case Lte:
 		return elastic.NewRangeQuery(condition.Field).Lte(condition.Value)
+	case In:
+		values, _ := conditionListValues(condition.Value)
+		return elastic.NewTermsQuery(condition.Field, values...)
+	case NotIn:
+		values, _ := conditionListValues(condition.Value)
+		return elastic.NewBoolQuery().Must(elastic.NewExistsQuery(condition.Field)).MustNot(elastic.NewTermsQuery(condition.Field, values...))
+	case Between:
+		start, end, _ := conditionRangeValues(condition.Value)
+		return elastic.NewRangeQuery(condition.Field).Gte(start).Lte(end)
+	case Exists, IsNotNull:
+		return elastic.NewExistsQuery(condition.Field)
+	case NotExists, IsNull:
+		return elastic.NewBoolQuery().MustNot(elastic.NewExistsQuery(condition.Field))
+	case Like:
+		return elastic.NewWildcardQuery(condition.Field, sqlLikePatternToWildcard(condition.Value.(string)))
+	case NotLike:
+		return elastic.NewBoolQuery().Must(elastic.NewExistsQuery(condition.Field)).MustNot(elastic.NewWildcardQuery(condition.Field, sqlLikePatternToWildcard(condition.Value.(string))))
 	default:
 		return elastic.NewTermQuery(condition.Field, condition.Value)
 	}
@@ -377,15 +389,7 @@ func (b *ElasticSearchBuilder[A]) needsElasticFullClientPostProcessing() bool {
 
 // elasticOrdersNeedClientPostProcessing 判断显式排序是否无法由 composite source 顺序表达
 func (b *ElasticSearchBuilder[A]) elasticOrdersNeedClientPostProcessing() bool {
-	if len(b.spec.Orders) == 0 {
-		return false
-	}
-	for i, order := range b.spec.Orders {
-		if i >= len(b.spec.Groups) || !strings.EqualFold(order.Alias, b.spec.Groups[i].Alias) {
-			return true
-		}
-	}
-	return false
+	return elasticOrdersNeedClientPostProcessingSpec(b.spec)
 }
 
 // queryGroupedWithClientPostProcessing 分页读取全部 composite bucket 后再执行 HAVING、排序和 limit
@@ -817,4 +821,24 @@ func decodeElasticRow[A any](values map[string]any) (*A, error) {
 		return nil, fmt.Errorf("decoding elasticsearch aggregate row: %w", err)
 	}
 	return row, nil
+}
+
+// elasticGroupSource 构建 composite 分组源
+func elasticGroupSource(group Group, order string) elastic.CompositeAggregationValuesSource {
+	if group.Interval == "" {
+		return elastic.NewCompositeAggregationTermsValuesSource(group.Alias).
+			Field(group.Field).
+			MissingBucket(false).
+			Order(order)
+	}
+	source := elastic.NewCompositeAggregationDateHistogramValuesSource(group.Alias).
+		Field(group.Field).
+		CalendarInterval(string(group.Interval)).
+		Format("strict_date_optional_time").
+		MissingBucket(false).
+		Order(order)
+	if group.TimeZone != "" {
+		source = source.TimeZone(group.TimeZone)
+	}
+	return source
 }

@@ -309,3 +309,33 @@ func TestElasticConditionNotEqualRequiresExistingField(t *testing.T) {
 		}
 	}
 }
+
+func TestElasticSearchBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "Asia/Shanghai").
+		CountIf("paid_total", "status IN ?", []string{"paid", "settled"}).
+		SumIf("amount", "mid_amount", "amount BETWEEN ? AND ?", Range{Start: 10, End: 20}).
+		CountIf("named_total", "customer.name LIKE ?", "A%").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{
+		`"date_histogram"`,
+		`"calendar_interval": "day"`,
+		`"time_zone": "Asia/Shanghai"`,
+		`"terms"`,
+		`"range"`,
+		`"wildcard"`,
+		`"flags": 6`,
+	} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
+	}
+}

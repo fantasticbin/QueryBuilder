@@ -2,6 +2,7 @@ package agg
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -61,6 +62,9 @@ func (b *GormBuilder[M, A]) Query(ctx context.Context) (*Result[A], error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateGormDateGroups(db, b.spec); err != nil {
+			return nil, err
+		}
 
 		rows := make([]*A, 0)
 		query := b.buildQuery(db.WithContext(ctx))
@@ -83,6 +87,9 @@ func (b *GormBuilder[M, A]) Explain(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateGormDateGroups(db, b.spec); err != nil {
+		return "", err
+	}
 
 	query := b.buildQuery(db.WithContext(ctx).Session(&gorm.Session{DryRun: true}))
 	stmt := query.Find(new([]A)).Statement
@@ -90,15 +97,15 @@ func (b *GormBuilder[M, A]) Explain(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("building gorm aggregate query: %w", stmt.Error)
 	}
 
-	sql := stmt.SQL.String()
-	if len(stmt.Vars) == 0 {
-		return sql, nil
+	explanation := stmt.SQL.String()
+	if len(stmt.Vars) > 0 {
+		args := make([]string, 0, len(stmt.Vars))
+		for _, value := range stmt.Vars {
+			args = append(args, fmt.Sprintf("%v", value))
+		}
+		explanation += " | args: [" + strings.Join(args, ", ") + "]"
 	}
-	args := make([]string, 0, len(stmt.Vars))
-	for _, value := range stmt.Vars {
-		args = append(args, fmt.Sprintf("%v", value))
-	}
-	return sql + " | args: [" + strings.Join(args, ", ") + "]", nil
+	return explanation + " | plan: " + gormPlanJSON(b.Meta().Plan), nil
 }
 
 // buildQuery 根据聚合规范构建 GORM 查询对象
@@ -112,8 +119,9 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 	selectArgs := make([]any, 0)
 	for _, group := range b.spec.Groups {
 		field := quoteGormIdentifier(db, group.Field)
+		selection := gormGroupExpression(db, group)
 		alias := quoteGormIdentifier(db, group.Alias)
-		selects = append(selects, field+" AS "+alias)
+		selects = append(selects, selection+" AS "+alias)
 		query = query.Where(field + " IS NOT NULL")
 	}
 	for _, metric := range b.spec.Metrics {
@@ -129,7 +137,7 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 	groupColumns := make([]clause.Column, 0, len(b.spec.Groups))
 	for _, group := range b.spec.Groups {
 		groupColumns = append(groupColumns, clause.Column{
-			Name: quoteGormIdentifier(db, group.Field),
+			Name: gormGroupExpression(db, group),
 			Raw:  true,
 		})
 	}
@@ -202,7 +210,25 @@ func gormConditionalMetricExpression(db *gorm.DB, metric Metric) (string, []any)
 // gormConditionExpression 构建字段级条件的 SQL 片段和绑定参数
 func gormConditionExpression(db *gorm.DB, condition Condition) (string, []any) {
 	field := quoteGormIdentifier(db, condition.Field)
-	return field + " " + gormOperator(condition.Op) + " ?", []any{condition.Value}
+	switch condition.Op {
+	case In:
+		return field + " IN ?", []any{condition.Value}
+	case NotIn:
+		return field + " NOT IN ?", []any{condition.Value}
+	case Between:
+		start, end, _ := conditionRangeValues(condition.Value)
+		return field + " BETWEEN ? AND ?", []any{start, end}
+	case Exists, IsNotNull:
+		return field + " IS NOT NULL", nil
+	case NotExists, IsNull:
+		return field + " IS NULL", nil
+	case Like:
+		return field + " LIKE ?", []any{condition.Value}
+	case NotLike:
+		return field + " NOT LIKE ?", []any{condition.Value}
+	default:
+		return field + " " + gormOperator(condition.Op) + " ?", []any{condition.Value}
+	}
 }
 
 // gormHavingExpression 构建 HAVING 条件的 SQL 片段和绑定参数
@@ -232,6 +258,10 @@ func gormOperator(op Operator) string {
 		return "<"
 	case Lte:
 		return "<="
+	case Like:
+		return "LIKE"
+	case NotLike:
+		return "NOT LIKE"
 	default:
 		return "="
 	}
@@ -248,4 +278,124 @@ func quoteGormIdentifier(db *gorm.DB, identifier string) string {
 		db.Dialector.QuoteTo(&quoted, part)
 	}
 	return quoted.String()
+}
+
+// gormPlanJSON 返回 Explain 使用的紧凑执行特征 JSON
+func gormPlanJSON(plan Plan) string {
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
+// gormGroupExpression 构建分组 SELECT / GROUP BY 表达式
+func gormGroupExpression(db *gorm.DB, group Group) string {
+	if group.Interval == "" {
+		return quoteGormIdentifier(db, group.Field)
+	}
+	return gormDateGroupExpression(db, group)
+}
+
+// gormDateGroupExpression 构建时间桶分组表达式
+func gormDateGroupExpression(db *gorm.DB, group Group) string {
+	field := quoteGormIdentifier(db, group.Field)
+	dialect := strings.ToLower(db.Dialector.Name())
+	switch dialect {
+	case "mysql":
+		return gormMySQLDateGroupExpression(field, group.Interval)
+	case "sqlite", "sqlite3":
+		return gormSQLiteDateGroupExpression(field, group.Interval)
+	case "sqlserver":
+		return gormSQLServerDateGroupExpression(field, group.Interval)
+	default:
+		if group.TimeZone != "" {
+			field += " AT TIME ZONE " + quoteSQLString(group.TimeZone)
+		}
+		return "DATE_TRUNC(" + quoteSQLString(string(group.Interval)) + ", " + field + ")"
+	}
+}
+
+func gormMySQLDateGroupExpression(field string, interval TimeInterval) string {
+	switch interval {
+	case TimeIntervalMinute:
+		return "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:%i:00')"
+	case TimeIntervalHour:
+		return "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:00:00')"
+	case TimeIntervalDay:
+		return "DATE_FORMAT(" + field + ", '%Y-%m-%d 00:00:00')"
+	case TimeIntervalWeek:
+		return "STR_TO_DATE(CONCAT(YEARWEEK(" + field + ", 3), ' Monday'), '%X%V %W')"
+	case TimeIntervalMonth:
+		return "DATE_FORMAT(" + field + ", '%Y-%m-01 00:00:00')"
+	case TimeIntervalQuarter:
+		return "MAKEDATE(YEAR(" + field + "), 1) + INTERVAL (QUARTER(" + field + ") - 1) QUARTER"
+	case TimeIntervalYear:
+		return "DATE_FORMAT(" + field + ", '%Y-01-01 00:00:00')"
+	default:
+		return field
+	}
+}
+
+func gormSQLiteDateGroupExpression(field string, interval TimeInterval) string {
+	switch interval {
+	case TimeIntervalMinute:
+		return "strftime('%Y-%m-%d %H:%M:00', " + field + ")"
+	case TimeIntervalHour:
+		return "strftime('%Y-%m-%d %H:00:00', " + field + ")"
+	case TimeIntervalDay:
+		return "strftime('%Y-%m-%d 00:00:00', " + field + ")"
+	case TimeIntervalWeek:
+		return "strftime('%Y-W%W', " + field + ")"
+	case TimeIntervalMonth:
+		return "strftime('%Y-%m-01 00:00:00', " + field + ")"
+	case TimeIntervalQuarter:
+		return "strftime('%Y', " + field + ") || '-Q' || ((cast(strftime('%m', " + field + ") as integer) + 2) / 3)"
+	case TimeIntervalYear:
+		return "strftime('%Y-01-01 00:00:00', " + field + ")"
+	default:
+		return field
+	}
+}
+
+func gormSQLServerDateGroupExpression(field string, interval TimeInterval) string {
+	part := string(interval)
+	if interval == TimeIntervalQuarter {
+		part = "quarter"
+	}
+	return "DATEADD(" + part + ", DATEDIFF(" + part + ", 0, " + field + "), 0)"
+}
+
+func quoteSQLString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// validateGormDateGroups 校验当前方言是否支持已配置的时间桶表达能力
+func validateGormDateGroups(db *gorm.DB, spec Spec) error {
+	if db == nil || db.Dialector == nil {
+		return nil
+	}
+	if gormDialectSupportsDateGroupTimeZone(db.Dialector.Name()) {
+		return nil
+	}
+	for i, group := range spec.Groups {
+		if group.Interval != "" && group.TimeZone != "" {
+			return fmt.Errorf(
+				"%w: group %d time zone is not supported by gorm dialect %q",
+				ErrInvalidSpec,
+				i,
+				db.Dialector.Name(),
+			)
+		}
+	}
+	return nil
+}
+
+func gormDialectSupportsDateGroupTimeZone(dialect string) bool {
+	switch strings.ToLower(dialect) {
+	case "mysql", "sqlite", "sqlite3", "sqlserver":
+		return false
+	default:
+		return true
+	}
 }

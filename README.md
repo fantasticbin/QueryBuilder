@@ -1421,6 +1421,12 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 
 Groups are sorted in ascending order by default. Use `GroupByDesc` or `AddGroup(agg.Group{...})` with `Descending: true` when a group key should be sorted descending.
 
+Time buckets are available with `GroupByDate` or `GroupByDateWithTimeZone` when a date/time field should be truncated before grouping:
+
+```go
+query.GroupByDateWithTimeZone("created_at", "created_day", agg.TimeIntervalDay, "Asia/Shanghai")
+```
+
 #### Switching Data Sources
 
 Builders start with an empty `Spec` so the common path is fluent configuration. When a `Spec` is built elsewhere, it can still be reused with `SetSpec`:
@@ -1475,7 +1481,7 @@ query.GroupBy("region", "region").
     SetLimit(20)
 ```
 
-`CountIf`, `CountDistinctIf`, `SumIf`, `SumDistinctIf`, `AvgIf`, `MinIf`, and `MaxIf` accept single-placeholder comparison expressions such as `status = ?` or `amount >= ?`. Supported operators are `=`, `==`, `!=`, `<>`, `>`, `>=`, `<`, and `<=`.
+`CountIf`, `CountDistinctIf`, `SumIf`, `SumDistinctIf`, `AvgIf`, `MinIf`, and `MaxIf` accept validated field predicates such as `status = ?`, `status IN ?`, `amount BETWEEN ? AND ?`, `name LIKE ?`, `deleted_at IS NULL`, and `archived_at EXISTS`. Supported predicate operators are `=`, `==`, `!=`, `<>`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `BETWEEN`, `LIKE`, `NOT LIKE`, `EXISTS`, `NOT EXISTS`, `IS NULL`, and `IS NOT NULL`. Use `agg.Range{Start: ..., End: ...}` for `BETWEEN`, pass a non-empty slice for `IN`/`NOT IN`, and use `MetricWhere(fn, field, alias, agg.Condition{...})` when a typed condition is clearer than an expression string.
 
 `OrderBy` and `OrderByDesc` accept either a group alias or a metric alias. `Having` filters grouped results by metric alias and uses the same comparison expression form, with numeric comparison values. For Elasticsearch grouped `Having`, the builder pages composite buckets and filters client-side before applying limit. Ordering stays in composite source order when it is a prefix of the group aliases; metric ordering or non-prefix group ordering requires collecting all buckets before sorting and limiting. `Explain` marks client work with `client_post_processing` and uses `full_scan` to show whether all buckets must be collected.
 
@@ -1489,13 +1495,16 @@ statement, err := query.Explain(ctx)
 
 For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINCT field)`, and MongoDB uses exact two-stage `$group` branches. Elasticsearch uses approximate `cardinality` for distinct counts and `scripted_metric` for distinct sums; high-cardinality distinct sums keep unique values in aggregation state, so use them only on bounded numeric fields.
 
+`Explain` output also includes a compact `PlanFlags` bitmask for date groups, conditional/distinct metrics, MongoDB facet usage, Elasticsearch scripted metrics, and Elasticsearch client-side post-processing. The same summary is available from `Meta().Plan`; use `Plan.Has(flag)` for individual checks. `AggregateObservabilityMiddleware` still records expanded aggregate attributes, including group, metric, HAVING, and order counts derived from the spec.
+
 #### Current Limits
 
 - Grouped queries return at most 100 rows by default; `Limit` cannot exceed 5000
 - A query without `Groups` returns one summary row
 - Records with a null or missing group field are excluded; null metric values are ignored
 - Distinct is currently supported only for `Count` and `Sum`
-- HAVING currently filters metric aliases only and accepts numeric values; raw expressions and grouped cursor pagination are not supported yet
+- HAVING currently filters metric aliases only and accepts numeric comparison values; grouped cursor pagination is not supported yet
+- Field predicates are intentionally structured and validated; arbitrary raw SQL, MongoDB, or Elasticsearch expressions are not accepted
 - Cache and observability middleware for aggregate queries lives in `middleware` as `AggregateCacheMiddleware` and `AggregateObservabilityMiddleware`
 
 ---

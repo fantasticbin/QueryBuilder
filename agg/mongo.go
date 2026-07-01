@@ -87,7 +87,10 @@ func (b *MongoBuilder[A]) Explain(context.Context) (string, error) {
 	}
 
 	encoded, err := bson.MarshalExtJSON(
-		bson.D{{Key: "pipeline", Value: b.buildPipeline()}},
+		bson.D{
+			{Key: "pipeline", Value: b.buildPipeline()},
+			{Key: "plan", Value: b.Meta().Plan},
+		},
 		true,
 		false,
 	)
@@ -270,7 +273,7 @@ func (b *MongoBuilder[A]) buildSourceGroupID() any {
 	}
 	keys := make(bson.D, 0, len(b.spec.Groups))
 	for _, group := range b.spec.Groups {
-		keys = append(keys, bson.E{Key: group.Alias, Value: "$" + group.Field})
+		keys = append(keys, bson.E{Key: group.Alias, Value: b.mongoGroupExpression(group)})
 	}
 	return keys
 }
@@ -316,18 +319,48 @@ func (b *MongoBuilder[A]) buildMetricMatch(metric Metric) bson.D {
 
 // buildConditionMatch 构建字段级条件过滤文档
 func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
+	switch condition.Op {
+	case In:
+		values, _ := conditionListValues(condition.Value)
+		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$in", Value: bson.A(values)}}}}
+	case NotIn:
+		values, _ := conditionListValues(condition.Value)
+		return mergeMongoClauses(bson.A{
+			mongoFieldExistsAndNotNull(condition.Field),
+			bson.D{{Key: condition.Field, Value: bson.D{{Key: "$nin", Value: bson.A(values)}}}},
+		})
+	case Between:
+		start, end, _ := conditionRangeValues(condition.Value)
+		return bson.D{{Key: "$expr", Value: bson.D{{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$gte", Value: bson.A{"$" + condition.Field, start}}},
+			bson.D{{Key: "$lte", Value: bson.A{"$" + condition.Field, end}}},
+		}}}}}
+	case Exists:
+		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: true}}}}
+	case NotExists:
+		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: false}}}}
+	case IsNull:
+		return bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: condition.Field, Value: nil}},
+		}}}
+	case IsNotNull:
+		return mongoFieldExistsAndNotNull(condition.Field)
+	case Like:
+		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$regex", Value: sqlLikePatternToRegexp(condition.Value.(string))}}}}
+	case NotLike:
+		return mergeMongoClauses(bson.A{
+			mongoFieldExistsAndNotNull(condition.Field),
+			bson.D{{Key: condition.Field, Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: sqlLikePatternToRegexp(condition.Value.(string))}}}}}},
+		})
+	}
+
 	expression := bson.D{{Key: "$expr", Value: mongoConditionExpression(condition)}}
 	if condition.Op != Ne {
 		return expression
 	}
 	return mergeMongoClauses(bson.A{
-		bson.D{{
-			Key: condition.Field,
-			Value: bson.D{
-				{Key: "$exists", Value: true},
-				{Key: "$ne", Value: nil},
-			},
-		}},
+		mongoFieldExistsAndNotNull(condition.Field),
 		expression,
 	})
 }
@@ -533,4 +566,32 @@ func cloneBSONValue(value any) any {
 	default:
 		return value
 	}
+}
+
+// mongoGroupExpression 构建 MongoDB 分组键表达式
+func (b *MongoBuilder[A]) mongoGroupExpression(group Group) any {
+	if group.Interval == "" {
+		return "$" + group.Field
+	}
+	dateTrunc := bson.D{
+		{Key: "date", Value: "$" + group.Field},
+		{Key: "unit", Value: string(group.Interval)},
+	}
+	if group.Interval == TimeIntervalWeek {
+		dateTrunc = append(dateTrunc, bson.E{Key: "startOfWeek", Value: "monday"})
+	}
+	if group.TimeZone != "" {
+		dateTrunc = append(dateTrunc, bson.E{Key: "timezone", Value: group.TimeZone})
+	}
+	return bson.D{{Key: "$dateTrunc", Value: dateTrunc}}
+}
+
+func mongoFieldExistsAndNotNull(field string) bson.D {
+	return bson.D{{
+		Key: field,
+		Value: bson.D{
+			{Key: "$exists", Value: true},
+			{Key: "$ne", Value: nil},
+		},
+	}}
 }

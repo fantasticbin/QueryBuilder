@@ -53,6 +53,16 @@ func (b *SpecBuilder) GroupByDesc(field, alias string) *SpecBuilder {
 	return b.AddGroup(Group{Field: field, Alias: alias, Descending: true})
 }
 
+// GroupByDate 追加一个升序时间桶分组字段
+func (b *SpecBuilder) GroupByDate(field, alias string, interval TimeInterval) *SpecBuilder {
+	return b.GroupByDateWithTimeZone(field, alias, interval, "")
+}
+
+// GroupByDateWithTimeZone 追加一个带时区的升序时间桶分组字段
+func (b *SpecBuilder) GroupByDateWithTimeZone(field, alias string, interval TimeInterval, timeZone string) *SpecBuilder {
+	return b.AddGroup(Group{Field: field, Alias: alias, Interval: interval, TimeZone: timeZone})
+}
+
 // SetMetrics 替换全部聚合指标
 func (b *SpecBuilder) SetMetrics(metrics ...Metric) *SpecBuilder {
 	b.spec.Metrics = cloneMetrics(metrics)
@@ -70,9 +80,14 @@ func (b *SpecBuilder) Metric(fn Func, field, alias string) *SpecBuilder {
 	return b.AddMetric(Metric{Func: fn, Field: field, Alias: alias})
 }
 
-// MetricIf 追加一个条件聚合指标，条件使用 "field = ?" 形式
+// MetricIf 追加一个条件聚合指标，条件使用比较表达式形式
 func (b *SpecBuilder) MetricIf(fn Func, field, alias, expression string, value any) *SpecBuilder {
 	condition := conditionFromExpression(expression, value)
+	return b.MetricWhere(fn, field, alias, condition)
+}
+
+// MetricWhere 追加一个使用类型化条件的聚合指标
+func (b *SpecBuilder) MetricWhere(fn Func, field, alias string, condition Condition) *SpecBuilder {
 	return b.AddMetric(Metric{Func: fn, Field: field, Alias: alias, Condition: conditionPtr(condition)})
 }
 

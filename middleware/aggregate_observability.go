@@ -229,11 +229,21 @@ func aggregateAttributes(ctx context.Context, opts AggregateObservabilityOptions
 
 // defaultAggregateAttributes 返回聚合查询默认记录的低基数属性
 func defaultAggregateAttributes(meta queryagg.Meta) []Attribute {
+	plan := meta.Plan
 	return []Attribute{
 		{Key: "querybuilder.datasource", Value: meta.DataSource.String()},
 		{Key: "querybuilder.mode", Value: meta.QueryMode()},
 		{Key: "querybuilder.aggregate.group_count", Value: len(meta.Spec.Groups)},
 		{Key: "querybuilder.aggregate.metric_count", Value: len(meta.Spec.Metrics)},
+		{Key: "querybuilder.aggregate.having_count", Value: len(meta.Spec.Havings)},
+		{Key: "querybuilder.aggregate.order_count", Value: len(meta.Spec.Orders)},
+		{Key: "querybuilder.aggregate.has_distinct_metrics", Value: plan.Has(queryagg.PlanHasDistinctMetrics)},
+		{Key: "querybuilder.aggregate.has_conditional_metrics", Value: plan.Has(queryagg.PlanHasConditionalMetrics)},
+		{Key: "querybuilder.aggregate.has_date_groups", Value: plan.Has(queryagg.PlanHasDateGroups)},
+		{Key: "querybuilder.aggregate.uses_mongo_facet", Value: plan.Has(queryagg.PlanUsesMongoFacet)},
+		{Key: "querybuilder.aggregate.uses_elastic_scripted_metric", Value: plan.Has(queryagg.PlanUsesElasticScriptedMetric)},
+		{Key: "querybuilder.aggregate.needs_client_post_processing", Value: plan.Has(queryagg.PlanNeedsClientPostProcessing)},
+		{Key: "querybuilder.aggregate.needs_full_client_post_processing", Value: plan.Has(queryagg.PlanNeedsFullClientPostProcessing)},
 		{Key: "querybuilder.limit", Value: meta.Spec.Limit},
 	}
 }

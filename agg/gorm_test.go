@@ -2,6 +2,7 @@ package agg
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,9 +66,16 @@ func TestGormBuilderExplain(t *testing.T) {
 	}
 }
 
-type aggregateTestDialector struct{}
+type aggregateTestDialector struct {
+	name string
+}
 
-func (aggregateTestDialector) Name() string { return "aggregate-test" }
+func (d aggregateTestDialector) Name() string {
+	if d.name != "" {
+		return d.name
+	}
+	return "aggregate-test"
+}
 
 func (aggregateTestDialector) Initialize(db *gorm.DB) error {
 	callbacks.RegisterDefaultCallbacks(db, &callbacks.Config{})
@@ -126,5 +134,57 @@ func TestGormBuilderExplainAdvancedSpec(t *testing.T) {
 		if !strings.Contains(normalized, fragment) {
 			t.Fatalf("expected explanation %q to contain %q", normalized, fragment)
 		}
+	}
+}
+
+func TestGormBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "UTC").
+		CountIf("paid_total", "status IN ?", []string{"paid", "settled"}).
+		SumIf("amount", "mid_amount", "amount BETWEEN ? AND ?", Range{Start: 10, End: 20}).
+		CountIf("named_total", "customer.name LIKE ?", "A%").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(explanation), " ")
+	for _, fragment := range []string{
+		`DATE_TRUNC('day', "created_at" AT TIME ZONE 'UTC') AS "created_day"`,
+		`COUNT(CASE WHEN "status" IN (?,?) THEN 1 END) AS "paid_total"`,
+		`SUM(CASE WHEN "amount" BETWEEN ? AND ? THEN "amount" ELSE 0 END) AS "mid_amount"`,
+		`COUNT(CASE WHEN "customer"."name" LIKE ? THEN 1 END) AS "named_total"`,
+		`GROUP BY DATE_TRUNC('day', "created_at" AT TIME ZONE 'UTC')`,
+		`"flags":6`,
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("expected explanation %q to contain %q", normalized, fragment)
+		}
+	}
+}
+
+func TestGormBuilderRejectsUnsupportedDateGroupTimeZoneDialect(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{name: "mysql"}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "UTC").
+		Count("total")
+
+	_, err = builder.Explain(context.Background())
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("expected invalid spec error, got %v", err)
 	}
 }

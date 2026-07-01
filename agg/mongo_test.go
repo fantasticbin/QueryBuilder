@@ -3,6 +3,7 @@ package agg
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
@@ -251,5 +252,56 @@ func TestMongoHavingNotEqualExcludesMissingAndNull(t *testing.T) {
 	comparison := comparisonClause[0].Value.(bson.D)
 	if comparisonClause[0].Key != "paid_amount" || comparison[0].Key != "$ne" || comparison[0].Value != 100 {
 		t.Fatalf("unexpected comparison clause: %#v", comparisonClause)
+	}
+}
+
+func TestMongoBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "Asia/Shanghai").
+		CountIf("paid_total", "status IN ?", []string{"paid", "settled"}).
+		SumIf("amount", "mid_amount", "amount BETWEEN ? AND ?", Range{Start: 10, End: 20}).
+		CountIf("named_total", "customer.name LIKE ?", "A%").
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{
+		`"$dateTrunc"`,
+		`"timezone": "Asia/Shanghai"`,
+		`"$in"`,
+		`"$regex"`,
+		`"flags": {`,
+		`"$numberLong": "14"`,
+	} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
+	}
+}
+
+func TestMongoBuilderExplainWeekDateGroupStartsOnMonday(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupByDate("created_at", "created_week", TimeIntervalWeek).
+		Count("total")
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{
+		`"unit": "week"`,
+		`"startOfWeek": "monday"`,
+	} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
 	}
 }

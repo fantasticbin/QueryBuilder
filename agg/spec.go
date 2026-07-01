@@ -5,6 +5,7 @@ package agg
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -28,6 +29,11 @@ var (
 	fieldPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 	aliasPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	comparisonExpressionPattern = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*(==|<>|!=|>=|<=|=|>|<)\s*\?\s*$`)
+	setExpressionPattern        = regexp.MustCompile(`(?i)^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s+(IN|NOT\s+IN)\s+\?\s*$`)
+	betweenExpressionPattern    = regexp.MustCompile(`(?i)^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s+BETWEEN\s+\?\s+AND\s+\?\s*$`)
+	likeExpressionPattern       = regexp.MustCompile(`(?i)^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s+(LIKE|NOT\s+LIKE)\s+\?\s*$`)
+	unaryExpressionPattern      = regexp.MustCompile(`(?i)^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s+(EXISTS|NOT\s+EXISTS|IS\s+NULL|IS\s+NOT\s+NULL)\s*$`)
+	timeZonePattern             = regexp.MustCompile(`^[A-Za-z0-9_+\-./:]+$`)
 )
 
 // Func 表示受支持的聚合函数
@@ -62,7 +68,51 @@ const (
 	Lt
 	// Lte 表示小于等于比较
 	Lte
+	// In 表示集合包含比较
+	In
+	// NotIn 表示集合不包含比较
+	NotIn
+	// Between 表示闭区间比较
+	Between
+	// Exists 表示字段存在
+	Exists
+	// NotExists 表示字段不存在
+	NotExists
+	// IsNull 表示字段为空
+	IsNull
+	// IsNotNull 表示字段非空
+	IsNotNull
+	// Like 表示模式匹配
+	Like
+	// NotLike 表示模式不匹配
+	NotLike
 )
+
+// TimeInterval 表示时间桶分组的粒度
+type TimeInterval string
+
+const (
+	// TimeIntervalMinute 表示按分钟聚合
+	TimeIntervalMinute TimeInterval = "minute"
+	// TimeIntervalHour 表示按小时聚合
+	TimeIntervalHour TimeInterval = "hour"
+	// TimeIntervalDay 表示按天聚合
+	TimeIntervalDay TimeInterval = "day"
+	// TimeIntervalWeek 表示按周聚合
+	TimeIntervalWeek TimeInterval = "week"
+	// TimeIntervalMonth 表示按月聚合
+	TimeIntervalMonth TimeInterval = "month"
+	// TimeIntervalQuarter 表示按季度聚合
+	TimeIntervalQuarter TimeInterval = "quarter"
+	// TimeIntervalYear 表示按年聚合
+	TimeIntervalYear TimeInterval = "year"
+)
+
+// Range 定义 BETWEEN 条件使用的闭区间边界
+type Range struct {
+	Start any `json:"start"`
+	End   any `json:"end"`
+}
 
 // String 返回比较操作符的稳定字符串名称
 func (op Operator) String() string {
@@ -79,6 +129,24 @@ func (op Operator) String() string {
 		return "lt"
 	case Lte:
 		return "lte"
+	case In:
+		return "in"
+	case NotIn:
+		return "not_in"
+	case Between:
+		return "between"
+	case Exists:
+		return "exists"
+	case NotExists:
+		return "not_exists"
+	case IsNull:
+		return "is_null"
+	case IsNotNull:
+		return "is_not_null"
+	case Like:
+		return "like"
+	case NotLike:
+		return "not_like"
 	default:
 		return "unknown"
 	}
@@ -111,9 +179,11 @@ type Condition struct {
 
 // Group 定义分组字段、输出别名及排序方向
 type Group struct {
-	Field      string `json:"field"`
-	Alias      string `json:"alias"`
-	Descending bool   `json:"descending"`
+	Field      string       `json:"field"`
+	Alias      string       `json:"alias"`
+	Descending bool         `json:"descending"`
+	Interval   TimeInterval `json:"interval,omitempty"`
+	TimeZone   string       `json:"time_zone,omitempty"`
 }
 
 // Order 定义聚合结果排序规则，Alias 可引用分组或指标别名
@@ -169,11 +239,75 @@ type Result[A any] struct {
 type Meta struct {
 	DataSource core.DataSource `json:"data_source"`
 	Spec       Spec            `json:"spec"`
+	Plan       Plan            `json:"plan"`
 	StartTime  time.Time       `json:"start_time"`
 }
 
 // QueryMode 返回供中间件使用的稳定查询模式名称
 func (m Meta) QueryMode() string { return "aggregate" }
+
+// PlanFlags 以位掩码描述聚合查询的执行特征
+type PlanFlags uint64
+
+const (
+	PlanHasDistinctMetrics PlanFlags = 1 << iota
+	PlanHasConditionalMetrics
+	PlanHasDateGroups
+	PlanUsesMongoFacet
+	PlanUsesElasticScriptedMetric
+	PlanNeedsClientPostProcessing
+	PlanNeedsFullClientPostProcessing
+)
+
+// Has 判断当前掩码是否包含指定执行特征
+func (f PlanFlags) Has(flag PlanFlags) bool {
+	return flag != 0 && f&flag == flag
+}
+
+// Plan 描述一次聚合查询在通用层面的执行特征
+type Plan struct {
+	Flags PlanFlags `json:"flags" bson:"flags"`
+}
+
+// Has 判断聚合计划是否包含指定执行特征
+func (p Plan) Has(flag PlanFlags) bool {
+	return p.Flags.Has(flag)
+}
+
+// AnalyzeSpec 返回聚合规范在指定数据源上的执行特征
+func AnalyzeSpec(dataSource core.DataSource, spec Spec) Plan {
+	spec = normalizeSpec(spec)
+	plan := Plan{}
+	for _, group := range spec.Groups {
+		if group.Interval != "" {
+			plan.Flags |= PlanHasDateGroups
+			break
+		}
+	}
+	for _, metric := range spec.Metrics {
+		if metric.Distinct {
+			plan.Flags |= PlanHasDistinctMetrics
+		}
+		if metric.Condition != nil {
+			plan.Flags |= PlanHasConditionalMetrics
+		}
+		if dataSource == core.MongoDB && requiresMetricFacet(metric) {
+			plan.Flags |= PlanUsesMongoFacet
+		}
+		if dataSource == core.ElasticSearch && isDistinctSum(metric) {
+			plan.Flags |= PlanUsesElasticScriptedMetric
+		}
+	}
+	if dataSource == core.ElasticSearch && len(spec.Groups) > 0 {
+		if elasticOrdersNeedClientPostProcessingSpec(spec) {
+			plan.Flags |= PlanNeedsFullClientPostProcessing
+		}
+		if len(spec.Havings) > 0 || plan.Has(PlanNeedsFullClientPostProcessing) {
+			plan.Flags |= PlanNeedsClientPostProcessing
+		}
+	}
+	return plan
+}
 
 // normalizeSpec 复制并规范化聚合查询配置，为分组查询补充默认 limit
 func normalizeSpec(spec Spec) Spec {
@@ -203,6 +337,9 @@ func validateSpec(spec Spec) error {
 		}
 		if err := registerAlias(aliases, group.Alias); err != nil {
 			return fmt.Errorf("%w: group %d alias: %v", ErrInvalidSpec, i, err)
+		}
+		if err := validateGroupTimeBucket(group); err != nil {
+			return fmt.Errorf("%w: group %d: %v", ErrInvalidSpec, i, err)
 		}
 	}
 
@@ -254,7 +391,7 @@ func validateSpec(spec Spec) error {
 		if err := validateAliasReference(metricAliases, having.Alias); err != nil {
 			return fmt.Errorf("%w: having %d alias: %v", ErrInvalidSpec, i, err)
 		}
-		if err := validateOperator(having.Op); err != nil {
+		if err := validateComparisonOperator(having.Op); err != nil {
 			return fmt.Errorf("%w: having %d: %v", ErrInvalidSpec, i, err)
 		}
 		if !isNumericValue(having.Value) {
@@ -331,11 +468,49 @@ func validateFunc(fn Func) error {
 // validateOperator 校验条件比较操作符是否属于当前支持集合
 func validateOperator(op Operator) error {
 	switch op {
-	case Eq, Ne, Gt, Gte, Lt, Lte:
+	case Eq, Ne, Gt, Gte, Lt, Lte, In, NotIn, Between, Exists, NotExists, IsNull, IsNotNull, Like, NotLike:
 		return nil
 	default:
 		return fmt.Errorf("unsupported operator %q", op.String())
 	}
+}
+
+// validateComparisonOperator 校验聚合后过滤仅使用数值比较操作符
+func validateComparisonOperator(op Operator) error {
+	switch op {
+	case Eq, Ne, Gt, Gte, Lt, Lte:
+		return nil
+	default:
+		return fmt.Errorf("unsupported comparison operator %q", op.String())
+	}
+}
+
+// validateTimeInterval 校验时间桶粒度
+func validateTimeInterval(interval TimeInterval) error {
+	switch interval {
+	case TimeIntervalMinute, TimeIntervalHour, TimeIntervalDay, TimeIntervalWeek,
+		TimeIntervalMonth, TimeIntervalQuarter, TimeIntervalYear:
+		return nil
+	default:
+		return fmt.Errorf("unsupported time interval %q", interval)
+	}
+}
+
+// validateGroupTimeBucket 校验分组时间桶配置
+func validateGroupTimeBucket(group Group) error {
+	if group.Interval == "" {
+		if group.TimeZone != "" {
+			return fmt.Errorf("time zone requires time interval")
+		}
+		return nil
+	}
+	if err := validateTimeInterval(group.Interval); err != nil {
+		return err
+	}
+	if group.TimeZone != "" && !timeZonePattern.MatchString(group.TimeZone) {
+		return fmt.Errorf("invalid time zone %q", group.TimeZone)
+	}
+	return nil
 }
 
 // validateCondition 校验条件字段、操作符和值
@@ -346,19 +521,121 @@ func validateCondition(condition Condition) error {
 	if err := validateOperator(condition.Op); err != nil {
 		return err
 	}
-	if !isScalarValue(condition.Value) {
-		return fmt.Errorf("invalid condition value %v", condition.Value)
+	return validateConditionValue(condition)
+}
+
+// validateConditionValue 校验不同操作符对应的条件值
+func validateConditionValue(condition Condition) error {
+	switch condition.Op {
+	case Exists, NotExists, IsNull, IsNotNull:
+		if condition.Value != nil {
+			return fmt.Errorf("operator %q does not accept a value", condition.Op.String())
+		}
+		return nil
+	case In, NotIn:
+		values, ok := conditionListValues(condition.Value)
+		if !ok || len(values) == 0 {
+			return fmt.Errorf("operator %q requires a non-empty value list", condition.Op.String())
+		}
+		for _, value := range values {
+			if !isScalarValue(value) {
+				return fmt.Errorf("invalid condition value %v", value)
+			}
+		}
+		return nil
+	case Between:
+		start, end, ok := conditionRangeValues(condition.Value)
+		if !ok || !isScalarValue(start) || !isScalarValue(end) {
+			return fmt.Errorf("operator %q requires two scalar range values", condition.Op.String())
+		}
+		return nil
+	case Like, NotLike:
+		if _, ok := condition.Value.(string); !ok {
+			return fmt.Errorf("operator %q requires a string pattern", condition.Op.String())
+		}
+		return nil
+	default:
+		if !isScalarValue(condition.Value) {
+			return fmt.Errorf("invalid condition value %v", condition.Value)
+		}
+		return nil
 	}
-	return nil
 }
 
 // conditionFromExpression 将 GORM-like 比较表达式转换为 Condition
 func conditionFromExpression(expression string, value any) Condition {
-	field, op, ok := parseComparisonExpression(expression)
-	if !ok {
-		return Condition{Field: expression, Value: value}
+	if condition, ok := parseConditionExpression(expression, value); ok {
+		return condition
 	}
-	return Condition{Field: field, Op: op, Value: value}
+	return Condition{Field: expression, Value: value}
+}
+
+// parseConditionExpression 解析受支持的条件表达式
+func parseConditionExpression(expression string, value any) (Condition, bool) {
+	if field, op, ok := parseComparisonExpression(expression); ok {
+		return Condition{Field: field, Op: op, Value: value}, true
+	}
+	if field, op, ok := parseSetExpression(expression); ok {
+		return Condition{Field: field, Op: op, Value: value}, true
+	}
+	if field, ok := parseBetweenExpression(expression); ok {
+		return Condition{Field: field, Op: Between, Value: value}, true
+	}
+	if field, op, ok := parseLikeExpression(expression); ok {
+		return Condition{Field: field, Op: op, Value: value}, true
+	}
+	if field, op, ok := parseUnaryExpression(expression); ok {
+		return Condition{Field: field, Op: op}, true
+	}
+	return Condition{}, false
+}
+
+// parseSetExpression 解析 IN / NOT IN 条件表达式
+func parseSetExpression(expression string) (string, Operator, bool) {
+	matches := setExpressionPattern.FindStringSubmatch(expression)
+	if len(matches) != 3 {
+		return "", 0, false
+	}
+	op, ok := parseComparisonOperator(matches[2])
+	if !ok {
+		return "", 0, false
+	}
+	return matches[1], op, true
+}
+
+// parseBetweenExpression 解析 BETWEEN 条件表达式
+func parseBetweenExpression(expression string) (string, bool) {
+	matches := betweenExpressionPattern.FindStringSubmatch(expression)
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+// parseLikeExpression 解析 LIKE / NOT LIKE 条件表达式
+func parseLikeExpression(expression string) (string, Operator, bool) {
+	matches := likeExpressionPattern.FindStringSubmatch(expression)
+	if len(matches) != 3 {
+		return "", 0, false
+	}
+	op, ok := parseComparisonOperator(matches[2])
+	if !ok {
+		return "", 0, false
+	}
+	return matches[1], op, true
+}
+
+// parseUnaryExpression 解析不需要值的条件表达式
+func parseUnaryExpression(expression string) (string, Operator, bool) {
+	matches := unaryExpressionPattern.FindStringSubmatch(expression)
+	if len(matches) != 3 {
+		return "", 0, false
+	}
+	op, ok := parseComparisonOperator(matches[2])
+	if !ok {
+		return "", 0, false
+	}
+	return matches[1], op, true
 }
 
 // havingFromExpression 将 GORM-like 比较表达式转换为 Having
@@ -385,7 +662,8 @@ func parseComparisonExpression(expression string) (string, Operator, bool) {
 
 // parseComparisonOperator 将 SQL-like 比较符号映射为通用 Operator
 func parseComparisonOperator(token string) (Operator, bool) {
-	switch token {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(token), " "))
+	switch normalized {
 	case "=", "==":
 		return Eq, true
 	case "<>", "!=":
@@ -398,6 +676,22 @@ func parseComparisonOperator(token string) (Operator, bool) {
 		return Lt, true
 	case "<=":
 		return Lte, true
+	case "IN":
+		return In, true
+	case "NOT IN":
+		return NotIn, true
+	case "EXISTS":
+		return Exists, true
+	case "NOT EXISTS":
+		return NotExists, true
+	case "IS NULL":
+		return IsNull, true
+	case "IS NOT NULL":
+		return IsNotNull, true
+	case "LIKE":
+		return Like, true
+	case "NOT LIKE":
+		return NotLike, true
 	default:
 		return 0, false
 	}
@@ -452,16 +746,47 @@ func cloneMetrics(metrics []Metric) []Metric {
 // cloneMetric 返回单个指标的防御性副本
 func cloneMetric(metric Metric) Metric {
 	if metric.Condition != nil {
-		condition := *metric.Condition
+		condition := cloneCondition(*metric.Condition)
 		metric.Condition = &condition
 	}
 	return metric
 }
 
+// cloneCondition 返回条件的防御性副本
+func cloneCondition(condition Condition) Condition {
+	condition.Value = cloneConditionValue(condition.Value)
+	return condition
+}
+
 // conditionPtr 返回条件的独立指针副本
 func conditionPtr(condition Condition) *Condition {
-	cloned := condition
+	cloned := cloneCondition(condition)
 	return &cloned
+}
+
+// cloneConditionValue 返回条件值的防御性副本，避免调用方后续修改切片或 Range
+func cloneConditionValue(value any) any {
+	switch typed := value.(type) {
+	case *Range:
+		if typed == nil {
+			return (*Range)(nil)
+		}
+		cloned := *typed
+		return &cloned
+	case Range:
+		return typed
+	}
+
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Kind() == reflect.Slice {
+		if rv.IsNil() {
+			return value
+		}
+		cloned := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+		reflect.Copy(cloned, rv)
+		return cloned.Interface()
+	}
+	return value
 }
 
 // isScalarValue 判断值是否可作为字段条件比较值
@@ -490,4 +815,116 @@ func isNumericValue(value any) bool {
 	default:
 		return false
 	}
+}
+
+// conditionListValues 将任意切片或数组条件值转换为 []any
+func conditionListValues(value any) ([]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	rv := reflect.ValueOf(value)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, false
+	}
+	values := make([]any, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		values = append(values, rv.Index(i).Interface())
+	}
+	return values, true
+}
+
+// conditionRangeValues 返回 BETWEEN 条件的起止边界
+func conditionRangeValues(value any) (any, any, bool) {
+	switch typed := value.(type) {
+	case Range:
+		return typed.Start, typed.End, true
+	case *Range:
+		if typed == nil {
+			return nil, nil, false
+		}
+		return typed.Start, typed.End, true
+	default:
+		values, ok := conditionListValues(value)
+		if !ok || len(values) != 2 {
+			return nil, nil, false
+		}
+		return values[0], values[1], true
+	}
+}
+
+// elasticOrdersNeedClientPostProcessingSpec 判断显式排序是否无法由 ES composite source 顺序表达
+func elasticOrdersNeedClientPostProcessingSpec(spec Spec) bool {
+	if len(spec.Orders) == 0 {
+		return false
+	}
+	for i, order := range spec.Orders {
+		if i >= len(spec.Groups) || !strings.EqualFold(order.Alias, spec.Groups[i].Alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// sqlLikePatternToRegexp 将 SQL LIKE 通配符模式转换为锚定正则表达式
+func sqlLikePatternToRegexp(pattern string) string {
+	var builder strings.Builder
+	builder.WriteByte('^')
+	escaped := false
+	for _, r := range pattern {
+		if escaped {
+			builder.WriteString(regexp.QuoteMeta(string(r)))
+			escaped = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+		case '%':
+			builder.WriteString(".*")
+		case '_':
+			builder.WriteByte('.')
+		default:
+			builder.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	if escaped {
+		builder.WriteString(regexp.QuoteMeta("\\"))
+	}
+	builder.WriteByte('$')
+	return builder.String()
+}
+
+// sqlLikePatternToWildcard 将 SQL LIKE 通配符模式转换为 Elasticsearch wildcard 模式
+func sqlLikePatternToWildcard(pattern string) string {
+	var builder strings.Builder
+	escaped := false
+	for _, r := range pattern {
+		if escaped {
+			writeElasticWildcardLiteral(&builder, r)
+			escaped = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escaped = true
+		case '%':
+			builder.WriteByte('*')
+		case '_':
+			builder.WriteByte('?')
+		default:
+			writeElasticWildcardLiteral(&builder, r)
+		}
+	}
+	if escaped {
+		writeElasticWildcardLiteral(&builder, '\\')
+	}
+	return builder.String()
+}
+
+func writeElasticWildcardLiteral(builder *strings.Builder, r rune) {
+	switch r {
+	case '*', '?', '\\':
+		builder.WriteByte('\\')
+	}
+	builder.WriteRune(r)
 }
