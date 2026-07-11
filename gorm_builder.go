@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/fantasticbin/QueryBuilder/v2/util"
@@ -24,6 +23,13 @@ type GormBuilder[R any] struct {
 	builder[*GormBuilder[R], R]
 	filter GormScope // GORM 专属过滤条件
 	sort   GormScope // GORM 专属排序条件
+}
+
+// gormCursorField 保存游标字段在 GORM schema 中解析后的列名和反射字段
+type gormCursorField struct {
+	cursorSortField
+	schemaField *schema.Field
+	column      string
 }
 
 // self 返回自身引用，实现 builderInterface 接口
@@ -140,6 +146,48 @@ func (g *GormBuilder[R]) GetQueryMeta() core.QueryMeta {
 // cleanupCursorQuery 清理 GORM 游标查询资源
 func (g *GormBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
+// resolveCursorFields 将 cursor 字段映射为模型 schema 中的安全列名
+func (g *GormBuilder[R]) resolveCursorFields(db *gorm.DB) ([]gormCursorField, error) {
+	stmt := &gorm.Statement{DB: db}
+	if err := stmt.Parse(new(R)); err != nil {
+		return nil, fmt.Errorf("schema parse failed: %w", err)
+	}
+
+	parsedFields := g.builder.getParsedCursorFields()
+	fields := make([]gormCursorField, 0, len(parsedFields))
+	for _, cursorField := range parsedFields {
+		field := stmt.Schema.LookUpField(cursorField.Field)
+		if field == nil || field.DBName == "" {
+			return nil, fmt.Errorf("cursor field %q not found in schema", cursorField.Field)
+		}
+		fields = append(fields, gormCursorField{
+			cursorSortField: cursorField,
+			schemaField:     field,
+			column:          field.DBName,
+		})
+	}
+
+	return fields, nil
+}
+
+// gormCursorFieldColumns 提取 GORM 游标字段对应的数据库列名
+func gormCursorFieldColumns(fields []gormCursorField) []string {
+	columns := make([]string, 0, len(fields))
+	for _, field := range fields {
+		columns = append(columns, field.column)
+	}
+	return columns
+}
+
+// gormCursorSortFields 还原通用游标排序字段，用于复用游标方向判断逻辑
+func gormCursorSortFields(fields []gormCursorField) []cursorSortField {
+	sortFields := make([]cursorSortField, 0, len(fields))
+	for _, field := range fields {
+		sortFields = append(sortFields, field.cursorSortField)
+	}
+	return sortFields
+}
+
 // buildQuery 构建公共的 GORM 查询对象（私有方法）
 // 将字段投影、过滤条件、排序条件、分页等公共逻辑统一抽取
 func (g *GormBuilder[R]) buildQuery(db *gorm.DB) *gorm.DB {
@@ -254,12 +302,13 @@ func (g *GormBuilder[R]) buildCursorBatchSize() int {
 
 // buildCursorQuery 构建游标查询的公共 GORM 查询对象（不含游标条件）
 // 包含字段投影、用户 filter、游标字段排序、用户辅助排序、批次大小
-func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB) *gorm.DB {
+func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB, cursorFields []gormCursorField) *gorm.DB {
 	query := db.Model(new(R))
 
 	// 应用字段投影
 	if len(g.builder.fields) > 0 {
-		query = query.Select(g.builder.fields)
+		fields := appendMissingFields(g.builder.fields, gormCursorFieldColumns(cursorFields))
+		query = query.Select(fields)
 	}
 
 	// 应用用户 filter 条件
@@ -267,14 +316,13 @@ func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB) *gorm.DB {
 		query = query.Scopes(g.filter)
 	}
 
-	// 游标字段排序为主（升序）
-	cursorFields := g.builder.getParsedCursorFields()
+	// 游标字段排序为主：默认升序，按解析后的 DB 列名（column）排序，Descending 时使用 DESC
 	for _, cursorField := range cursorFields {
 		order := "ASC"
 		if !cursorField.Asc {
 			order = "DESC"
 		}
-		query = query.Order(fmt.Sprintf("%s %s", cursorField.Field, order))
+		query = query.Order(fmt.Sprintf("%s %s", cursorField.column, order))
 	}
 
 	// 用户 sort 作为辅助排序
@@ -295,8 +343,14 @@ func (g *GormBuilder[R]) explainCursor(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	cursorFields, err := g.resolveCursorFields(db)
+	if err != nil {
+		return "", err
+	}
+
 	query := g.buildCursorQuery(
 		db.WithContext(ctx).Session(&gorm.Session{DryRun: true}),
+		cursorFields,
 	)
 
 	stmt := query.Find(new([]R)).Statement
@@ -329,9 +383,13 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 	}
 
 	batchSize := g.buildCursorBatchSize()
+	cursorFields, err := g.resolveCursorFields(db)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
 
 	// 构建查询
-	query := g.buildCursorQuery(db.WithContext(ctx))
+	query := g.buildCursorQuery(db.WithContext(ctx), cursorFields)
 	// probeHasMore 模式下覆盖 limit 为 batchSize+1
 	if probeHasMore {
 		query = query.Limit(batchSize + 1)
@@ -339,15 +397,14 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 
 	// 构建游标条件（仅在有游标值时添加）
 	if len(cursorValues) > 0 {
-		cursorFields := g.builder.getParsedCursorFields()
 		if len(cursorFields) == 1 {
 			op := ">"
 			if !cursorFields[0].Asc {
 				op = "<"
 			}
-			query = query.Where(fmt.Sprintf("%s %s ?", cursorFields[0].Field, op), cursorValues[0])
+			query = query.Where(fmt.Sprintf("%s %s ?", cursorFields[0].column, op), cursorValues[0])
 		} else {
-			if asc, uniform := isUniformCursorDirection(cursorFields); uniform {
+			if asc, uniform := isUniformCursorDirection(gormCursorSortFields(cursorFields)); uniform {
 				// 性能优化：方向一致时使用行值比较，通常比 OR 组合条件更利于索引与执行计划
 				op := ">"
 				if !asc {
@@ -355,7 +412,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 				}
 				fieldList := make([]string, 0, len(cursorFields))
 				for _, cf := range cursorFields {
-					fieldList = append(fieldList, cf.Field)
+					fieldList = append(fieldList, cf.column)
 				}
 				placeholders := strings.TrimRight(strings.Repeat("?,", len(cursorValues)), ",")
 				query = query.Where(fmt.Sprintf("(%s) %s (%s)", strings.Join(fieldList, ", "), op, placeholders), cursorValues...)
@@ -366,14 +423,14 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 				for i := 0; i < len(cursorFields); i++ {
 					andParts := make([]string, 0, i+1)
 					for j := 0; j < i; j++ {
-						andParts = append(andParts, fmt.Sprintf("%s = ?", cursorFields[j].Field))
+						andParts = append(andParts, fmt.Sprintf("%s = ?", cursorFields[j].column))
 						args = append(args, cursorValues[j])
 					}
 					op := ">"
 					if !cursorFields[i].Asc {
 						op = "<"
 					}
-					andParts = append(andParts, fmt.Sprintf("%s %s ?", cursorFields[i].Field, op))
+					andParts = append(andParts, fmt.Sprintf("%s %s ?", cursorFields[i].column, op))
 					args = append(args, cursorValues[i])
 					orParts = append(orParts, "("+strings.Join(andParts, " AND ")+")")
 				}
@@ -409,20 +466,11 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 	}
 
 	// 从（截断后的）最后一条提取游标值
-	s, err := schema.Parse(new(R), &sync.Map{}, schema.NamingStrategy{})
-	if err != nil {
-		return nil, nil, 0, false, fmt.Errorf("schema parse failed: %w", err)
-	}
-
 	lastItem := list[len(list)-1]
 	rv := reflect.ValueOf(lastItem).Elem()
-	nextCursorValues := make([]any, 0, len(g.builder.cursorFields))
-	for _, cursorField := range g.builder.getParsedCursorFields() {
-		field := s.LookUpField(cursorField.Field)
-		if field == nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in schema", cursorField.Field)
-		}
-		val := field.ReflectValueOf(ctx, rv)
+	nextCursorValues := make([]any, 0, len(cursorFields))
+	for _, cursorField := range cursorFields {
+		val := cursorField.schemaField.ReflectValueOf(ctx, rv)
 		nextCursorValues = append(nextCursorValues, val.Interface())
 	}
 

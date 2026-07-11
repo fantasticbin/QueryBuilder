@@ -292,8 +292,14 @@ func (m *MongoBuilder[R]) buildCursorProjection() bson.D {
 	if len(m.builder.fields) == 0 {
 		return nil
 	}
+
+	fields := appendMissingFields(
+		m.builder.fields,
+		cursorSortFieldNames(m.builder.getParsedCursorFields()),
+	)
+
 	projection := bson.D{}
-	for _, f := range m.builder.fields {
+	for _, f := range fields {
 		projection = append(projection, bson.E{Key: f, Value: 1})
 	}
 	return projection

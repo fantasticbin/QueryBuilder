@@ -170,6 +170,29 @@ func resolveInitialCursorValues(cursorValues []any, start uint32) []any {
 	return nil
 }
 
+// appendMissingFields 将必需字段追加到字段投影中，保留原字段顺序并去重
+// 游标分页依赖排序字段可见，避免投影裁剪导致下一页游标无法提取
+func appendMissingFields(fields []string, required []string) []string {
+	if len(fields) == 0 || len(required) == 0 {
+		return fields
+	}
+
+	merged := make([]string, 0, len(fields)+len(required))
+	merged = append(merged, fields...)
+	merged = append(merged, required...)
+	return sanitizeFields(merged)
+}
+
+// cursorSortFieldNames 提取游标排序字段名，用于补齐字段投影
+func cursorSortFieldNames(fields []cursorSortField) []string {
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		names = append(names, field.Field)
+	}
+
+	return names
+}
+
 // prepareCursorPipeline 抽离游标查询的公共准备逻辑
 // 包含：确定批次大小、解析初始游标值、设置查询开始时间、执行前置钩子、构建中间件链执行器
 // 参数:

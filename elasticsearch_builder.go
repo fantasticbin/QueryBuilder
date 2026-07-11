@@ -185,10 +185,8 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 }
 
 // cleanupCursorQuery 清理 QueryCursor/QueryPage 内部自动管理的 PIT
-func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResult[R], err error) {
-	if err != nil || result == nil || !result.HasMore {
-		e.closePIT(e.cursorPitID)
-	}
+func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {
+	e.closePIT(e.cursorPitID)
 	e.cursorPitID = ""
 }
 

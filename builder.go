@@ -61,7 +61,7 @@ func NewDBProxyWithAdapters(adapters ...core.DataSourceAdapter) *core.DBProxy {
 	return core.NewDBProxyWithAdapters(adapters...)
 }
 
-// selfBuilder 表示能返回自身具体类型的构建器。
+// selfBuilder 表示能返回自身具体类型的构建器
 type selfBuilder[B any] interface {
 	self() B
 }
@@ -366,18 +366,30 @@ func (b *builder[B, R]) prepareAndValidate() error {
 	}
 
 	// fields 自动清洗
-	b.sanitizeFields()
+	b.fields = sanitizeFields(b.fields)
 	if b.isCursorQuery {
 		if err := b.ensureDefaultCursorField(); err != nil {
 			return err
 		}
+		// 校验初始游标值（显式 cursorValues 或 start 自动转换）与 cursorFields 数量一致
+		if err := b.validateInitialCursorValues(); err != nil {
+			return err
+		}
 	}
 
-	// cursorValues 与 cursorFields 长度一致性校验
-	if len(b.cursorValues) > 0 && len(b.cursorFields) > 0 && len(b.cursorValues) != len(b.cursorFields) {
+	return nil
+}
+
+// validateInitialCursorValues 校验解析后的初始游标值与游标字段数量一致
+// start 自动转为单字段游标时也会参与校验
+func (b *builder[B, R]) validateInitialCursorValues() error {
+	initialCursorValues := resolveInitialCursorValues(b.cursorValues, b.start)
+	if len(initialCursorValues) == 0 {
+		return nil
+	}
+	if len(initialCursorValues) != len(b.cursorFields) {
 		return ErrCursorMismatch
 	}
-
 	return nil
 }
 
@@ -390,17 +402,16 @@ func (b *builder[B, R]) getParsedCursorFields() []cursorSortField {
 	return b.parsedCursorFields
 }
 
-// sanitizeFields 对 fields 切片进行自动清洗：过滤空字符串、去重
-// 若清洗后为空切片，则将 fields 置为 nil（表示查询所有字段）
-func (b *builder[B, R]) sanitizeFields() {
-	if len(b.fields) == 0 {
-		return
+// sanitizeFields 对字符串切片去重并过滤空串，保留首次出现顺序
+// 清洗后为空时返回 nil，表示"未设置"
+func sanitizeFields(fields []string) []string {
+	if len(fields) == 0 {
+		return nil
 	}
+	seen := make(map[string]struct{}, len(fields))
+	cleaned := make([]string, 0, len(fields))
 
-	seen := make(map[string]struct{}, len(b.fields))
-	cleaned := make([]string, 0, len(b.fields))
-
-	for _, field := range b.fields {
+	for _, field := range fields {
 		// 过滤空字符串
 		if field == "" {
 			continue
@@ -415,10 +426,10 @@ func (b *builder[B, R]) sanitizeFields() {
 
 	// 清洗后为空则视为未设置
 	if len(cleaned) == 0 {
-		b.fields = nil
-	} else {
-		b.fields = cleaned
+		return nil
 	}
+
+	return cleaned
 }
 
 // cloneBase 复制 builder 基类的查询配置到目标 builder

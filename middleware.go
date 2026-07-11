@@ -198,6 +198,9 @@ func executeCursorWithMiddlewares[R any](
 	// 包装迭代器，在遍历结束后执行 AfterQueryHook
 	return func(yield func(*R, error) bool) {
 		var allResults []*R
+		if mc.afterHook != nil {
+			allResults = []*R{}
+		}
 		var lastErr error
 
 		for item, err := range innerIter {
@@ -208,7 +211,9 @@ func executeCursorWithMiddlewares[R any](
 				}
 				break
 			}
-			allResults = append(allResults, item)
+			if mc.afterHook != nil {
+				allResults = append(allResults, item)
+			}
 			if !yield(item, nil) {
 				break
 			}

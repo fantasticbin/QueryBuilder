@@ -1234,6 +1234,29 @@ func TestMongoBuildCursorSort_MixedDirections(t *testing.T) {
 	}
 }
 
+func TestMongoBuildCursorProjectionIncludesCursorFields(t *testing.T) {
+	b := &MongoBuilder[CursorTestEntity]{}
+	b.builder.fields = []string{"name"}
+	b.builder.cursorFields = []string{"created_at", "_id"}
+	b.builder.parsedCursorFields = parseCursorSortFields(b.builder.cursorFields)
+
+	projection := b.buildCursorProjection()
+	keys := make([]string, 0, len(projection))
+	for _, field := range projection {
+		keys = append(keys, field.Key)
+	}
+
+	want := []string{"name", "created_at", "_id"}
+	if len(keys) != len(want) {
+		t.Fatalf("expected projection keys %v, got %v", want, keys)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("expected projection keys %v, got %v", want, keys)
+		}
+	}
+}
+
 // TestListQueryPage_WithMiddleware 测试 List.QueryPage 中间件传递
 func TestListQueryPage_WithMiddleware(t *testing.T) {
 	ctx := context.Background()

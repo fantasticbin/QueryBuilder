@@ -490,3 +490,33 @@ func TestGormBuilderQueryPageCursorConditions(t *testing.T) {
 		})
 	}
 }
+
+func TestGormBuilderQueryPageRejectsInvalidCursorField(t *testing.T) {
+	db, _ := newGormTestDB(t, nil, 0)
+	builder := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil))
+	builder.SetCursorField("id; DROP TABLE users").SetLimit(1)
+
+	_, err := builder.QueryPage(context.Background())
+	if err == nil {
+		t.Fatal("expected invalid cursor field error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cursor field") {
+		t.Fatalf("expected cursor field error, got %v", err)
+	}
+}
+
+func TestGormBuilderQueryPageProjectionIncludesCursorFields(t *testing.T) {
+	rows := []*GormTestEntity{{ID: 1, Name: "Alice", CreatedAt: 100, Status: "active"}}
+	db, state := newGormTestDB(t, rows, 0)
+	builder := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil))
+	builder.SetFields("name").SetCursorField("id").SetLimit(1)
+
+	result, err := builder.QueryPage(context.Background())
+	qbtest.AssertNoError(t, err)
+	qbtest.AssertCursorPageResult(t, result, rows, 1, false, nil)
+
+	query := assertAnyRecordedSQL(t, state, func(query gormRecordedQuery) bool {
+		return strings.Contains(query.SQL, "FROM gorm_test_entities") && !strings.Contains(strings.ToLower(query.SQL), "count(")
+	})
+	assertSQLContains(t, query, "SELECT name,id")
+}
