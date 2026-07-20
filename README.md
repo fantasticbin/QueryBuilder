@@ -1401,6 +1401,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
         CountDistinct("customer_id", "buyer_count").
         Sum("amount", "amount_sum").
         SumDistinct("amount", "unique_amount_sum").
+        SetStart(0).
         SetLimit(100)
     query.SetFilter(func(db *gorm.DB) *gorm.DB {
         return db.Where("status = ?", "paid")
@@ -1410,6 +1411,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
     if err != nil {
         return err
     }
+    fmt.Println("groups:", result.Total)
     for _, row := range result.Rows {
         fmt.Println(row.Region, row.Count, row.BuyerCount, row.UniqueAmountSum, row.Amount)
     }
@@ -1420,6 +1422,12 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 `GroupBy` adds the fields you want to summarize by. `Count`, `CountDistinct`, `Sum`, `SumDistinct`, `Avg`, `Min`, and `Max` add the numbers you want in the result. Each alias must match a tag on the result struct, so `buyer_count` above is decoded into `SalesSummary.BuyerCount`. Add `gorm`, `bson`, and `json` tags when one result type is shared across multiple data sources.
 
 Groups are sorted in ascending order by default. Use `GroupByDesc` or `AddGroup(agg.Group{...})` with `Descending: true` when a group key should be sorted descending.
+
+Grouped aggregate results use offset pagination: `SetStart(start)` skips groups after filtering, HAVING, and ordering, while `SetLimit(limit)` controls the page size. The default grouped page size remains 100 and the maximum `Limit` is 5000. `Result.Total` is the number of grouped result rows after HAVING, not the number of source records; call `SetNeedTotal(false)` to skip the total query, or `SetTotalLimit(n)` to cap expensive total counting. Aggregate queries without `Groups` still return one summary row, ignore pagination, and report `Total=1`.
+
+> **API symmetry with list/cursor queries:** The aggregate builders deliberately expose the **same** pagination API as the list and cursor builders — `SetStart` / `SetLimit` / `SetNeedTotal` / `SetTotalLimit` — and `Result.Total` mirrors `core.ListResult.Total`. This lets a shared paginated UI component (offset + total footer) drive both list and aggregate views without branching. The default `needTotal=true` matches the list-query default, and the aggregate cache/observability middleware keys on the same pagination dimensions (`start`, `limit`, `needTotal`, `totalLimit`) so cache keys and metrics stay consistent across both.
+
+> ⚠️ **Elasticsearch full-scan risk:** Because `needTotal` defaults to `true`, Elasticsearch grouped queries that combine HAVING filters **and** non-prefix/metric ordering must collect **all** composite buckets to compute an exact `Total` — the builder degrades from "collect until the page is full" into a **full bucket scan**. For high-cardinality groupings this can be expensive. Prefer `SetNeedTotal(false)` to skip the total entirely, or `SetTotalLimit(n)` to cap it (a capped `Total` reads as `n+` rather than an exact count). `Explain` reports `full_scan` in `client_post_processing` when all buckets must be collected.
 
 Time buckets are available with `GroupByDate` or `GroupByDateWithTimeZone` when a date/time field should be truncated before grouping:
 
@@ -1483,7 +1491,7 @@ query.GroupBy("region", "region").
 
 `CountIf`, `CountDistinctIf`, `SumIf`, `SumDistinctIf`, `AvgIf`, `MinIf`, and `MaxIf` accept validated field predicates such as `status = ?`, `status IN ?`, `amount BETWEEN ? AND ?`, `name LIKE ?`, `deleted_at IS NULL`, and `archived_at EXISTS`. Supported predicate operators are `=`, `==`, `!=`, `<>`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `BETWEEN`, `LIKE`, `NOT LIKE`, `EXISTS`, `NOT EXISTS`, `IS NULL`, and `IS NOT NULL`. Use `agg.Range{Start: ..., End: ...}` for `BETWEEN`, pass a non-empty slice for `IN`/`NOT IN`, and use `MetricWhere(fn, field, alias, agg.Condition{...})` when a typed condition is clearer than an expression string.
 
-`OrderBy` and `OrderByDesc` accept either a group alias or a metric alias. `Having` filters grouped results by metric alias and uses the same comparison expression form, with numeric comparison values. For Elasticsearch grouped `Having`, the builder pages composite buckets and filters client-side before applying limit. Ordering stays in composite source order when it is a prefix of the group aliases; metric ordering or non-prefix group ordering requires collecting all buckets before sorting and limiting. `Explain` marks client work with `client_post_processing` and uses `full_scan` to show whether all buckets must be collected.
+`OrderBy` and `OrderByDesc` accept either a group alias or a metric alias. `Having` filters grouped results by metric alias and uses the same comparison expression form, with numeric comparison values. For Elasticsearch grouped `Having`, the builder pages composite buckets and filters client-side before applying offset and limit. Ordering stays in composite source order when it is a prefix of the group aliases; metric ordering or non-prefix group ordering requires collecting all buckets before sorting and paging. `Explain` marks client work with `client_post_processing` and uses `full_scan` to show whether all buckets must be collected.
 
 #### Inspecting the Query
 
@@ -1499,8 +1507,8 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 
 #### Current Limits
 
-- Grouped queries return at most 100 rows by default; `Limit` cannot exceed 5000
-- A query without `Groups` returns one summary row
+- Grouped queries support offset pagination with `Start + Limit`; grouped page size defaults to 100 and `Limit` cannot exceed 5000
+- A query without `Groups` returns one summary row, ignores pagination, and reports `Total=1`
 - Records with a null or missing group field are excluded; null metric values are ignored
 - Distinct is currently supported only for `Count` and `Sum`
 - HAVING currently filters metric aliases only and accepts numeric comparison values; grouped cursor pagination is not supported yet
@@ -1559,6 +1567,79 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 | `WithESIndex(index)` | Set Elasticsearch index when using `List` |
 | `WithPITID(pitID)` | Continue an Elasticsearch PIT pagination session |
 | `WithPitKeepAlive(duration)` | Set Elasticsearch PIT keep-alive duration |
+
+### Aggregate Builder Methods
+
+Methods on the `agg.Builder` interface (also available on `agg.SpecBuilder` for building a standalone `Spec`). All configuration methods are chainable.
+
+#### Execution & Meta
+
+| Method | Description |
+|--------|-------------|
+| `Query(ctx)` | Execute the aggregate query, returns `*agg.Result[A]` |
+| `Explain(ctx)` | Preview the generated aggregate query (Dry Run) |
+| `Meta()` | Return aggregate query meta info (data source, spec, plan flags, etc.) |
+
+#### Pipeline & Spec
+
+| Method | Description |
+|--------|-------------|
+| `Use(middleware)` | Add aggregate middleware to the pipeline |
+| `SetBeforeHook(hook)` | Set pre-execution hook |
+| `SetAfterHook(hook)` | Set post-execution hook |
+| `ConfigureSpec(options...)` | Batch-configure the spec via `SpecOption` functions |
+| `SetSpec(spec)` | Replace the entire aggregate spec |
+
+#### Grouping
+
+| Method | Description |
+|--------|-------------|
+| `SetGroups(groups...)` | Replace all group-by fields |
+| `AddGroup(group)` | Append a full group configuration |
+| `GroupBy(field, alias)` | Append an ascending group-by field |
+| `GroupByDesc(field, alias)` | Append a descending group-by field |
+| `GroupByDate(field, alias, interval)` | Append an ascending time-bucket group-by field |
+| `GroupByDateWithTimeZone(field, alias, interval, timeZone)` | Append a time-bucket group-by field with a time zone |
+
+#### Metrics
+
+| Method | Description |
+|--------|-------------|
+| `SetMetrics(metrics...)` | Replace all metrics |
+| `AddMetric(metric)` | Append a full metric configuration |
+| `Metric(fn, field, alias)` | Append a metric with the given aggregate function |
+| `MetricIf(fn, field, alias, expression, value)` | Append a conditional metric using a `"field = ?"` expression |
+| `MetricWhere(fn, field, alias, condition)` | Append a conditional metric using a typed `Condition` |
+| `Count(alias)` | Count matching records |
+| `CountIf(alias, expression, value)` | Count records matching the condition |
+| `CountDistinct(field, alias)` | Count unique non-null field values |
+| `CountDistinctIf(field, alias, expression, value)` | Count unique field values matching the condition |
+| `Sum(field, alias)` | Calculate a sum |
+| `SumIf(field, alias, expression, value)` | Sum values matching the condition |
+| `SumDistinct(field, alias)` | Sum unique non-null field values |
+| `SumDistinctIf(field, alias, expression, value)` | Sum unique field values matching the condition |
+| `Avg(field, alias)` | Calculate an average |
+| `AvgIf(field, alias, expression, value)` | Average values matching the condition |
+| `Min(field, alias)` | Find the minimum |
+| `MinIf(field, alias, expression, value)` | Minimum of values matching the condition |
+| `Max(field, alias)` | Find the maximum |
+| `MaxIf(field, alias, expression, value)` | Maximum of values matching the condition |
+
+#### Ordering, HAVING, Limit & Pagination
+
+| Method | Description |
+|--------|-------------|
+| `SetOrders(orders...)` | Replace all result ordering rules |
+| `AddOrder(order)` | Append a result ordering rule |
+| `OrderBy(alias)` | Append an ascending ordering rule (by metric/group alias) |
+| `OrderByDesc(alias)` | Append a descending ordering rule |
+| `SetHavings(havings...)` | Replace all post-aggregation filters |
+| `AddHaving(having)` | Append a post-aggregation filter |
+| `Having(expression, value)` | Append a HAVING filter using an `"alias >= ?"` expression |
+| `SetLimit(limit)` | Set the max number of returned groups |
+| `SetStart(start)` | Set the pagination offset for grouped results |
+| `SetNeedTotal(bool)` | Toggle returning the total group count |
+| `SetTotalLimit(limit)` | Cap total counting; `0` keeps exact counting |
 
 ---
 

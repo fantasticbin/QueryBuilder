@@ -1399,6 +1399,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
         CountDistinct("customer_id", "buyer_count").
         Sum("amount", "amount_sum").
         SumDistinct("amount", "unique_amount_sum").
+        SetStart(0).
         SetLimit(100)
     query.SetFilter(func(db *gorm.DB) *gorm.DB {
         return db.Where("status = ?", "paid")
@@ -1408,6 +1409,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
     if err != nil {
         return err
     }
+    fmt.Println("groups:", result.Total)
     for _, row := range result.Rows {
         fmt.Println(row.Region, row.Count, row.BuyerCount, row.UniqueAmountSum, row.Amount)
     }
@@ -1418,6 +1420,12 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 `GroupBy` 用来添加分组字段。`Count`、`CountDistinct`、`Sum`、`SumDistinct`、`Avg`、`Min`、`Max` 用来添加需要输出的统计值。每个 `Alias` 都要和结果结构体的字段标签对应，例如上面的 `buyer_count` 会写入 `SalesSummary.BuyerCount`。同一个结果结构体需要兼容多个数据源时，可以同时声明 `gorm`、`bson` 和 `json` 标签。
 
 分组默认按升序排列。需要倒序时，可以使用 `GroupByDesc`，或通过 `AddGroup(agg.Group{...})` 设置 `Descending: true`。
+
+分组聚合结果支持偏移分页：`SetStart(start)` 会在过滤、HAVING 和排序之后跳过指定数量的分组，`SetLimit(limit)` 控制页大小。分组查询默认页大小仍为 100，`Limit` 最大为 5000。`Result.Total` 表示 HAVING 后的聚合结果行数，也就是分组数，不是原始记录数；如果不需要总数，可调用 `SetNeedTotal(false)` 跳过 total 查询，或用 `SetTotalLimit(n)` 限制昂贵的总数统计。没有配置 `Groups` 的汇总查询仍返回一行，分页不生效，并返回 `Total=1`。
+
+> **与列表/游标查询的 API 对称性：** 聚合构建器刻意暴露与列表、游标构建器**完全一致**的分页 API —— `SetStart` / `SetLimit` / `SetNeedTotal` / `SetTotalLimit`，且 `Result.Total` 与 `core.ListResult.Total` 对齐。这样同一套带偏移与总数页脚的翻页 UI 组件可以无缝驱动列表视图和聚合视图，无需分支判断。`needTotal` 默认 `true`，与列表查询默认值一致；聚合的缓存/可观测中间件也按相同的分页维度（`start`、`limit`、`needTotal`、`totalLimit`）生成缓存键与指标，从而保证两类查询在缓存与监控上表现一致。
+
+> ⚠️ **Elasticsearch 全量扫描风险：** 由于 `needTotal` 默认 `true`，Elasticsearch 分组查询在同时使用 HAVING 过滤与按指标/非前缀分组排序时，为了算出精确的 `Total`，必须收集**所有** composite buckets —— 也就是构建器会从"收满一页即停"退化为**全量扫描所有 bucket**。在高基数分组场景下代价可能很高。建议优先用 `SetNeedTotal(false)` 直接跳过总数统计，或用 `SetTotalLimit(n)` 限制总数（封顶后的 `Total` 应读作 `n+` 而非精确值）。当必须收集全部 buckets 时，`Explain` 会在 `client_post_processing` 中输出 `full_scan` 加以提示。
 
 需要按时间字段截断后再分组时，可以使用 `GroupByDate` 或 `GroupByDateWithTimeZone`：
 
@@ -1481,7 +1489,7 @@ query.GroupBy("region", "region").
 
 `CountIf`、`CountDistinctIf`、`SumIf`、`SumDistinctIf`、`AvgIf`、`MinIf`、`MaxIf` 支持经过校验的字段谓词，例如 `status = ?`、`status IN ?`、`amount BETWEEN ? AND ?`、`name LIKE ?`、`deleted_at IS NULL`、`archived_at EXISTS`。支持的字段谓词操作符包括 `=`、`==`、`!=`、`<>`、`>`、`>=`、`<`、`<=`、`IN`、`NOT IN`、`BETWEEN`、`LIKE`、`NOT LIKE`、`EXISTS`、`NOT EXISTS`、`IS NULL`、`IS NOT NULL`。`BETWEEN` 使用 `agg.Range{Start: ..., End: ...}`，`IN` / `NOT IN` 需要传入非空切片；如果类型化写法更清晰，可以使用 `MetricWhere(fn, field, alias, agg.Condition{...})`。
 
-`OrderBy` 和 `OrderByDesc` 可以引用分组别名或指标别名。`Having` 用于按指标别名过滤分组后的结果，支持同样的比较表达式写法，比较值要求为数值。对 Elasticsearch 的分组 `Having`，构建器会分页读取 composite buckets，并在客户端过滤后再应用 limit。排序如果是分组别名的前缀顺序，会继续交给 composite source；按指标排序或按非前缀分组别名排序时，需要读取完整 bucket 集合后再排序和截断。`Explain` 会通过 `client_post_processing` 标记客户端处理，并用 `full_scan` 标明是否必须收集全部 buckets。
+`OrderBy` 和 `OrderByDesc` 可以引用分组别名或指标别名。`Having` 用于按指标别名过滤分组后的结果，支持同样的比较表达式写法，比较值要求为数值。对 Elasticsearch 的分组 `Having`，构建器会分页读取 composite buckets，并在客户端过滤后再应用 offset 和 limit。排序如果是分组别名的前缀顺序，会继续交给 composite source；按指标排序或按非前缀分组别名排序时，需要读取完整 bucket 集合后再排序和分页。`Explain` 会通过 `client_post_processing` 标记客户端处理，并用 `full_scan` 标明是否必须收集全部 buckets。
 
 #### 查看生成的查询
 
@@ -1497,8 +1505,8 @@ statement, err := query.Explain(ctx)
 
 #### 使用限制
 
-- 分组查询默认最多返回 100 行，`Limit` 最大为 5000
-- 没有配置 `Groups` 时返回一行汇总结果
+- 分组查询支持 `Start + Limit` 偏移分页；分组页大小默认 100，`Limit` 最大为 5000
+- 没有配置 `Groups` 时返回一行汇总结果，分页不生效，并返回 `Total=1`
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
 - 目前只有 `Count` 和 `Sum` 支持 distinct
 - HAVING 当前只支持按指标别名过滤，且比较值需为数值；分组游标分页暂不支持
@@ -1557,6 +1565,79 @@ statement, err := query.Explain(ctx)
 | `WithESIndex(index)` | 在 `List` 模式下设置 Elasticsearch 索引名 |
 | `WithPITID(pitID)` | 续用 Elasticsearch PIT 分页会话 |
 | `WithPitKeepAlive(duration)` | 设置 Elasticsearch PIT 保活时长 |
+
+### 聚合构建器方法
+
+`agg.Builder` 接口上的方法（同样可在 `agg.SpecBuilder` 上使用以独立构建 `Spec`）。所有配置方法均支持链式调用。
+
+#### 执行与元信息
+
+| 方法 | 说明 |
+|------|------|
+| `Query(ctx)` | 执行聚合查询，返回 `*agg.Result[A]` |
+| `Explain(ctx)` | 预览生成的聚合查询语句（Dry Run） |
+| `Meta()` | 返回聚合查询元信息（数据源、规范、执行计划标志等） |
+
+#### 管道与规范
+
+| 方法 | 说明 |
+|------|------|
+| `Use(middleware)` | 添加聚合中间件到查询管道 |
+| `SetBeforeHook(hook)` | 设置执行前置钩子 |
+| `SetAfterHook(hook)` | 设置执行后置钩子 |
+| `ConfigureSpec(options...)` | 通过 `SpecOption` 函数批量配置聚合规范 |
+| `SetSpec(spec)` | 替换整个聚合规范 |
+
+#### 分组
+
+| 方法 | 说明 |
+|------|------|
+| `SetGroups(groups...)` | 替换全部分组字段 |
+| `AddGroup(group)` | 追加一个完整分组配置 |
+| `GroupBy(field, alias)` | 追加一个升序分组字段 |
+| `GroupByDesc(field, alias)` | 追加一个降序分组字段 |
+| `GroupByDate(field, alias, interval)` | 追加一个升序时间桶分组字段 |
+| `GroupByDateWithTimeZone(field, alias, interval, timeZone)` | 追加一个带时区的时间桶分组字段 |
+
+#### 指标
+
+| 方法 | 说明 |
+|------|------|
+| `SetMetrics(metrics...)` | 替换全部聚合指标 |
+| `AddMetric(metric)` | 追加一个完整指标配置 |
+| `Metric(fn, field, alias)` | 追加一个指定聚合函数的指标 |
+| `MetricIf(fn, field, alias, expression, value)` | 追加条件指标，条件使用 `"field = ?"` 表达式 |
+| `MetricWhere(fn, field, alias, condition)` | 追加条件指标，使用类型化 `Condition` |
+| `Count(alias)` | 统计匹配记录数 |
+| `CountIf(alias, expression, value)` | 统计满足条件的记录数 |
+| `CountDistinct(field, alias)` | 统计字段去重（非空）计数 |
+| `CountDistinctIf(field, alias, expression, value)` | 统计满足条件的字段去重计数 |
+| `Sum(field, alias)` | 求和 |
+| `SumIf(field, alias, expression, value)` | 对满足条件的值求和 |
+| `SumDistinct(field, alias)` | 对字段去重（非空）值求和 |
+| `SumDistinctIf(field, alias, expression, value)` | 对满足条件的去重值求和 |
+| `Avg(field, alias)` | 求平均值 |
+| `AvgIf(field, alias, expression, value)` | 对满足条件的值求平均值 |
+| `Min(field, alias)` | 求最小值 |
+| `MinIf(field, alias, expression, value)` | 对满足条件的值求最小值 |
+| `Max(field, alias)` | 求最大值 |
+| `MaxIf(field, alias, expression, value)` | 对满足条件的值求最大值 |
+
+#### 排序、HAVING、上限与分页
+
+| 方法 | 说明 |
+|------|------|
+| `SetOrders(orders...)` | 替换全部结果排序规则 |
+| `AddOrder(order)` | 追加一个结果排序规则 |
+| `OrderBy(alias)` | 追加一个升序排序规则（按指标/分组别名） |
+| `OrderByDesc(alias)` | 追加一个降序排序规则 |
+| `SetHavings(havings...)` | 替换全部聚合后过滤条件 |
+| `AddHaving(having)` | 追加一个聚合后过滤条件 |
+| `Having(expression, value)` | 追加 HAVING 过滤，条件使用 `"alias >= ?"` 表达式 |
+| `SetLimit(limit)` | 设置返回分组的数量上限 |
+| `SetStart(start)` | 设置分组结果的分页起始偏移 |
+| `SetNeedTotal(bool)` | 设置是否返回总分组数 |
+| `SetTotalLimit(limit)` | 设置总数统计上限，`0` 表示精确统计 |
 
 ---
 

@@ -14,6 +14,7 @@ type AggregateEvent struct {
 	StartTime  time.Time
 	Duration   time.Duration
 	RowCount   int
+	Total      int64
 	Success    bool
 	Error      error
 	ErrorType  string
@@ -210,6 +211,7 @@ func buildAggregateEvent[A any](
 	}
 	if result != nil {
 		event.RowCount = len(result.Rows)
+		event.Total = result.Total
 	}
 	if event.Duration <= 0 {
 		event.Duration = time.Nanosecond
@@ -244,7 +246,10 @@ func defaultAggregateAttributes(meta queryagg.Meta) []Attribute {
 		{Key: "querybuilder.aggregate.uses_elastic_scripted_metric", Value: plan.Has(queryagg.PlanUsesElasticScriptedMetric)},
 		{Key: "querybuilder.aggregate.needs_client_post_processing", Value: plan.Has(queryagg.PlanNeedsClientPostProcessing)},
 		{Key: "querybuilder.aggregate.needs_full_client_post_processing", Value: plan.Has(queryagg.PlanNeedsFullClientPostProcessing)},
-		{Key: "querybuilder.limit", Value: meta.Spec.Limit},
+		{Key: "querybuilder.aggregate.start", Value: meta.Start},
+		{Key: "querybuilder.aggregate.limit", Value: meta.Spec.Limit},
+		{Key: "querybuilder.aggregate.need_total", Value: meta.NeedTotal},
+		{Key: "querybuilder.aggregate.total_limit", Value: meta.TotalLimit},
 	}
 }
 
@@ -253,6 +258,7 @@ func aggregateResultAttributes(event AggregateEvent) []Attribute {
 	attributes := []Attribute{
 		{Key: "querybuilder.success", Value: event.Success},
 		{Key: "querybuilder.aggregate.row_count", Value: event.RowCount},
+		{Key: "querybuilder.aggregate.total", Value: event.Total},
 	}
 	if event.ErrorType != "" {
 		attributes = append(attributes, Attribute{Key: "querybuilder.error_type", Value: event.ErrorType})

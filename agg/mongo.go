@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -27,6 +28,10 @@ const (
 	mongoRowsField = "_rows"
 )
 
+type mongoAggregateTotal struct {
+	Total int64 `bson:"total"`
+}
+
 // NewMongoBuilder 创建 MongoDB 聚合查询构建器
 // 泛型参数:
 //
@@ -35,6 +40,7 @@ func NewMongoBuilder[A any](data *core.DBProxy) *MongoBuilder[A] {
 	b := &MongoBuilder[A]{}
 	b.data = data
 	b.dataSource = core.MongoDB
+	b.needTotal = true
 	b.setSelf(b)
 	return b
 }
@@ -65,19 +71,67 @@ func (b *MongoBuilder[A]) Query(ctx context.Context) (*Result[A], error) {
 			return nil, err
 		}
 
-		cursor, err := collection.Aggregate(ctx, b.buildPipeline())
-		if err != nil {
-			return nil, fmt.Errorf("executing mongodb aggregate query: %w", err)
+		if len(b.spec.Groups) == 0 {
+			rows, err := b.queryRows(ctx, collection)
+			if err != nil {
+				return nil, err
+			}
+			if len(rows) == 0 {
+				rows = append(rows, new(A))
+			}
+			return &Result[A]{Rows: rows, Total: 1}, nil
 		}
+
 		rows := make([]*A, 0)
-		if err := cursor.All(ctx, &rows); err != nil {
-			return nil, fmt.Errorf("decoding mongodb aggregate result: %w", err)
+		var total int64
+		if err := util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
+			var err error
+			rows, err = b.queryRows(ctx, collection)
+			return err
+		}, func(ctx context.Context) error {
+			if !b.needTotal {
+				return nil
+			}
+			count, err := b.queryTotal(ctx, collection)
+			if err != nil {
+				return err
+			}
+			total = count
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		if len(b.spec.Groups) == 0 && len(rows) == 0 {
-			rows = append(rows, new(A))
-		}
-		return &Result[A]{Rows: rows}, nil
+		return &Result[A]{Rows: rows, Total: total}, nil
 	})
+}
+
+// queryRows 执行聚合数据页 pipeline 并解码结果行
+func (b *MongoBuilder[A]) queryRows(ctx context.Context, collection *mongo.Collection) ([]*A, error) {
+	cursor, err := collection.Aggregate(ctx, b.buildPipeline())
+	if err != nil {
+		return nil, fmt.Errorf("executing mongodb aggregate query: %w", err)
+	}
+	rows := make([]*A, 0)
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decoding mongodb aggregate result: %w", err)
+	}
+	return rows, nil
+}
+
+// queryTotal 统计聚合后、HAVING 后的分组行数
+func (b *MongoBuilder[A]) queryTotal(ctx context.Context, collection *mongo.Collection) (int64, error) {
+	cursor, err := collection.Aggregate(ctx, b.buildTotalPipeline())
+	if err != nil {
+		return 0, fmt.Errorf("counting mongodb aggregate groups: %w", err)
+	}
+	totals := make([]mongoAggregateTotal, 0, 1)
+	if err := cursor.All(ctx, &totals); err != nil {
+		return 0, fmt.Errorf("decoding mongodb aggregate total: %w", err)
+	}
+	if len(totals) == 0 {
+		return 0, nil
+	}
+	return totals[0].Total, nil
 }
 
 // Explain 返回生成的 MongoDB 聚合管道，但不会执行查询
@@ -86,14 +140,15 @@ func (b *MongoBuilder[A]) Explain(context.Context) (string, error) {
 		return "", err
 	}
 
-	encoded, err := bson.MarshalExtJSON(
-		bson.D{
-			{Key: "pipeline", Value: b.buildPipeline()},
-			{Key: "plan", Value: b.Meta().Plan},
-		},
-		true,
-		false,
-	)
+	payload := bson.D{
+		{Key: "pipeline", Value: b.buildPipeline()},
+		{Key: "plan", Value: b.Meta().Plan},
+	}
+	if b.needTotal && len(b.spec.Groups) > 0 {
+		payload = append(payload, bson.E{Key: "total_pipeline", Value: b.buildTotalPipeline()})
+	}
+
+	encoded, err := bson.MarshalExtJSON(payload, true, false)
 	if err != nil {
 		return "", fmt.Errorf("encoding mongodb aggregate pipeline: %w", err)
 	}
@@ -108,8 +163,23 @@ func (b *MongoBuilder[A]) Explain(context.Context) (string, error) {
 	return string(pretty), nil
 }
 
-// buildPipeline 根据聚合规范构建 MongoDB pipeline
+// buildPipeline 根据聚合规范构建 MongoDB 数据页 pipeline
 func (b *MongoBuilder[A]) buildPipeline() mongo.Pipeline {
+	pipeline := b.buildPipelineBase()
+	return b.appendHavingSortAndPagination(pipeline)
+}
+
+// buildTotalPipeline 根据聚合规范构建 MongoDB 总分组数 pipeline
+func (b *MongoBuilder[A]) buildTotalPipeline() mongo.Pipeline {
+	pipeline := b.appendHaving(b.buildPipelineBase())
+	if b.totalLimit > 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: int64(b.totalLimit)}})
+	}
+	return append(pipeline, bson.D{{Key: "$count", Value: "total"}})
+}
+
+// buildPipelineBase 构建不含 HAVING、排序和分页的基础聚合 pipeline
+func (b *MongoBuilder[A]) buildPipelineBase() mongo.Pipeline {
 	if b.hasFacetMetric() {
 		return b.buildFacetPipeline()
 	}
@@ -123,12 +193,11 @@ func (b *MongoBuilder[A]) buildSimplePipeline() mongo.Pipeline {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
 
-	pipeline = append(
+	return append(
 		pipeline,
 		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), b.spec.Metrics)}},
 		bson.D{{Key: "$project", Value: b.buildProjection(b.spec.Metrics)}},
 	)
-	return b.appendHavingSortAndLimit(pipeline)
 }
 
 // buildFacetPipeline 构建包含去重或条件指标的统计管道
@@ -174,12 +243,11 @@ func (b *MongoBuilder[A]) buildFacetPipeline() mongo.Pipeline {
 		})
 	}
 
-	pipeline = append(
+	return append(
 		pipeline,
 		bson.D{{Key: "$group", Value: mergeGroup}},
 		bson.D{{Key: "$project", Value: b.buildProjection(b.spec.Metrics)}},
 	)
-	return b.appendHavingSortAndLimit(pipeline)
 }
 
 // buildBaseFacetPipeline 构建保留原始统计语义的基础分支
@@ -365,11 +433,17 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 	})
 }
 
-// appendHavingSortAndLimit 为分组结果追加 HAVING、排序和数量限制
-func (b *MongoBuilder[A]) appendHavingSortAndLimit(pipeline mongo.Pipeline) mongo.Pipeline {
+// appendHaving 为分组结果追加 HAVING 过滤
+func (b *MongoBuilder[A]) appendHaving(pipeline mongo.Pipeline) mongo.Pipeline {
 	if len(b.spec.Havings) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: b.buildHavingMatch()}})
 	}
+	return pipeline
+}
+
+// appendHavingSortAndPagination 为分组结果追加 HAVING、排序和偏移分页
+func (b *MongoBuilder[A]) appendHavingSortAndPagination(pipeline mongo.Pipeline) mongo.Pipeline {
+	pipeline = b.appendHaving(pipeline)
 	if len(b.spec.Groups) == 0 {
 		return pipeline
 	}
@@ -381,11 +455,11 @@ func (b *MongoBuilder[A]) appendHavingSortAndLimit(pipeline mongo.Pipeline) mong
 		}
 		sort = append(sort, bson.E{Key: order.Alias, Value: direction})
 	}
-	return append(
-		pipeline,
-		bson.D{{Key: "$sort", Value: sort}},
-		bson.D{{Key: "$limit", Value: int64(b.spec.Limit)}},
-	)
+	pipeline = append(pipeline, bson.D{{Key: "$sort", Value: sort}})
+	if b.spec.Start > 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$skip", Value: int64(b.spec.Start)}})
+	}
+	return append(pipeline, bson.D{{Key: "$limit", Value: int64(b.spec.Limit)}})
 }
 
 // buildHavingMatch 构建聚合后指标过滤文档

@@ -202,6 +202,12 @@ func (b *SpecBuilder) Having(expression string, value any) *SpecBuilder {
 	return b.AddHaving(havingFromExpression(expression, value))
 }
 
+// SetStart 设置分组结果分页起始偏移
+func (b *SpecBuilder) SetStart(start uint32) *SpecBuilder {
+	b.spec.Start = start
+	return b
+}
+
 // SetLimit 设置分组结果数量上限
 func (b *SpecBuilder) SetLimit(limit uint32) *SpecBuilder {
 	b.spec.Limit = limit
@@ -211,6 +217,7 @@ func (b *SpecBuilder) SetLimit(limit uint32) *SpecBuilder {
 // normalizeLimitAfterGroups 在分组变更后同步默认 limit 语义
 func (b *SpecBuilder) normalizeLimitAfterGroups() {
 	if len(b.spec.Groups) == 0 {
+		b.spec.Start = 0
 		b.spec.Limit = 0
 		return
 	}

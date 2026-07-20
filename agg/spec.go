@@ -25,6 +25,14 @@ var (
 	ErrLimitExceeded = errors.New("agg: limit exceeds maximum allowed value (5000)")
 	// ErrIndexNotConfigured 表示未配置 Elasticsearch 索引
 	ErrIndexNotConfigured = errors.New("agg: elasticsearch index not configured")
+	// ErrAggEmptyResponse 表示 Elasticsearch 聚合响应为空
+	ErrAggEmptyResponse = errors.New("decoding elasticsearch aggregate result: empty response")
+	// ErrAggRootAggMissing 表示 Elasticsearch 聚合结果缺失根聚合
+	ErrAggRootAggMissing = errors.New("decoding elasticsearch aggregate result: root aggregation missing")
+	// ErrAggGroupAggMissing 表示 Elasticsearch 聚合结果缺失分组聚合
+	ErrAggGroupAggMissing = errors.New("decoding elasticsearch aggregate result: group aggregation missing")
+	// ErrAggMetricMissing 表示 Elasticsearch 聚合结果缺失指标聚合
+	ErrAggMetricMissing = errors.New("decoding elasticsearch aggregate result: metric missing")
 
 	fieldPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 	aliasPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -214,6 +222,7 @@ type Spec struct {
 	Metrics []Metric `json:"metrics"`
 	Orders  []Order  `json:"orders,omitempty"`
 	Havings []Having `json:"havings,omitempty"`
+	Start   uint32   `json:"start,omitempty"`
 	Limit   uint32   `json:"limit"`
 }
 
@@ -232,14 +241,18 @@ func (s Spec) Clone() Spec {
 //
 //	A: 聚合结果行 DTO 类型
 type Result[A any] struct {
-	Rows []*A `json:"rows"`
+	Rows  []*A  `json:"rows"`
+	Total int64 `json:"total"`
 }
 
 // Meta 表示聚合查询元信息的只读快照
 type Meta struct {
 	DataSource core.DataSource `json:"data_source"`
 	Spec       Spec            `json:"spec"`
+	Start      uint32          `json:"start"`
 	Plan       Plan            `json:"plan"`
+	NeedTotal  bool            `json:"need_total"`
+	TotalLimit uint32          `json:"total_limit"`
 	StartTime  time.Time       `json:"start_time"`
 }
 
@@ -313,6 +326,7 @@ func AnalyzeSpec(dataSource core.DataSource, spec Spec) Plan {
 func normalizeSpec(spec Spec) Spec {
 	normalized := spec.Clone()
 	if len(normalized.Groups) == 0 {
+		normalized.Start = 0
 		normalized.Limit = 0
 	} else if normalized.Limit == 0 {
 		normalized.Limit = defaultLimit
@@ -321,52 +335,55 @@ func normalizeSpec(spec Spec) Spec {
 }
 
 // validateSpec 校验聚合函数、字段、别名和结果数量上限
+// 采用 errors.Join 汇总所有校验错误，一次性返回全部问题，避免调用方逐个试错
 func validateSpec(spec Spec) error {
+	var errs []error
+
 	if len(spec.Metrics) == 0 {
-		return fmt.Errorf("%w: at least one metric is required", ErrInvalidSpec)
+		errs = append(errs, fmt.Errorf("%w: at least one metric is required", ErrInvalidSpec))
 	}
 	if spec.Limit > maxLimit {
-		return ErrLimitExceeded
+		errs = append(errs, ErrLimitExceeded)
 	}
 
 	aliases := make(map[string]struct{}, len(spec.Groups)+len(spec.Metrics))
 	metricAliases := make(map[string]struct{}, len(spec.Metrics))
 	for i, group := range spec.Groups {
 		if err := validateField(group.Field); err != nil {
-			return fmt.Errorf("%w: group %d field: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: group %d field: %v", ErrInvalidSpec, i, err))
 		}
 		if err := registerAlias(aliases, group.Alias); err != nil {
-			return fmt.Errorf("%w: group %d alias: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: group %d alias: %v", ErrInvalidSpec, i, err))
 		}
 		if err := validateGroupTimeBucket(group); err != nil {
-			return fmt.Errorf("%w: group %d: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: group %d: %v", ErrInvalidSpec, i, err))
 		}
 	}
 
 	for i, metric := range spec.Metrics {
 		if err := validateFunc(metric.Func); err != nil {
-			return fmt.Errorf("%w: metric %d: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: metric %d: %v", ErrInvalidSpec, i, err))
 		}
 		if metric.Distinct && !supportsDistinct(metric.Func) {
-			return fmt.Errorf("%w: metric %d distinct is only supported by count and sum", ErrInvalidSpec, i)
+			errs = append(errs, fmt.Errorf("%w: metric %d distinct is only supported by count and sum", ErrInvalidSpec, i))
 		}
 		if metric.Func == Count {
 			if metric.Distinct {
 				if err := validateField(metric.Field); err != nil {
-					return fmt.Errorf("%w: metric %d field: %v", ErrInvalidSpec, i, err)
+					errs = append(errs, fmt.Errorf("%w: metric %d field: %v", ErrInvalidSpec, i, err))
 				}
 			} else if metric.Field != "" {
-				return fmt.Errorf("%w: metric %d count field must be empty", ErrInvalidSpec, i)
+				errs = append(errs, fmt.Errorf("%w: metric %d count field must be empty", ErrInvalidSpec, i))
 			}
 		} else if err := validateField(metric.Field); err != nil {
-			return fmt.Errorf("%w: metric %d field: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: metric %d field: %v", ErrInvalidSpec, i, err))
 		}
 		if err := registerAlias(aliases, metric.Alias); err != nil {
-			return fmt.Errorf("%w: metric %d alias: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: metric %d alias: %v", ErrInvalidSpec, i, err))
 		}
 		if metric.Condition != nil {
 			if err := validateCondition(*metric.Condition); err != nil {
-				return fmt.Errorf("%w: metric %d condition: %v", ErrInvalidSpec, i, err)
+				errs = append(errs, fmt.Errorf("%w: metric %d condition: %v", ErrInvalidSpec, i, err))
 			}
 		}
 		metricAliases[strings.ToLower(metric.Alias)] = struct{}{}
@@ -375,31 +392,32 @@ func validateSpec(spec Spec) error {
 	orderAliases := make(map[string]struct{}, len(spec.Orders))
 	for i, order := range spec.Orders {
 		if err := validateAliasReference(aliases, order.Alias); err != nil {
-			return fmt.Errorf("%w: order %d alias: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: order %d alias: %v", ErrInvalidSpec, i, err))
 		}
 		key := strings.ToLower(order.Alias)
 		if _, exists := orderAliases[key]; exists {
-			return fmt.Errorf("%w: order %d alias: duplicate alias %q", ErrInvalidSpec, i, order.Alias)
+			errs = append(errs, fmt.Errorf("%w: order %d alias: duplicate alias %q", ErrInvalidSpec, i, order.Alias))
+		} else {
+			orderAliases[key] = struct{}{}
 		}
-		orderAliases[key] = struct{}{}
 	}
 
 	if len(spec.Havings) > 0 && len(spec.Groups) == 0 {
-		return fmt.Errorf("%w: having requires at least one group", ErrInvalidSpec)
+		errs = append(errs, fmt.Errorf("%w: having requires at least one group", ErrInvalidSpec))
 	}
 	for i, having := range spec.Havings {
 		if err := validateAliasReference(metricAliases, having.Alias); err != nil {
-			return fmt.Errorf("%w: having %d alias: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: having %d alias: %v", ErrInvalidSpec, i, err))
 		}
 		if err := validateComparisonOperator(having.Op); err != nil {
-			return fmt.Errorf("%w: having %d: %v", ErrInvalidSpec, i, err)
+			errs = append(errs, fmt.Errorf("%w: having %d: %v", ErrInvalidSpec, i, err))
 		}
 		if !isNumericValue(having.Value) {
-			return fmt.Errorf("%w: having %d value must be numeric", ErrInvalidSpec, i)
+			errs = append(errs, fmt.Errorf("%w: having %d value must be numeric", ErrInvalidSpec, i))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // isDistinctCount 判断指标是否为去重计数

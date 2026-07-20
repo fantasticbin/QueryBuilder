@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -33,6 +34,7 @@ func NewGormBuilder[M any, A any](data *core.DBProxy) *GormBuilder[M, A] {
 	b := &GormBuilder[M, A]{}
 	b.data = data
 	b.dataSource = core.Gorm
+	b.needTotal = true
 	b.setSelf(b)
 	return b
 }
@@ -66,15 +68,40 @@ func (b *GormBuilder[M, A]) Query(ctx context.Context) (*Result[A], error) {
 			return nil, err
 		}
 
+		if len(b.spec.Groups) == 0 {
+			rows := make([]*A, 0)
+			query := b.buildQuery(db.WithContext(ctx))
+			if err := query.Scan(&rows).Error; err != nil {
+				return nil, fmt.Errorf("executing gorm aggregate query: %w", err)
+			}
+			if len(rows) == 0 {
+				rows = append(rows, new(A))
+			}
+			return &Result[A]{Rows: rows, Total: 1}, nil
+		}
+
 		rows := make([]*A, 0)
-		query := b.buildQuery(db.WithContext(ctx))
-		if err := query.Scan(&rows).Error; err != nil {
-			return nil, fmt.Errorf("executing gorm aggregate query: %w", err)
+		var total int64
+		if err := util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
+			query := b.buildQueryWithOptions(db.WithContext(ctx), true, true)
+			if err := query.Scan(&rows).Error; err != nil {
+				return fmt.Errorf("executing gorm aggregate query: %w", err)
+			}
+			return nil
+		}, func(ctx context.Context) error {
+			if !b.needTotal {
+				return nil
+			}
+			count, err := b.countTotal(ctx, db)
+			if err != nil {
+				return err
+			}
+			total = count
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		if len(b.spec.Groups) == 0 && len(rows) == 0 {
-			rows = append(rows, new(A))
-		}
-		return &Result[A]{Rows: rows}, nil
+		return &Result[A]{Rows: rows, Total: total}, nil
 	})
 }
 
@@ -110,6 +137,11 @@ func (b *GormBuilder[M, A]) Explain(ctx context.Context) (string, error) {
 
 // buildQuery 根据聚合规范构建 GORM 查询对象
 func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
+	return b.buildQueryWithOptions(db, true, true)
+}
+
+// buildQueryWithOptions 根据聚合规范构建 GORM 查询对象，可选择跳过排序和分页
+func (b *GormBuilder[M, A]) buildQueryWithOptions(db *gorm.DB, includeOrder, includePagination bool) *gorm.DB {
 	query := db.Model(new(M))
 	if b.filter != nil {
 		query = query.Scopes(b.filter)
@@ -146,13 +178,41 @@ func (b *GormBuilder[M, A]) buildQuery(db *gorm.DB) *gorm.DB {
 		expression, args := gormHavingExpression(db, b.spec, having)
 		query = query.Having(expression, args...)
 	}
-	for _, order := range effectiveOrders(b.spec) {
-		query = query.Order(clause.OrderByColumn{
-			Column: clause.Column{Name: order.Alias},
-			Desc:   order.Descending,
-		})
+	if includeOrder {
+		for _, order := range effectiveOrders(b.spec) {
+			query = query.Order(clause.OrderByColumn{
+				Column: clause.Column{Name: order.Alias},
+				Desc:   order.Descending,
+			})
+		}
 	}
-	return query.Limit(int(b.spec.Limit))
+	if includePagination {
+		if b.spec.Start > 0 {
+			query = query.Offset(int(b.spec.Start))
+		}
+		query = query.Limit(int(b.spec.Limit))
+	}
+	return query
+}
+
+// countTotal 统计聚合后、HAVING 后的分组行数
+func (b *GormBuilder[M, A]) countTotal(ctx context.Context, db *gorm.DB) (int64, error) {
+	if len(b.spec.Groups) == 0 {
+		return 1, nil
+	}
+
+	subQuery := b.buildQueryWithOptions(db.WithContext(ctx), false, false)
+	if b.totalLimit > 0 {
+		subQuery = subQuery.Limit(int(b.totalLimit))
+	}
+
+	var total int64
+	if err := db.WithContext(ctx).
+		Table("(?) AS querybuilder_aggregate_total", subQuery).
+		Count(&total).Error; err != nil {
+		return 0, fmt.Errorf("counting gorm aggregate groups: %w", err)
+	}
+	return total, nil
 }
 
 // gormMetricSelection 构建单个指标的 SELECT 表达式和绑定参数

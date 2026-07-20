@@ -29,6 +29,10 @@ func (b AggregateDefaultCacheKeyBuilder) Build(ctx context.Context, meta queryag
 		"prefix":     b.Prefix,
 		"datasource": meta.DataSource.String(),
 		"spec":       meta.Spec,
+		"pagination": map[string]any{
+			"need_total":  meta.NeedTotal,
+			"total_limit": meta.TotalLimit,
+		},
 	}
 	appendCacheKeyHints(payload, hints)
 
@@ -39,7 +43,8 @@ func (b AggregateDefaultCacheKeyBuilder) Build(ctx context.Context, meta queryag
 
 // aggregateCacheResult 是聚合缓存写入缓存后端的稳定序列化结构
 type aggregateCacheResult[A any] struct {
-	Rows []*A `json:"rows"`
+	Rows  []*A  `json:"rows"`
+	Total int64 `json:"total"`
 }
 
 // AggregateCacheMiddlewareWithKeyBuilder 使用指定缓存键构建器创建聚合缓存中间件
@@ -78,7 +83,7 @@ func AggregateCacheMiddleware[A any](
 				if cached.Rows == nil {
 					cached.Rows = make([]*A, 0)
 				}
-				return &queryagg.Result[A]{Rows: cached.Rows}, nil
+				return &queryagg.Result[A]{Rows: cached.Rows, Total: cached.Total}, nil
 			}
 		}
 
@@ -86,7 +91,7 @@ func AggregateCacheMiddleware[A any](
 		if err != nil || result == nil {
 			return result, err
 		}
-		encoded, marshalErr := json.Marshal(aggregateCacheResult[A]{Rows: result.Rows})
+		encoded, marshalErr := json.Marshal(aggregateCacheResult[A]{Rows: result.Rows, Total: result.Total})
 		if marshalErr == nil {
 			cache.Set(ctx, cacheKey, encoded, ttl)
 		}

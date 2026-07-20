@@ -2,10 +2,10 @@ package builder
 
 import (
 	"context"
-	"fmt"
 	"iter"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
+	"github.com/fantasticbin/QueryBuilder/v2/util"
 )
 
 // List 查询列表功能结构
@@ -199,7 +199,7 @@ func (l *List[R]) Query(
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
-			err = fmt.Errorf("query panic recovered: %v", r)
+			err = util.PanicToError("query panic recovered", r)
 		}
 	}()
 
@@ -221,7 +221,7 @@ func (l *List[R]) QueryCursor(
 	defer func() {
 		if r := recover(); r != nil {
 			seq = func(yield func(*R, error) bool) {
-				yield(nil, fmt.Errorf("query cursor panic recovered: %v", r))
+				yield(nil, util.PanicToError("query cursor panic recovered", r))
 			}
 		}
 	}()
@@ -244,7 +244,7 @@ func (l *List[R]) QueryPage(
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
-			err = fmt.Errorf("query page panic recovered: %v", r)
+			err = util.PanicToError("query page panic recovered", r)
 		}
 	}()
 
@@ -264,7 +264,7 @@ func (l *List[R]) QueryPageWithPIT(
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
-			err = fmt.Errorf("query page with pit panic recovered: %v", r)
+			err = util.PanicToError("query page with pit panic recovered", r)
 		}
 	}()
 
@@ -272,7 +272,7 @@ func (l *List[R]) QueryPageWithPIT(
 	querier := l.buildQuerier(options)
 	es, ok := querier.(*ElasticSearchBuilder[R])
 	if !ok {
-		return nil, fmt.Errorf("QueryPageWithPIT requires ElasticSearchBuilder")
+		return nil, ErrPITRequiresESBuilder
 	}
 
 	l.passQueryOption(es, options, true, true)
@@ -286,7 +286,7 @@ func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result stri
 	defer func() {
 		if r := recover(); r != nil {
 			result = ""
-			err = fmt.Errorf("explain panic recovered: %v", r)
+			err = util.PanicToError("explain panic recovered", r)
 		}
 	}()
 

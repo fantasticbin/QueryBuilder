@@ -188,3 +188,102 @@ func TestGormBuilderRejectsUnsupportedDateGroupTimeZoneDialect(t *testing.T) {
 		t.Fatalf("expected invalid spec error, got %v", err)
 	}
 }
+
+func TestGormBuilderBuildsOffsetPaginationAndTotalSource(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupBy("region", "region").
+		Count("total").
+		Sum("amount", "amount_sum").
+		Having("amount_sum >= ?", 100).
+		OrderByDesc("amount_sum").
+		SetStart(10).
+		SetLimit(5)
+
+	rowsStmt := builder.buildQueryWithOptions(db.Session(&gorm.Session{DryRun: true}), true, true).
+		Find(new([]gormSummary)).Statement
+	if rowsStmt.Error != nil {
+		t.Fatalf("building rows query: %v", rowsStmt.Error)
+	}
+	rowsSQL := strings.Join(strings.Fields(rowsStmt.SQL.String()), " ")
+	for _, fragment := range []string{
+		`HAVING SUM("amount") >= ?`,
+		`ORDER BY "amount_sum" DESC`,
+		`LIMIT ?`,
+		`OFFSET ?`,
+	} {
+		if !strings.Contains(rowsSQL, fragment) {
+			t.Fatalf("expected rows SQL %q to contain %q", rowsSQL, fragment)
+		}
+	}
+
+	totalSourceStmt := builder.buildQueryWithOptions(db.Session(&gorm.Session{DryRun: true}), false, false).
+		Find(new([]gormSummary)).Statement
+	if totalSourceStmt.Error != nil {
+		t.Fatalf("building total source query: %v", totalSourceStmt.Error)
+	}
+	totalSourceSQL := strings.Join(strings.Fields(totalSourceStmt.SQL.String()), " ")
+	if !strings.Contains(totalSourceSQL, `HAVING SUM("amount") >= ?`) {
+		t.Fatalf("expected total source SQL to keep HAVING: %q", totalSourceSQL)
+	}
+	for _, fragment := range []string{`ORDER BY`, `LIMIT`, `OFFSET`} {
+		if strings.Contains(totalSourceSQL, fragment) {
+			t.Fatalf("expected total source SQL %q not to contain %q", totalSourceSQL, fragment)
+		}
+	}
+}
+
+func TestGormBuilderCapsTotalWithTotalLimit(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+
+	// SetTotalLimit(n) must cap the count-total subquery with LIMIT.
+	capped := NewGormBuilder[gormOrder, gormSummary](data)
+	capped.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 1).
+		SetLimit(5).
+		SetTotalLimit(10)
+	cappedSub := capped.buildQueryWithOptions(db.Session(&gorm.Session{DryRun: true}), false, false)
+	if capped.totalLimit > 0 {
+		cappedSub = cappedSub.Limit(int(capped.totalLimit))
+	}
+	cappedStmt := cappedSub.Find(new([]gormSummary)).Statement
+	if cappedStmt.Error != nil {
+		t.Fatalf("building capped total subquery: %v", cappedStmt.Error)
+	}
+	cappedSQL := strings.Join(strings.Fields(cappedStmt.SQL.String()), " ")
+	if !strings.Contains(cappedSQL, "LIMIT ?") {
+		t.Fatalf("expected capped total subquery to contain LIMIT, got %q", cappedSQL)
+	}
+
+	// Without SetTotalLimit the count-total subquery must NOT carry LIMIT.
+	uncapped := NewGormBuilder[gormOrder, gormSummary](data)
+	uncapped.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 1).
+		SetLimit(5)
+	uncappedSub := uncapped.buildQueryWithOptions(db.Session(&gorm.Session{DryRun: true}), false, false)
+	if uncapped.totalLimit > 0 {
+		uncappedSub = uncappedSub.Limit(int(uncapped.totalLimit))
+	}
+	uncappedStmt := uncappedSub.Find(new([]gormSummary)).Statement
+	if uncappedStmt.Error != nil {
+		t.Fatalf("building uncapped total subquery: %v", uncappedStmt.Error)
+	}
+	uncappedSQL := strings.Join(strings.Fields(uncappedStmt.SQL.String()), " ")
+	if strings.Contains(uncappedSQL, "LIMIT ?") {
+		t.Fatalf("expected uncapped total subquery not to contain LIMIT, got %q", uncappedSQL)
+	}
+}

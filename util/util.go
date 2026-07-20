@@ -19,6 +19,16 @@ type TaskEvent struct {
 	Duration time.Duration
 }
 
+// PanicToError 将 recover 捕获的值转换为 error
+// 当 recovered 本身是 error 时，使用 %w 保留错误链，便于上层 errors.Is/errors.As 判定；
+// 否则退化为 %v 文本描述。prefix 用于标注 panic 发生的上下文。
+func PanicToError(prefix string, recovered any) error {
+	if err, ok := recovered.(error); ok {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return fmt.Errorf("%s: %v", prefix, recovered)
+}
+
 // WaitAndGo 等待所有函数执行完毕
 func WaitAndGo(fn ...func() error) error {
 	tasks := make([]ConcurrentTask, 0, len(fn))

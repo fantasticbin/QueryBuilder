@@ -2,7 +2,6 @@ package builder
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"strings"
 	"time"
@@ -141,7 +140,7 @@ func buildCursorIterator[R any](
 
 			// 更新游标值（由各构建器在 fetchBatch 中自行提取）
 			if nextCursorValues == nil {
-				yield(nil, fmt.Errorf("fetchBatch must return nextCursorValues when batch is not empty"))
+				yield(nil, ErrFetchBatchCursorMissing)
 				return
 			}
 			cursorValues = nextCursorValues

@@ -3,7 +3,6 @@ package builder
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -204,7 +203,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 		return nil, err
 	}
 	if e.index == "" {
-		return nil, errors.New("elasticsearch index not configured")
+		return nil, ErrESIndexNotConfigured
 	}
 	if len(e.builder.cursorValues) > 0 && e.pitID == "" {
 		return nil, ErrPITCursorWithoutPITID
@@ -273,7 +272,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {
 	// 检查 Elasticsearch 索引配置
 	if e.index == "" {
-		return nil, 0, errors.New("elasticsearch index not configured")
+		return nil, 0, ErrESIndexNotConfigured
 	}
 	client, err := e.builder.data.ElasticSearchClient()
 	if err != nil {
@@ -375,7 +374,7 @@ func (e *ElasticSearchBuilder[R]) countTotal(ctx context.Context, filter elastic
 // 若已配置游标字段，将输出游标查询模式的首批查询 DSL
 func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	if e.index == "" {
-		return "", errors.New("elasticsearch index not configured")
+		return "", ErrESIndexNotConfigured
 	}
 
 	// 如果配置了游标字段，展示游标查询模式的首批 DSL
@@ -569,7 +568,7 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 	pitID *string,
 ) (list []*R, nextCursorValues []any, total int64, hasMore bool, err error) {
 	if e.index == "" {
-		return nil, nil, 0, false, errors.New("elasticsearch index not configured")
+		return nil, nil, 0, false, ErrESIndexNotConfigured
 	}
 	client, err := e.builder.data.ElasticSearchClient()
 	if err != nil {
@@ -605,7 +604,7 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 
 	if usePIT {
 		if pitID == nil {
-			return nil, nil, 0, false, errors.New("pitID pointer is nil")
+			return nil, nil, 0, false, ErrPITIDNil
 		}
 		if *pitID == "" {
 			openResp, err := client.OpenPointInTime(e.index).

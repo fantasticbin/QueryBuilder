@@ -132,6 +132,16 @@ type LimitConfigurer[A any] interface {
 	SetLimit(limit uint32) Builder[A]
 }
 
+// PaginationConfigurer 定义聚合结果分页与总数配置能力
+// 泛型参数:
+//
+//	A: 聚合结果行 DTO 类型
+type PaginationConfigurer[A any] interface {
+	SetStart(start uint32) Builder[A]
+	SetNeedTotal(needTotal bool) Builder[A]
+	SetTotalLimit(totalLimit uint32) Builder[A]
+}
+
 // SpecChainConfigurer 组合现有链式 Spec DSL，兼容已有 Builder 调用方式
 // 泛型参数:
 //
@@ -143,6 +153,7 @@ type SpecChainConfigurer[A any] interface {
 	OrderConfigurer[A]
 	HavingConfigurer[A]
 	LimitConfigurer[A]
+	PaginationConfigurer[A]
 }
 
 // Builder 组合聚合构建器的配置、执行与元信息能力
@@ -165,6 +176,8 @@ type base[A any] struct {
 	dataSource  core.DataSource
 	spec        Spec
 	startTime   time.Time
+	needTotal   bool
+	totalLimit  uint32
 	middlewares []Middleware[A]
 	beforeHook  BeforeHook
 	afterHook   AfterHook[A]
@@ -440,6 +453,13 @@ func (b *base[A]) Having(expression string, value any) Builder[A] {
 	})
 }
 
+// SetStart 设置分组结果分页起始偏移
+func (b *base[A]) SetStart(start uint32) Builder[A] {
+	return b.ConfigureSpec(func(builder *SpecBuilder) {
+		builder.SetStart(start)
+	})
+}
+
 // SetLimit 设置分组结果数量上限
 func (b *base[A]) SetLimit(limit uint32) Builder[A] {
 	return b.ConfigureSpec(func(builder *SpecBuilder) {
@@ -447,12 +467,27 @@ func (b *base[A]) SetLimit(limit uint32) Builder[A] {
 	})
 }
 
+// SetNeedTotal 设置是否返回聚合后的总分组数
+func (b *base[A]) SetNeedTotal(needTotal bool) Builder[A] {
+	b.needTotal = needTotal
+	return b.self
+}
+
+// SetTotalLimit 设置总数统计上限，0 表示精确统计
+func (b *base[A]) SetTotalLimit(totalLimit uint32) Builder[A] {
+	b.totalLimit = totalLimit
+	return b.self
+}
+
 // Meta 返回当前聚合查询元信息的防御性副本
 func (b *base[A]) Meta() Meta {
 	return Meta{
 		DataSource: b.dataSource,
 		Spec:       b.spec.Clone(),
+		Start:      b.spec.Start,
 		Plan:       AnalyzeSpec(b.dataSource, b.spec),
+		NeedTotal:  b.needTotal,
+		TotalLimit: b.totalLimit,
 		StartTime:  b.startTime,
 	}
 }
@@ -498,6 +533,8 @@ func (b *base[A]) cloneBase(dst *base[A]) {
 	dst.dataSource = b.dataSource
 	dst.spec = b.spec.Clone()
 	dst.startTime = b.startTime
+	dst.needTotal = b.needTotal
+	dst.totalLimit = b.totalLimit
 	dst.beforeHook = b.beforeHook
 	dst.afterHook = b.afterHook
 	dst.middlewares = append([]Middleware[A]{}, b.middlewares...)

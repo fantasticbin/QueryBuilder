@@ -164,8 +164,8 @@ func TestElasticsearchIndexValidation(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when index is not configured, got nil")
 	}
-	if err != nil && err.Error() != "elasticsearch index not configured" {
-		t.Errorf("expected 'elasticsearch index not configured' error, got: %v", err)
+	if err != nil && !errors.Is(err, ErrESIndexNotConfigured) {
+		t.Errorf("expected ErrESIndexNotConfigured error, got: %v", err)
 	}
 }
 
@@ -225,8 +225,8 @@ func TestElasticSearchBuilderQueryPageWithPITValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when index is not configured, got nil")
 	}
-	if err.Error() != "elasticsearch index not configured" {
-		t.Fatalf("expected elasticsearch index not configured error, got %v", err)
+	if !errors.Is(err, ErrESIndexNotConfigured) {
+		t.Fatalf("expected ErrESIndexNotConfigured error, got %v", err)
 	}
 }
 

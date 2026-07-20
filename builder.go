@@ -33,6 +33,14 @@ var (
 	ErrCursorMismatch = errors.New("cursorValues length does not match cursorFields length")
 	// ErrPITCursorWithoutPITID ElasticSearch 单批次分页查询模式下未提供 PIT ID 的错误
 	ErrPITCursorWithoutPITID = errors.New("PIT ID is required when cursor values are provided")
+	// ErrESIndexNotConfigured ElasticSearch 索引未配置
+	ErrESIndexNotConfigured = errors.New("elasticsearch index not configured")
+	// ErrPITIDNil PIT ID 指针为空（内部编程错误）
+	ErrPITIDNil = errors.New("pitID pointer is nil")
+	// ErrPITRequiresESBuilder QueryPageWithPIT 仅支持 ElasticSearchBuilder
+	ErrPITRequiresESBuilder = errors.New("QueryPageWithPIT requires ElasticSearchBuilder")
+	// ErrFetchBatchCursorMissing 游标批次非空时未返回下一页游标值
+	ErrFetchBatchCursorMissing = errors.New("fetchBatch must return nextCursorValues when batch is not empty")
 )
 
 // NewGormAdapter 创建 GORM 数据源适配器

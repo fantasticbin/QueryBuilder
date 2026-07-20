@@ -282,8 +282,8 @@ func TestElasticSearchBuilderDecodeAdvancedSpecPostProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result.Rows) != 1 {
-		t.Fatalf("expected one row after post-processing, got %d", len(result.Rows))
+	if len(result.Rows) != 1 || result.Total != 2 {
+		t.Fatalf("expected one row with total 2 after post-processing, got %+v", result)
 	}
 	row := result.Rows[0]
 	if row.Region != "west" || row.Total != 2 || row.PaidAmount == nil || *row.PaidAmount != 200 {
@@ -337,5 +337,221 @@ func TestElasticSearchBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
 		if !strings.Contains(explanation, fragment) {
 			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
 		}
+	}
+}
+
+func TestElasticSearchBuilderDecodeResultOffsetPagination(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		SetStart(1).
+		SetLimit(1)
+
+	root := json.RawMessage(`{
+		"doc_count": 9,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3},
+				{"key": {"region": "west"}, "doc_count": 2},
+				{"key": {"region": "north"}, "doc_count": 4}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 || result.Total != 3 {
+		t.Fatalf("expected one paged row with total 3, got %+v", result)
+	}
+	if result.Rows[0].Region != "west" || result.Rows[0].Total != 2 {
+		t.Fatalf("unexpected paged row: %+v", result.Rows[0])
+	}
+}
+
+func TestElasticSearchBuilderDecodeHavingOnlyOffsetPagination(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		Having("total >= ?", 2).
+		SetStart(1).
+		SetLimit(1)
+
+	root := json.RawMessage(`{
+		"doc_count": 10,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 1},
+				{"key": {"region": "west"}, "doc_count": 3},
+				{"key": {"region": "north"}, "doc_count": 2},
+				{"key": {"region": "south"}, "doc_count": 4}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 || result.Total != 3 {
+		t.Fatalf("expected one paged row with total 3 after HAVING, got %+v", result)
+	}
+	if result.Rows[0].Region != "north" || result.Rows[0].Total != 2 {
+		t.Fatalf("unexpected HAVING paged row: %+v", result.Rows[0])
+	}
+}
+
+func TestElasticSearchBuilderDecodeFullPostProcessingOffsetPagination(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		Sum("amount", "paid_amount").
+		Having("paid_amount >= ?", 100).
+		OrderByDesc("paid_amount").
+		SetStart(1).
+		SetLimit(1)
+
+	root := json.RawMessage(`{
+		"doc_count": 12,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3, "paid_amount": {"value": 90}},
+				{"key": {"region": "west"}, "doc_count": 2, "paid_amount": {"value": 200}},
+				{"key": {"region": "north"}, "doc_count": 4, "paid_amount": {"value": 150}},
+				{"key": {"region": "south"}, "doc_count": 3, "paid_amount": {"value": 120}}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 || result.Total != 3 {
+		t.Fatalf("expected one paged row with total 3 after full post-processing, got %+v", result)
+	}
+	row := result.Rows[0]
+	if row.Region != "north" || row.PaidAmount == nil || *row.PaidAmount != 150 {
+		t.Fatalf("unexpected full post-processing paged row: %+v", row)
+	}
+}
+
+func TestElasticSearchBuilderDecodeResultSkipsTotalWhenNeedTotalFalse(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		SetNeedTotal(false).
+		SetLimit(100)
+
+	root := json.RawMessage(`{
+		"doc_count": 9,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3},
+				{"key": {"region": "west"}, "doc_count": 2},
+				{"key": {"region": "north"}, "doc_count": 4}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+	}
+	if result.Total != 0 {
+		t.Fatalf("expected Total 0 when needTotal=false, got %d", result.Total)
+	}
+}
+
+func TestElasticSearchBuilderDecodeResultCapsTotalWithTotalLimit(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		SetTotalLimit(2).
+		SetLimit(100)
+
+	root := json.RawMessage(`{
+		"doc_count": 9,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3},
+				{"key": {"region": "west"}, "doc_count": 2},
+				{"key": {"region": "north"}, "doc_count": 4}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+	}
+	if result.Total != 2 {
+		t.Fatalf("expected capped Total 2, got %d", result.Total)
+	}
+}
+
+// TestElasticSearchBuilderDecodeResultTotalLimitCapsNotBoundsPage 锁定评审中描述的
+// 有界总数语义（P2-3 #2）：Total 是一个上限值，当上限小于请求页大小时，返回页中的行数可能
+// 超过 Total。调用方应把 Total 视为“>=”而非精确值。
+func TestElasticSearchBuilderDecodeResultTotalLimitCapsNotBoundsPage(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		SetLimit(10).
+		SetTotalLimit(2)
+
+	root := json.RawMessage(`{
+		"doc_count": 50,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "a"}, "doc_count": 1},
+				{"key": {"region": "b"}, "doc_count": 1},
+				{"key": {"region": "c"}, "doc_count": 1},
+				{"key": {"region": "d"}, "doc_count": 1},
+				{"key": {"region": "e"}, "doc_count": 1}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 5 {
+		t.Fatalf("expected page of 5 rows (bounded by Limit, not Total), got %d", len(result.Rows))
+	}
+	if result.Total != 2 {
+		t.Fatalf("expected capped Total 2, got %d", result.Total)
 	}
 }

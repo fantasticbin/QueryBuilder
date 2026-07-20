@@ -31,6 +31,7 @@ func TestAggregateObservabilityMiddlewareRecordsSignals(t *testing.T) {
 		Groups:  []queryagg.Group{{Field: "region", Alias: "region"}},
 		Metrics: []queryagg.Metric{{Func: queryagg.Count, Alias: "total"}},
 	})
+	builder.SetStart(2).SetLimit(5).SetNeedTotal(true).SetTotalLimit(500)
 	var logged AggregateEvent
 	var measured AggregateEvent
 	span := &recordingAggregateSpan{}
@@ -51,7 +52,7 @@ func TestAggregateObservabilityMiddlewareRecordsSignals(t *testing.T) {
 		queryagg.Querier[aggregateObservationRow],
 		queryagg.Handler[aggregateObservationRow],
 	) (*queryagg.Result[aggregateObservationRow], error) {
-		return &queryagg.Result[aggregateObservationRow]{Rows: []*aggregateObservationRow{{Total: 4}}}, nil
+		return &queryagg.Result[aggregateObservationRow]{Rows: []*aggregateObservationRow{{Total: 4}}, Total: 12}, nil
 	})
 
 	if _, err := builder.Query(context.Background()); err != nil {
@@ -62,11 +63,32 @@ func TestAggregateObservabilityMiddlewareRecordsSignals(t *testing.T) {
 		"metrics": measured,
 		"tracer":  span.event,
 	} {
-		if !event.Success || event.RowCount != 1 || event.Duration <= 0 {
+		if !event.Success || event.RowCount != 1 || event.Total != 12 || event.Duration <= 0 {
 			t.Fatalf("unexpected %s event: %+v", name, event)
 		}
 		if event.Meta.QueryMode() != "aggregate" {
 			t.Fatalf("unexpected %s mode: %s", name, event.Meta.QueryMode())
+		}
+		attrs := aggregateTestAttributes(event.Attributes)
+		if attrs["querybuilder.aggregate.start"] != uint32(2) || attrs["querybuilder.aggregate.limit"] != uint32(5) {
+			t.Fatalf("unexpected %s pagination attributes: %+v", name, attrs)
+		}
+		if attrs["querybuilder.aggregate.need_total"] != true || attrs["querybuilder.aggregate.total_limit"] != uint32(500) {
+			t.Fatalf("unexpected %s total attributes: %+v", name, attrs)
+		}
+		if attrs["querybuilder.aggregate.total"] != int64(12) {
+			t.Fatalf("unexpected %s result total attribute: %+v", name, attrs)
+		}
+		for _, duplicate := range []string{
+			"querybuilder.need_total",
+			"querybuilder.total_limit",
+			"querybuilder.start",
+			"querybuilder.limit",
+			"querybuilder.total",
+		} {
+			if _, ok := attrs[duplicate]; ok {
+				t.Fatalf("unexpected %s duplicate unprefixed attribute %q: %+v", name, duplicate, attrs)
+			}
 		}
 	}
 }
@@ -166,4 +188,12 @@ func TestAggregateObservabilityMiddlewareRecordsPanics(t *testing.T) {
 
 	_, _ = builder.Query(context.Background())
 	t.Fatal("expected panic")
+}
+
+func aggregateTestAttributes(attrs []Attribute) map[string]any {
+	mapped := make(map[string]any, len(attrs))
+	for _, attr := range attrs {
+		mapped[attr.Key] = attr.Value
+	}
+	return mapped
 }

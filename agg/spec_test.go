@@ -624,3 +624,38 @@ func TestAnalyzeSpec(t *testing.T) {
 		t.Fatalf("unexpected elastic plan: %+v", elasticPlan)
 	}
 }
+
+func TestBuilderSpecChainPaginationMeta(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[specChainRow](nil)
+	builder.GroupBy("region", "region").
+		Count("total").
+		SetStart(20).
+		SetLimit(10).
+		SetNeedTotal(false).
+		SetTotalLimit(1000)
+
+	meta := builder.Meta()
+	if meta.Start != 20 || meta.Spec.Start != 20 || meta.Spec.Limit != 10 || meta.NeedTotal || meta.TotalLimit != 1000 {
+		t.Fatalf("unexpected pagination meta: %+v", meta)
+	}
+	meta.Spec.Start = 99
+	if got := builder.Meta(); got.Start != 20 || got.Spec.Start != 20 {
+		t.Fatalf("meta spec must be defensively copied: %+v", got)
+	}
+
+	clone := builder.Clone()
+	clone.SetStart(30).SetNeedTotal(true).SetTotalLimit(2000)
+	if got := builder.Meta(); got.Start != 20 || got.NeedTotal || got.TotalLimit != 1000 {
+		t.Fatalf("clone mutation changed original meta: %+v", got)
+	}
+	if got := clone.Meta(); got.Start != 30 || got.Spec.Start != 30 || !got.NeedTotal || got.TotalLimit != 2000 {
+		t.Fatalf("clone pagination meta not updated: %+v", got)
+	}
+
+	builder.SetGroups()
+	if got := builder.Meta(); got.Start != 0 || got.Spec.Start != 0 || got.Spec.Limit != 0 {
+		t.Fatalf("scalar aggregates should reset pagination: %+v", got)
+	}
+}

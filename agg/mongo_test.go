@@ -305,3 +305,166 @@ func TestMongoBuilderExplainWeekDateGroupStartsOnMonday(t *testing.T) {
 		}
 	}
 }
+
+func TestMongoBuilderExplainOffsetPaginationAndTotalPipeline(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 3).
+		SetStart(10).
+		SetLimit(5)
+	builder.SetFilter(bson.D{{Key: "status", Value: "paid"}})
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(explanation), &payload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+
+	pipeline := payload["pipeline"].([]any)
+	wantRows := []string{"$match", "$group", "$project", "$match", "$sort", "$skip", "$limit"}
+	if len(pipeline) != len(wantRows) {
+		t.Fatalf("expected %d row pipeline stages, got %d: %s", len(wantRows), len(pipeline), explanation)
+	}
+	for i, want := range wantRows {
+		if got := mongoTestStageKey(t, pipeline[i]); got != want {
+			t.Fatalf("stage %d: expected %s, got %s", i, want, got)
+		}
+	}
+	if got := mongoTestNumberString(pipeline[5].(map[string]any)["$skip"]); got != "10" {
+		t.Fatalf("expected $skip 10, got %v", pipeline[5])
+	}
+	if got := mongoTestNumberString(pipeline[6].(map[string]any)["$limit"]); got != "5" {
+		t.Fatalf("expected $limit 5, got %v", pipeline[6])
+	}
+
+	totalPipeline := payload["total_pipeline"].([]any)
+	wantTotal := []string{"$match", "$group", "$project", "$match", "$count"}
+	if len(totalPipeline) != len(wantTotal) {
+		t.Fatalf("expected %d total pipeline stages, got %d: %s", len(wantTotal), len(totalPipeline), explanation)
+	}
+	for i, want := range wantTotal {
+		if got := mongoTestStageKey(t, totalPipeline[i]); got != want {
+			t.Fatalf("total stage %d: expected %s, got %s", i, want, got)
+		}
+	}
+}
+
+func mongoTestStageKey(t *testing.T, stage any) string {
+	t.Helper()
+	mapped, ok := stage.(map[string]any)
+	if !ok || len(mapped) != 1 {
+		t.Fatalf("expected single-key stage, got %#v", stage)
+	}
+	for key := range mapped {
+		return key
+	}
+	return ""
+}
+
+func mongoTestNumberString(value any) string {
+	mapped, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"$numberLong", "$numberInt", "$numberDouble"} {
+		if number, ok := mapped[key].(string); ok {
+			return number
+		}
+	}
+	return ""
+}
+
+func TestMongoBuilderExplainExcludesTotalPipelineWhenNeedTotalFalse(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	builder := NewMongoBuilder[mongoSummary](data)
+	builder.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 3).
+		SetNeedTotal(false).
+		SetLimit(5)
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(explanation), &payload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+	if _, ok := payload["total_pipeline"]; ok {
+		t.Fatal("expected total_pipeline to be absent when needTotal=false")
+	}
+	if _, ok := payload["pipeline"]; !ok {
+		t.Fatal("expected pipeline to always be present")
+	}
+}
+
+func TestMongoBuilderExplainCapsTotalPipelineWithTotalLimit(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{}))
+	capped := NewMongoBuilder[mongoSummary](data)
+	capped.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 3).
+		SetLimit(5).
+		SetTotalLimit(10)
+
+	cappedExplanation, err := capped.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var cappedPayload map[string]any
+	if err := json.Unmarshal([]byte(cappedExplanation), &cappedPayload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+	cappedTotal, ok := cappedPayload["total_pipeline"].([]any)
+	if !ok {
+		t.Fatal("expected total_pipeline to be present when needTotal defaults true")
+	}
+	if !mongoTestPipelineHasStage(cappedTotal, "$limit") {
+		t.Fatalf("expected capped total_pipeline to contain $limit, got %s", cappedExplanation)
+	}
+
+	uncapped := NewMongoBuilder[mongoSummary](data)
+	uncapped.GroupBy("region", "region").
+		Count("total").
+		Having("total >= ?", 3).
+		SetLimit(5)
+
+	uncappedExplanation, err := uncapped.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var uncappedPayload map[string]any
+	if err := json.Unmarshal([]byte(uncappedExplanation), &uncappedPayload); err != nil {
+		t.Fatalf("decoding explanation: %v", err)
+	}
+	uncappedTotal, ok := uncappedPayload["total_pipeline"].([]any)
+	if !ok {
+		t.Fatal("expected total_pipeline to be present when needTotal defaults true")
+	}
+	if mongoTestPipelineHasStage(uncappedTotal, "$limit") {
+		t.Fatalf("expected uncapped total_pipeline not to contain $limit, got %s", uncappedExplanation)
+	}
+}
+
+func mongoTestPipelineHasStage(pipeline []any, stageKey string) bool {
+	for _, stage := range pipeline {
+		if mapped, ok := stage.(map[string]any); ok {
+			if _, has := mapped[stageKey]; has {
+				return true
+			}
+		}
+	}
+	return false
+}

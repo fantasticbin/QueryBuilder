@@ -3,7 +3,6 @@ package agg
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -40,6 +39,7 @@ func NewElasticSearchBuilder[A any](
 	b := &ElasticSearchBuilder[A]{index: index}
 	b.data = data
 	b.dataSource = core.ElasticSearch
+	b.needTotal = true
 	b.setSelf(b)
 	return b
 }
@@ -69,8 +69,8 @@ func (b *ElasticSearchBuilder[A]) Query(ctx context.Context) (*Result[A], error)
 		if err != nil {
 			return nil, err
 		}
-		if b.needsElasticClientPostProcessing() {
-			return b.queryGroupedWithClientPostProcessing(ctx, client)
+		if len(b.spec.Groups) > 0 && (b.spec.Start > 0 || b.needTotal || b.needsElasticClientPostProcessing()) {
+			return b.queryGroupedWithPagination(ctx, client)
 		}
 
 		root := b.buildAggregation()
@@ -101,6 +101,12 @@ func (b *ElasticSearchBuilder[A]) Explain(context.Context) (string, error) {
 		"aggregations": map[string]any{
 			elasticRootAggregation: rootSource,
 		},
+		"pagination": map[string]any{
+			"start":       b.spec.Start,
+			"limit":       b.spec.Limit,
+			"need_total":  b.needTotal,
+			"total_limit": b.totalLimit,
+		},
 		"plan": b.Meta().Plan,
 	}
 	if b.needsElasticClientPostProcessing() {
@@ -108,6 +114,7 @@ func (b *ElasticSearchBuilder[A]) Explain(context.Context) (string, error) {
 			"full_scan": b.needsElasticFullClientPostProcessing(),
 			"havings":   len(b.spec.Havings) > 0,
 			"orders":    len(b.spec.Orders) > 0,
+			"start":     b.spec.Start,
 			"limit":     b.spec.Limit,
 		}
 	}
@@ -392,61 +399,155 @@ func (b *ElasticSearchBuilder[A]) elasticOrdersNeedClientPostProcessing() bool {
 	return elasticOrdersNeedClientPostProcessingSpec(b.spec)
 }
 
-// queryGroupedWithClientPostProcessing 分页读取全部 composite bucket 后再执行 HAVING、排序和 limit
-func (b *ElasticSearchBuilder[A]) queryGroupedWithClientPostProcessing(ctx context.Context, client *elastic.Client) (*Result[A], error) {
-	rowValues := make([]map[string]any, 0)
-	fullPostProcessing := b.needsElasticFullClientPostProcessing()
-	var after map[string]any
-	for {
-		root := b.buildAggregationWithOptions(elasticAggregationOptions{
-			size:  elasticCompositePageSize,
-			after: after,
-		})
-		searchResult, err := client.Search().
-			Index(b.index).
-			Size(0).
-			Aggregation(elasticRootAggregation, root).
-			Do(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("executing elasticsearch aggregate query: %w", err)
-		}
-
-		buckets, err := b.decodeCompositeBuckets(searchResult)
-		if err != nil {
-			return nil, err
-		}
-		values, err := b.decodeCompositeRowValues(buckets.Buckets)
-		if err != nil {
-			return nil, err
-		}
-		if !fullPostProcessing {
-			values = b.filterElasticRowValues(values)
-		}
-		rowValues = append(rowValues, values...)
-		if !fullPostProcessing && b.spec.Limit > 0 && len(rowValues) >= int(b.spec.Limit) {
-			rowValues = rowValues[:int(b.spec.Limit)]
-			break
-		}
-		if len(buckets.Buckets) == 0 || len(buckets.AfterKey) == 0 {
-			break
-		}
-		after = buckets.AfterKey
+// queryGroupedWithPagination 分页读取 composite bucket，并按需要统计聚合后的分组行数
+func (b *ElasticSearchBuilder[A]) queryGroupedWithPagination(ctx context.Context, client *elastic.Client) (*Result[A], error) {
+	if b.needsElasticFullClientPostProcessing() {
+		return b.queryGroupedWithFullPostProcessing(ctx, client)
 	}
-
-	if fullPostProcessing {
-		rowValues = b.postProcessElasticRowValues(rowValues)
-	}
-	return decodeElasticRows[A](rowValues)
+	return b.queryGroupedInCompositeOrder(ctx, client)
 }
 
-// postProcessElasticRowValues 在完整分组结果上执行 HAVING、排序和 limit
+// queryGroupedWithFullPostProcessing 读取完整 bucket 集合后执行 HAVING、排序和分页
+func (b *ElasticSearchBuilder[A]) queryGroupedWithFullPostProcessing(ctx context.Context, client *elastic.Client) (*Result[A], error) {
+	rowValues := make([]map[string]any, 0)
+	var after map[string]any
+	for {
+		values, nextAfter, hasMore, err := b.fetchElasticCompositeRowValues(ctx, client, after)
+		if err != nil {
+			return nil, err
+		}
+		rowValues = append(rowValues, values...)
+		if !hasMore {
+			break
+		}
+		after = nextAfter
+	}
+
+	rowValues = b.postProcessElasticRowValues(rowValues)
+	total := b.elasticTotal(len(rowValues))
+	pageValues := b.paginateElasticRowValues(rowValues)
+	result, err := decodeElasticRows[A](pageValues)
+	if err != nil {
+		return nil, err
+	}
+	result.Total = total
+	return result, nil
+}
+
+// queryGroupedInCompositeOrder 按 composite 顺序跳过 offset 并收集当前页
+func (b *ElasticSearchBuilder[A]) queryGroupedInCompositeOrder(ctx context.Context, client *elastic.Client) (*Result[A], error) {
+	pageValues := make([]map[string]any, 0, int(b.spec.Limit))
+	var total int64
+	var seen uint64
+	start := uint64(b.spec.Start)
+	limit := int(b.spec.Limit)
+	var after map[string]any
+
+	for {
+		values, nextAfter, hasMore, err := b.fetchElasticCompositeRowValues(ctx, client, after)
+		if err != nil {
+			return nil, err
+		}
+		values = b.filterElasticRowValues(values)
+		for _, row := range values {
+			if b.shouldCountElasticTotal(total) {
+				total++
+			}
+			if seen >= start && len(pageValues) < limit {
+				pageValues = append(pageValues, row)
+			}
+			seen++
+		}
+		if len(pageValues) >= limit && b.elasticTotalSatisfied(total) {
+			break
+		}
+		if !hasMore {
+			break
+		}
+		after = nextAfter
+	}
+
+	result, err := decodeElasticRows[A](pageValues)
+	if err != nil {
+		return nil, err
+	}
+	if b.needTotal {
+		result.Total = total
+	}
+	return result, nil
+}
+
+// fetchElasticCompositeRowValues 读取一页 composite bucket 并解码为中间行值
+func (b *ElasticSearchBuilder[A]) fetchElasticCompositeRowValues(
+	ctx context.Context,
+	client *elastic.Client,
+	after map[string]any,
+) ([]map[string]any, map[string]any, bool, error) {
+	root := b.buildAggregationWithOptions(elasticAggregationOptions{
+		size:  elasticCompositePageSize,
+		after: after,
+	})
+	searchResult, err := client.Search().
+		Index(b.index).
+		Size(0).
+		Aggregation(elasticRootAggregation, root).
+		Do(ctx)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("executing elasticsearch aggregate query: %w", err)
+	}
+
+	buckets, err := b.decodeCompositeBuckets(searchResult)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	values, err := b.decodeCompositeRowValues(buckets.Buckets)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	hasMore := len(buckets.Buckets) > 0 && len(buckets.AfterKey) > 0
+	return values, buckets.AfterKey, hasMore, nil
+}
+
+// shouldCountElasticTotal 判断是否仍需增加 bounded total 计数
+func (b *ElasticSearchBuilder[A]) shouldCountElasticTotal(total int64) bool {
+	return b.needTotal && (b.totalLimit == 0 || total < int64(b.totalLimit))
+}
+
+// elasticTotalSatisfied 判断 total 统计是否已满足当前配置
+func (b *ElasticSearchBuilder[A]) elasticTotalSatisfied(total int64) bool {
+	return !b.needTotal || (b.totalLimit > 0 && total >= int64(b.totalLimit))
+}
+
+// elasticTotal 返回按 totalLimit 截断后的 total 值
+func (b *ElasticSearchBuilder[A]) elasticTotal(rowCount int) int64 {
+	if !b.needTotal {
+		return 0
+	}
+	total := int64(rowCount)
+	if b.totalLimit > 0 && total > int64(b.totalLimit) {
+		return int64(b.totalLimit)
+	}
+	return total
+}
+
+// postProcessElasticRowValues 在完整分组结果上执行 HAVING 和排序
 func (b *ElasticSearchBuilder[A]) postProcessElasticRowValues(rows []map[string]any) []map[string]any {
 	rows = b.filterElasticRowValues(rows)
 	b.sortElasticRowValues(rows)
-	if b.spec.Limit > 0 && len(rows) > int(b.spec.Limit) {
-		rows = rows[:int(b.spec.Limit)]
-	}
 	return rows
+}
+
+// paginateElasticRowValues 对已经完成过滤和排序的聚合结果应用偏移分页
+func (b *ElasticSearchBuilder[A]) paginateElasticRowValues(rows []map[string]any) []map[string]any {
+	start := int(b.spec.Start)
+	if start >= len(rows) {
+		return nil
+	}
+	end := start + int(b.spec.Limit)
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[start:end]
 }
 
 // filterElasticRowValues 执行聚合后的 HAVING 过滤
@@ -591,7 +692,14 @@ func elasticNumber(value any) (float64, bool) {
 	}
 }
 
-// decodeResult 将 Elasticsearch 聚合响应解码为类型安全的结果
+// decodeResult 将一次 Elasticsearch 聚合响应解码为类型安全的结果，并对该次响应返回的
+// buckets 做收尾式的分页与总数统计。
+//
+// 注意：真正的多页遍历与精确总数由上层 queryGroupedWithCompositeOrder /
+// queryGroupedWithFullPostProcessing 负责，它们不会调用本方法。在本方法被常规 Query
+// 路径直接调用的简单分支（Start==0 且 !needTotal 且无需客户端后处理）下，本方法尾部的
+// elasticTotal / paginateElasticRowValues 实为 no-op：单次请求的 buckets 已经按 size 收口，
+// 且 needTotal 为 false 时 Total 恒为 0。本方法主要是为直接构造 SearchResult 的单测服务。
 func (b *ElasticSearchBuilder[A]) decodeResult(searchResult *elastic.SearchResult) (*Result[A], error) {
 	root, err := elasticRootBucket(searchResult)
 	if err != nil {
@@ -603,7 +711,7 @@ func (b *ElasticSearchBuilder[A]) decodeResult(searchResult *elastic.SearchResul
 		if err != nil {
 			return nil, err
 		}
-		return &Result[A]{Rows: []*A{row}}, nil
+		return &Result[A]{Rows: []*A{row}, Total: 1}, nil
 	}
 
 	buckets, err := b.decodeCompositeBuckets(searchResult)
@@ -617,17 +725,25 @@ func (b *ElasticSearchBuilder[A]) decodeResult(searchResult *elastic.SearchResul
 	if b.needsElasticClientPostProcessing() {
 		rowValues = b.postProcessElasticRowValues(rowValues)
 	}
-	return decodeElasticRows[A](rowValues)
+
+	total := b.elasticTotal(len(rowValues))
+	rowValues = b.paginateElasticRowValues(rowValues)
+	result, err := decodeElasticRows[A](rowValues)
+	if err != nil {
+		return nil, err
+	}
+	result.Total = total
+	return result, nil
 }
 
 // elasticRootBucket 读取根 filter 聚合结果
 func elasticRootBucket(searchResult *elastic.SearchResult) (*elastic.AggregationSingleBucket, error) {
 	if searchResult == nil {
-		return nil, errors.New("decoding elasticsearch aggregate result: empty response")
+		return nil, ErrAggEmptyResponse
 	}
 	root, ok := searchResult.Aggregations.Filter(elasticRootAggregation)
 	if !ok || root == nil {
-		return nil, errors.New("decoding elasticsearch aggregate result: root aggregation missing")
+		return nil, ErrAggRootAggMissing
 	}
 	return root, nil
 }
@@ -640,7 +756,7 @@ func (b *ElasticSearchBuilder[A]) decodeCompositeBuckets(searchResult *elastic.S
 	}
 	buckets, ok := root.Aggregations.Composite(elasticBucketAggregation)
 	if !ok || buckets == nil {
-		return nil, errors.New("decoding elasticsearch aggregate result: group aggregation missing")
+		return nil, ErrAggGroupAggMissing
 	}
 	return buckets, nil
 }
@@ -707,7 +823,7 @@ func elasticMetricValue(aggregations elastic.Aggregations, metric Metric) (any, 
 func elasticConditionalMetricValue(aggregations elastic.Aggregations, metric Metric) (any, error) {
 	filter, ok := aggregations.Filter(metric.Alias)
 	if !ok || filter == nil {
-		return nil, fmt.Errorf("decoding elasticsearch aggregate result: metric %q missing", metric.Alias)
+		return nil, fmt.Errorf("%w (alias %q)", ErrAggMetricMissing, metric.Alias)
 	}
 	if metric.Func == Count && !isDistinctCount(metric) {
 		return filter.DocCount, nil
@@ -738,7 +854,7 @@ func elasticBaseMetricValue(aggregations elastic.Aggregations, metric Metric) (a
 		value, ok = aggregations.Max(metric.Alias)
 	}
 	if !ok || value == nil {
-		return nil, fmt.Errorf("decoding elasticsearch aggregate result: metric %q missing", metric.Alias)
+		return nil, fmt.Errorf("%w (alias %q)", ErrAggMetricMissing, metric.Alias)
 	}
 	if value.Value == nil {
 		if isDistinctCount(metric) {
@@ -756,7 +872,7 @@ func elasticBaseMetricValue(aggregations elastic.Aggregations, metric Metric) (a
 func elasticScriptedMetricValue(aggregations elastic.Aggregations, metric Metric) (any, error) {
 	value, ok := aggregations.ScriptedMetric(metric.Alias)
 	if !ok || value == nil {
-		return nil, fmt.Errorf("decoding elasticsearch aggregate result: metric %q missing", metric.Alias)
+		return nil, fmt.Errorf("%w (alias %q)", ErrAggMetricMissing, metric.Alias)
 	}
 	if value.Value == nil {
 		return float64(0), nil
