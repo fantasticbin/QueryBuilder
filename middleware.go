@@ -102,7 +102,7 @@ func newMiddlewareContext[R any](p middlewareProvider[R]) *middlewareContext[R] 
 
 // buildRunner 构建中间件链执行器
 // 将中间件按逆序包装，返回 middlewareRunner，调用时传入 queryFn 即可执行完整中间件链
-func buildRunner[R any](mc *middlewareContext[R]) middlewareRunner[R] {
+func (mc *middlewareContext[R]) buildRunner() middlewareRunner[R] {
 	return func(ctx context.Context, queryFn func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
 		next := queryFn
 		for i := len(mc.middlewares) - 1; i >= 0; i-- {
@@ -122,11 +122,9 @@ func buildRunner[R any](mc *middlewareContext[R]) middlewareRunner[R] {
 // 参数:
 //
 //	ctx: 请求上下文
-//	mc: 中间件执行上下文
 //	queryFn: 最终查询函数
-func executeWithMiddlewares[R any](
+func (mc *middlewareContext[R]) executeWithMiddlewares(
 	ctx context.Context,
-	mc *middlewareContext[R],
 	queryFn func(context.Context) (core.Result[R], error),
 ) (core.Result[R], error) {
 	// 设置查询开始时间
@@ -137,9 +135,44 @@ func executeWithMiddlewares[R any](
 		ctx = mc.beforeHook(ctx)
 	}
 
-	result, err := buildRunner[R](mc)(ctx, queryFn)
-	invokeAfterHook[R](ctx, mc, result, err)
+	result, err := mc.buildRunner()(ctx, queryFn)
+	mc.invokeAfterHook(ctx, result, err)
 	return result, err
+}
+
+// prepareCursorPipeline 抽离游标查询的公共准备逻辑
+// 包含：确定批次大小、解析初始游标值、设置查询开始时间、执行前置钩子、构建中间件链执行器
+// 参数:
+//
+//	ctx: 请求上下文
+//
+// 返回:
+//
+//	ctx: 经过前置钩子处理后的上下文
+//	batchSize: 每批次获取的数据条数
+//	initialCursorValues: 初始游标值
+//	runChain: 中间件链执行器，将查询函数包装进中间件链并执行
+func (mc *middlewareContext[R]) prepareCursorPipeline(
+	ctx context.Context,
+) (context.Context, int, []any, middlewareRunner[R]) {
+	// 确定批次大小
+	batchSize := int(mc.limit)
+	if batchSize == 0 {
+		batchSize = defaultLimit
+	}
+
+	// 解析初始游标值：优先使用 cursorValues（方案B），其次使用 start（方案A）
+	initialCursorValues := resolveInitialCursorValues(mc.cursorValues, mc.start)
+	// 设置查询开始时间
+	mc.onStartTime(time.Now())
+	// 执行前置钩子
+	if mc.beforeHook != nil {
+		ctx = mc.beforeHook(ctx)
+	}
+
+	// 构建中间件链执行器
+	runChain := mc.buildRunner()
+	return ctx, batchSize, initialCursorValues, runChain
 }
 
 // executeCursorWithMiddlewares 执行游标查询模式下的中间件链和钩子
@@ -147,19 +180,17 @@ func executeWithMiddlewares[R any](
 // 参数:
 //
 //	ctx: 请求上下文
-//	mc: 中间件执行上下文
 //	cursorQueryFn: 游标分批查询函数，接收 cursorValues 和 isFirstBatch 返回一批数据
 //
 // 返回:
 //
 //	iter.Seq2[*R, error]: 游标迭代器
-func executeCursorWithMiddlewares[R any](
+func (mc *middlewareContext[R]) executeCursorWithMiddlewares(
 	ctx context.Context,
-	mc *middlewareContext[R],
 	cursorQueryFn cursorFetchBatch[R],
 ) iter.Seq2[*R, error] {
 	// 游标字段默认值/合法性已在 prepareAndValidate 中统一处理
-	ctx, batchSize, initialCursorValues, runChain := prepareCursorPipeline[R](ctx, mc)
+	ctx, batchSize, initialCursorValues, runChain := mc.prepareCursorPipeline(ctx)
 
 	// 包装 fetchBatch，使每批次查询经过中间件链
 	wrappedFetch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
@@ -171,7 +202,7 @@ func executeCursorWithMiddlewares[R any](
 			batchTotal = total
 			return &core.ListResult[R]{
 				Items: batch,
-				Total: resolveResultTotal(mc, batch, total),
+				Total: mc.resolveResultTotal(batch, total),
 			}, err
 		}
 
@@ -220,9 +251,9 @@ func executeCursorWithMiddlewares[R any](
 		}
 
 		// 执行后置钩子
-		invokeAfterHook[R](ctx, mc, &core.ListResult[R]{
+		mc.invokeAfterHook(ctx, &core.ListResult[R]{
 			Items: allResults,
-			Total: resolveResultTotal(mc, allResults, cursorTotal),
+			Total: mc.resolveResultTotal(allResults, cursorTotal),
 		}, lastErr)
 	}
 }
@@ -232,26 +263,24 @@ func executeCursorWithMiddlewares[R any](
 // 参数:
 //
 //	ctx: 请求上下文
-//	mc: 中间件执行上下文
 //	pageFetchFn: 游标分批查询函数，接收 cursorValues 和 isFirstBatch 返回一批数据
 //
 // 返回:
 //
 //	*CursorPageResult[R]: 游标分页结果
 //	error: 错误信息
-func executePageWithMiddlewares[R any](
+func (mc *middlewareContext[R]) executePageWithMiddlewares(
 	ctx context.Context,
-	mc *middlewareContext[R],
 	pageFetchFn cursorFetchBatch[R],
 ) (*core.CursorPageResult[R], error) {
-	ctx, batchSize, initialCursorValues, runChain := prepareCursorPipeline[R](ctx, mc)
+	ctx, batchSize, initialCursorValues, runChain := mc.prepareCursorPipeline(ctx)
 
 	// 单批次查询：先组装完整 CursorPageResult，再交给中间件链
 	queryFn := func(ctx context.Context) (core.Result[R], error) {
 		batch, nextCV, total, more, err := pageFetchFn(ctx, initialCursorValues, true)
 		result := &core.CursorPageResult[R]{
 			Items:            batch,
-			Total:            resolveResultTotal(mc, batch, total),
+			Total:            mc.resolveResultTotal(batch, total),
 			HasMore:          more,
 			NextCursorValues: nextCV,
 		}
@@ -262,7 +291,7 @@ func executePageWithMiddlewares[R any](
 	pageResult := cursorPageResultFromResult(result)
 	normalizeCursorPageResult(pageResult, batchSize)
 	// 执行后置钩子
-	invokeAfterHook[R](ctx, mc, pageResult, err)
+	mc.invokeAfterHook(ctx, pageResult, err)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +300,7 @@ func executePageWithMiddlewares[R any](
 }
 
 // invokeAfterHook 执行后置钩子的统一逻辑
-func invokeAfterHook[R any](ctx context.Context, mc *middlewareContext[R], result core.Result[R], err error) {
+func (mc *middlewareContext[R]) invokeAfterHook(ctx context.Context, result core.Result[R], err error) {
 	if mc.afterHook == nil {
 		return
 	}
@@ -280,7 +309,7 @@ func invokeAfterHook[R any](ctx context.Context, mc *middlewareContext[R], resul
 }
 
 // resolveResultTotal 根据中间件上下文的 needTotal 和实际查询结果决定最终的 Total 值
-func resolveResultTotal[R any](mc *middlewareContext[R], list []*R, queryTotal int64) int64 {
+func (mc *middlewareContext[R]) resolveResultTotal(list []*R, queryTotal int64) int64 {
 	if mc.needTotal && queryTotal > 0 {
 		return queryTotal
 	}

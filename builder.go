@@ -289,9 +289,8 @@ func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], err
 		return nil, err
 	}
 
-	result, err := executeWithMiddlewares(
+	result, err := newMiddlewareContext[R](b).executeWithMiddlewares(
 		ctx,
-		newMiddlewareContext[R](b),
 		func(ctx context.Context) (core.Result[R], error) {
 			list, total, err := b.selfRef.doQuery(ctx)
 			return &core.ListResult[R]{Items: list, Total: total}, err
@@ -313,9 +312,8 @@ func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 		}
 	}
 
-	innerIter := executeCursorWithMiddlewares(
+	innerIter := newMiddlewareContext[R](b).executeCursorWithMiddlewares(
 		ctx,
-		newMiddlewareContext[R](b),
 		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
 			return b.selfRef.doCursorQuery(ctx, cursorValues, isFirstBatch, false)
 		},
@@ -342,9 +340,8 @@ func (b *builder[B, R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R
 		return nil, err
 	}
 
-	result, err := executePageWithMiddlewares(
+	result, err := newMiddlewareContext[R](b).executePageWithMiddlewares(
 		ctx,
-		newMiddlewareContext[R](b),
 		func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
 			return b.selfRef.doCursorQuery(ctx, cursorValues, isFirstBatch, true)
 		},

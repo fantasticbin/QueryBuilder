@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/fantasticbin/QueryBuilder/v2/util"
@@ -423,6 +424,8 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 		})
 	}
 
+	// 上述 case 未显式列出的算术比较操作符（Eq/Ne/Gt/Gte/Lt/Lte）会落空到此，
+	// 统一通过 mongoConditionExpression + mongoOperator 转换为 $expr 比较表达式。
 	expression := bson.D{{Key: "$expr", Value: mongoConditionExpression(condition)}}
 	if condition.Op != Ne {
 		return expression
@@ -497,12 +500,7 @@ func (b *MongoBuilder[A]) buildHavingClause(having Having) bson.D {
 
 // hasFacetMetric 判断当前规范是否包含需要独立分支计算的指标
 func (b *MongoBuilder[A]) hasFacetMetric() bool {
-	for _, metric := range b.spec.Metrics {
-		if requiresMetricFacet(metric) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(b.spec.Metrics, requiresMetricFacet)
 }
 
 // buildMatch 合并业务过滤条件与分组字段非空条件

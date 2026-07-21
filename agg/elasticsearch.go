@@ -242,7 +242,7 @@ func elasticSumDistinctMetric(metric Metric) elastic.Aggregation {
 		MapScript(elastic.NewScript("if (doc.containsKey(params.field) && !doc[params.field].empty) { def value = doc[params.field].value; state.values[value] = true; }")).
 		CombineScript(elastic.NewScript("return state.values")).
 		ReduceScript(elastic.NewScript("double sum = 0; def values = [:]; for (state in states) { if (state == null) { continue; } for (entry in state.entrySet()) { def value = entry.getKey(); if (value != null && !values.containsKey(value)) { values[value] = true; sum += value; } } } return sum")).
-		Params(map[string]interface{}{"field": metric.Field})
+		Params(map[string]any{"field": metric.Field})
 }
 
 // elasticConditionQuery 将通用字段条件转换为 Elasticsearch 查询
@@ -299,11 +299,11 @@ func (b *ElasticSearchBuilder[A]) elasticGroupOrder(group Group) string {
 
 // elasticBucketSortAggregation 构建用于显式结果排序的 bucket_sort 聚合
 func (b *ElasticSearchBuilder[A]) elasticBucketSortAggregation() elastic.Aggregation {
-	sort := elastic.NewBucketSortAggregation().Size(int(b.spec.Limit))
+	bucketSort := elastic.NewBucketSortAggregation().Size(int(b.spec.Limit))
 	for _, order := range b.spec.Orders {
-		sort = sort.Sort(b.elasticBucketSortField(order.Alias), !order.Descending)
+		bucketSort = bucketSort.Sort(b.elasticBucketSortField(order.Alias), !order.Descending)
 	}
-	return sort
+	return bucketSort
 }
 
 // elasticBucketSortField 返回 bucket_sort 引用的分组键或指标路径
@@ -543,10 +543,7 @@ func (b *ElasticSearchBuilder[A]) paginateElasticRowValues(rows []map[string]any
 	if start >= len(rows) {
 		return nil
 	}
-	end := start + int(b.spec.Limit)
-	if end > len(rows) {
-		end = len(rows)
-	}
+	end := min(start+int(b.spec.Limit), len(rows))
 	return rows[start:end]
 }
 

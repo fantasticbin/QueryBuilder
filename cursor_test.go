@@ -1332,7 +1332,7 @@ func TestExecutePageWithMiddlewaresUsesCursorPageResult(t *testing.T) {
 		},
 	}
 
-	result, err := executePageWithMiddlewares(ctx, mc, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+	result, err := mc.executePageWithMiddlewares(ctx, func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
 		return []*CursorTestEntity{
 			{ID: 1, Name: "Alice"},
 			{ID: 2, Name: "Bob"},

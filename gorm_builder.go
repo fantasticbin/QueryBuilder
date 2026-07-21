@@ -420,9 +420,10 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件
 				var orParts []string
 				args := make([]any, 0, len(cursorFields)*(len(cursorFields)+1)/2)
-				for i := 0; i < len(cursorFields); i++ {
+				for i := range cursorFields {
 					andParts := make([]string, 0, i+1)
-					for j := 0; j < i; j++ {
+					// 1.22+ 整型 range 写法
+					for j := range i {
 						andParts = append(andParts, fmt.Sprintf("%s = ?", cursorFields[j].column))
 						args = append(args, cursorValues[j])
 					}

@@ -221,7 +221,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 	isFirstBatch := len(e.builder.cursorValues) == 0
 
 	var resultPitID string
-	chainResult, err := executeWithMiddlewares(ctx, newMiddlewareContext[R](&e.builder), func(ctx context.Context) (core.Result[R], error) {
+	chainResult, err := newMiddlewareContext[R](&e.builder).executeWithMiddlewares(ctx, func(ctx context.Context) (core.Result[R], error) {
 		batchList, batchNextCursorValues, batchTotal, batchHasMore, queryErr := e.doElasticCursorQuery(
 			ctx,
 			e.builder.cursorValues,

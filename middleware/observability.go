@@ -267,7 +267,7 @@ func DefaultErrorClassifier(err error) string {
 	if t == nil {
 		return "error"
 	}
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Name() == "" {
