@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -19,14 +20,37 @@ type TaskEvent struct {
 	Duration time.Duration
 }
 
+// panicError 包装一个已存在的 error，保留原始错误链
+type panicError struct {
+	prefix string
+	err    error
+}
+
+func (e *panicError) Error() string { return e.prefix + ": " + e.err.Error() }
+
+// Unwrap 返回被包装的原始错误，保留错误链供 errors.Is/errors.As 判定
+func (e *panicError) Unwrap() error { return e.err }
+
+// panicValueError 包装一个非 error 类型的 panic 值（如字符串、整型等）
+type panicValueError struct {
+	prefix string
+	value  any
+}
+
+func (e *panicValueError) Error() string {
+	return fmt.Sprintf("%s: %v", e.prefix, e.value)
+}
+
 // PanicToError 将 recover 捕获的值转换为 error
-// 当 recovered 本身是 error 时，使用 %w 保留错误链，便于上层 errors.Is/errors.As 判定；
-// 否则退化为 %v 文本描述。prefix 用于标注 panic 发生的上下文。
+// 当 recovered 本身是 error 时，保留错误链，便于上层 errors.Is/errors.As 判定；
+// 否则退化为文本描述。prefix 用于标注 panic 发生的上下文。
+// 直接构造错误类型（而非 fmt.Errorf）可避免对 prefix/recovered 做反射装箱（[]any），
+// 并降低函数复杂度以便编译器内联，减少 panic 恢复路径的分配与延迟。
 func PanicToError(prefix string, recovered any) error {
 	if err, ok := recovered.(error); ok {
-		return fmt.Errorf("%s: %w", prefix, err)
+		return &panicError{prefix: prefix, err: err}
 	}
-	return fmt.Errorf("%s: %v", prefix, recovered)
+	return &panicValueError{prefix: prefix, value: recovered}
 }
 
 // WaitAndGo 等待所有函数执行完毕
@@ -87,4 +111,22 @@ func GoWithNotify(ctx context.Context, fn ...ConcurrentTask) (<-chan TaskEvent, 
 	}()
 
 	return events, done
+}
+
+// BuildString 使用 strings.Builder 将多个字符串片段拼接为单个字符串，并按片段总长度预分配缓冲区，
+// 避免逐个 + 拼接产生的多次中间字符串分配（尤其在片段本身来自其他拼接结果时收益明显）。
+// 等价于 strings.Join(parts, "")，但将“缓冲区预分配 + 拼接”逻辑集中在一处，便于复用与维护。
+//
+// 适用于游标查询等热路径中固定片段的 SQL 子句拼接（如 "col ASC"、"col > ?"）。
+func BuildString(parts ...string) string {
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	var sb strings.Builder
+	sb.Grow(total)
+	for _, p := range parts {
+		sb.WriteString(p)
+	}
+	return sb.String()
 }

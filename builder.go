@@ -158,8 +158,8 @@ type Querier[R any] interface {
 type queryConfig struct {
 	start          uint32   // 分页起始位置
 	limit          uint32   // 每页数据条数
-	needTotal      bool     // 是否需要查询总数
 	totalLimit     uint32   // 总数统计上限，0 表示精确统计
+	needTotal      bool     // 是否需要查询总数
 	needPagination bool     // 是否需要分页
 	fields         []string // 查询字段投影
 }

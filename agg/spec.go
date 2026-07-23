@@ -209,11 +209,11 @@ type Having struct {
 
 // Metric 定义聚合计算、去重选项及其输出别名
 type Metric struct {
-	Func      Func       `json:"func"`
 	Field     string     `json:"field,omitempty"`
 	Alias     string     `json:"alias"`
-	Distinct  bool       `json:"distinct,omitempty"`
 	Condition *Condition `json:"condition,omitempty"`
+	Func      Func       `json:"func"`
+	Distinct  bool       `json:"distinct,omitempty"`
 }
 
 // Spec 定义跨数据源通用的聚合查询规范
@@ -247,13 +247,13 @@ type Result[A any] struct {
 
 // Meta 表示聚合查询元信息的只读快照
 type Meta struct {
-	DataSource core.DataSource `json:"data_source"`
 	Spec       Spec            `json:"spec"`
-	Start      uint32          `json:"start"`
-	Plan       Plan            `json:"plan"`
-	NeedTotal  bool            `json:"need_total"`
-	TotalLimit uint32          `json:"total_limit"`
 	StartTime  time.Time       `json:"start_time"`
+	Plan       Plan            `json:"plan"`
+	Start      uint32          `json:"start"`
+	TotalLimit uint32          `json:"total_limit"`
+	DataSource core.DataSource `json:"data_source"`
+	NeedTotal  bool            `json:"need_total"`
 }
 
 // QueryMode 返回供中间件使用的稳定查询模式名称

@@ -49,17 +49,17 @@ type QueryListOptions interface {
 // 包含查询列表所需的所有基本选项
 type BaseQueryListOptions struct {
 	data           *core.DBProxy // 数据实例
+	pitKeepAlive   time.Duration // Elasticsearch Point-in-Time 保持时间
 	start          uint32        // 分页起始位置
 	limit          uint32        // 每页数据条数
-	needTotal      bool          // 是否需要查询总数
 	totalLimit     uint32        // 总数统计上限，0 表示精确统计
+	needTotal      bool          // 是否需要查询总数
 	needPagination bool          // 是否需要分页
 	fields         []string      // 查询字段投影
 	cursorFields   []string      // 游标分页排序字段
 	cursorValues   []any         // 游标初始值（用于断点续查/App分页场景）
 	esIndex        string        // Elasticsearch 索引名
 	pitID          string        // Elasticsearch PIT ID（跨请求分页）
-	pitKeepAlive   time.Duration // Elasticsearch Point-in-Time 保持时间
 }
 
 // GetData 返回本次查询显式传入的数据源注册表

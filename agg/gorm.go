@@ -153,7 +153,8 @@ func (b *GormBuilder[M, A]) buildQueryWithOptions(db *gorm.DB, includeOrder, inc
 		field := quoteGormIdentifier(db, group.Field)
 		selection := gormGroupExpression(db, group)
 		alias := quoteGormIdentifier(db, group.Alias)
-		selects = append(selects, selection+" AS "+alias)
+		// 使用 util.BuildString 替代 + 拼接，避免中间字符串临时分配
+		selects = append(selects, util.BuildString(selection, " AS ", alias))
 		query = query.Where(field + " IS NOT NULL")
 	}
 	for _, metric := range b.spec.Metrics {

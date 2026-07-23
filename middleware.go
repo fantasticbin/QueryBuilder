@@ -103,6 +103,12 @@ func newMiddlewareContext[R any](p middlewareProvider[R]) *middlewareContext[R] 
 // buildRunner 构建中间件链执行器
 // 将中间件按逆序包装，返回 middlewareRunner，调用时传入 queryFn 即可执行完整中间件链
 func (mc *middlewareContext[R]) buildRunner() middlewareRunner[R] {
+	// 无中间件为常见路径：直接透传 queryFn，跳过闭包链构建（避免无谓的闭包分配与对 mc 的捕获逃逸）
+	if len(mc.middlewares) == 0 {
+		return func(ctx context.Context, queryFn func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
+			return queryFn(ctx)
+		}
+	}
 	return func(ctx context.Context, queryFn func(context.Context) (core.Result[R], error)) (core.Result[R], error) {
 		next := queryFn
 		for i := len(mc.middlewares) - 1; i >= 0; i-- {

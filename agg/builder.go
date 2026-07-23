@@ -173,15 +173,15 @@ type Builder[A any] interface {
 //	A: 聚合结果行 DTO 类型
 type base[A any] struct {
 	data        *core.DBProxy
-	dataSource  core.DataSource
 	spec        Spec
 	startTime   time.Time
-	needTotal   bool
-	totalLimit  uint32
 	middlewares []Middleware[A]
 	beforeHook  BeforeHook
 	afterHook   AfterHook[A]
 	self        Builder[A]
+	totalLimit  uint32
+	dataSource  core.DataSource
+	needTotal   bool
 }
 
 // setSelf 保存具体构建器的接口引用，供中间件链回传当前构建器

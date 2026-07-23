@@ -23,6 +23,9 @@ type GormBuilder[R any] struct {
 	builder[*GormBuilder[R], R]
 	filter GormScope // GORM 专属过滤条件
 	sort   GormScope // GORM 专属排序条件
+
+	cursorFieldCache []gormCursorField // 游标字段解析结果缓存（nil = 未缓存）
+	cacheErr         error             // 解析失败时的错误缓存，避免重复解析
 }
 
 // gormCursorField 保存游标字段在 GORM schema 中解析后的列名和反射字段
@@ -129,6 +132,9 @@ func (g *GormBuilder[R]) SetAfterQueryHook(hook AfterQueryHook[R]) Querier[R] {
 // SetCursorField 设置游标分页排序字段（实现 Querier 接口）
 func (g *GormBuilder[R]) SetCursorField(fields ...string) Querier[R] {
 	g.builder.SetCursorField(fields...)
+	// 游标字段配置变更，使解析缓存失效（下一批次重新解析）
+	g.cursorFieldCache = nil
+	g.cacheErr = nil
 	return g
 }
 
@@ -148,9 +154,16 @@ func (g *GormBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error
 
 // resolveCursorFields 将 cursor 字段映射为模型 schema 中的安全列名
 func (g *GormBuilder[R]) resolveCursorFields(db *gorm.DB) ([]gormCursorField, error) {
+	// 命中缓存（首次解析成功或已记录的错误）直接返回，后续批次 O(1)
+	if g.cursorFieldCache != nil || g.cacheErr != nil {
+		return g.cursorFieldCache, g.cacheErr
+	}
+
+	// 首次解析：执行一次 schema 反射解析、new(R) 堆分配与 LookUpField 线性搜索
 	stmt := &gorm.Statement{DB: db}
 	if err := stmt.Parse(new(R)); err != nil {
-		return nil, fmt.Errorf("schema parse failed: %w", err)
+		g.cacheErr = fmt.Errorf("schema parse failed: %w", err)
+		return nil, g.cacheErr
 	}
 
 	parsedFields := g.builder.getParsedCursorFields()
@@ -158,7 +171,8 @@ func (g *GormBuilder[R]) resolveCursorFields(db *gorm.DB) ([]gormCursorField, er
 	for _, cursorField := range parsedFields {
 		field := stmt.Schema.LookUpField(cursorField.Field)
 		if field == nil || field.DBName == "" {
-			return nil, fmt.Errorf("cursor field %q not found in schema", cursorField.Field)
+			g.cacheErr = fmt.Errorf("cursor field %q not found in schema", cursorField.Field)
+			return nil, g.cacheErr
 		}
 		fields = append(fields, gormCursorField{
 			cursorSortField: cursorField,
@@ -167,7 +181,8 @@ func (g *GormBuilder[R]) resolveCursorFields(db *gorm.DB) ([]gormCursorField, er
 		})
 	}
 
-	return fields, nil
+	g.cursorFieldCache = fields
+	return g.cursorFieldCache, nil
 }
 
 // gormCursorFieldColumns 提取 GORM 游标字段对应的数据库列名
@@ -285,7 +300,7 @@ func (g *GormBuilder[R]) Explain(ctx context.Context) (string, error) {
 	// 构建带参数的完整 SQL
 	sql := stmt.SQL.String()
 	if len(stmt.Vars) > 0 {
-		var args []string
+		args := make([]string, 0, len(stmt.Vars))
 		for _, v := range stmt.Vars {
 			args = append(args, fmt.Sprintf("%v", v))
 		}
@@ -322,7 +337,7 @@ func (g *GormBuilder[R]) buildCursorQuery(db *gorm.DB, cursorFields []gormCursor
 		if !cursorField.Asc {
 			order = "DESC"
 		}
-		query = query.Order(fmt.Sprintf("%s %s", cursorField.column, order))
+		query = query.Order(util.BuildString(cursorField.column, " ", order))
 	}
 
 	// 用户 sort 作为辅助排序
@@ -402,7 +417,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 			if !cursorFields[0].Asc {
 				op = "<"
 			}
-			query = query.Where(fmt.Sprintf("%s %s ?", cursorFields[0].column, op), cursorValues[0])
+			query = query.Where(util.BuildString(cursorFields[0].column, " ", op, " ?"), cursorValues[0])
 		} else {
 			if asc, uniform := isUniformCursorDirection(gormCursorSortFields(cursorFields)); uniform {
 				// 性能优化：方向一致时使用行值比较，通常比 OR 组合条件更利于索引与执行计划
@@ -415,7 +430,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 					fieldList = append(fieldList, cf.column)
 				}
 				placeholders := strings.TrimRight(strings.Repeat("?,", len(cursorValues)), ",")
-				query = query.Where(fmt.Sprintf("(%s) %s (%s)", strings.Join(fieldList, ", "), op, placeholders), cursorValues...)
+				query = query.Where(util.BuildString("(", strings.Join(fieldList, ", "), ") ", op, " (", placeholders, ")"), cursorValues...)
 			} else {
 				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件
 				var orParts []string
@@ -424,14 +439,14 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 					andParts := make([]string, 0, i+1)
 					// 1.22+ 整型 range 写法
 					for j := range i {
-						andParts = append(andParts, fmt.Sprintf("%s = ?", cursorFields[j].column))
+						andParts = append(andParts, util.BuildString(cursorFields[j].column, " = ?"))
 						args = append(args, cursorValues[j])
 					}
 					op := ">"
 					if !cursorFields[i].Asc {
 						op = "<"
 					}
-					andParts = append(andParts, fmt.Sprintf("%s %s ?", cursorFields[i].column, op))
+					andParts = append(andParts, util.BuildString(cursorFields[i].column, " ", op, " ?"))
 					args = append(args, cursorValues[i])
 					orParts = append(orParts, "("+strings.Join(andParts, " AND ")+")")
 				}

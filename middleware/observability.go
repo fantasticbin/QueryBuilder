@@ -57,6 +57,12 @@ type QueryEvent struct {
 	Meta core.QueryMeta
 	// StartTime 是中间件记录的查询开始时间
 	StartTime time.Time
+	// Attributes 是默认属性和 AttributeProvider 补充属性的合并结果
+	Attributes []Attribute
+	// Error 是查询返回的错误；panic 场景会转换为 error 记录后继续抛出原 panic
+	Error error
+	// ErrorType 是 ErrorClassifier 生成的稳定错误分类
+	ErrorType string
 	// Duration 是查询执行耗时，包含后续中间件和真实查询耗时
 	Duration time.Duration
 	// ResultKind 是查询结果类型；当查询失败且无结果时为零值，默认属性会标记为 unknown
@@ -67,14 +73,8 @@ type QueryEvent struct {
 	Total int64
 	// HasMore 表示游标分页结果是否还有下一页
 	HasMore bool
-	// Error 是查询返回的错误；panic 场景会转换为 error 记录后继续抛出原 panic
-	Error error
-	// ErrorType 是 ErrorClassifier 生成的稳定错误分类
-	ErrorType string
 	// Success 表示查询是否成功完成
 	Success bool
-	// Attributes 是默认属性和 AttributeProvider 补充属性的合并结果
-	Attributes []Attribute
 }
 
 // QueryLogger 接收查询完成事件，用于对接日志系统
