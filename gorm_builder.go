@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
@@ -429,7 +430,7 @@ func (g *GormBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any, 
 				for _, cf := range cursorFields {
 					fieldList = append(fieldList, cf.column)
 				}
-				placeholders := strings.TrimRight(strings.Repeat("?,", len(cursorValues)), ",")
+				placeholders := strings.Join(slices.Repeat([]string{"?"}, len(cursorValues)), ",")
 				query = query.Where(util.BuildString("(", strings.Join(fieldList, ", "), ") ", op, " (", placeholders, ")"), cursorValues...)
 			} else {
 				// 混排场景（如 created_at DESC, id ASC）无法直接使用单一行值比较，回退到词典序 OR 条件

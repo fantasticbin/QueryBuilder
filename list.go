@@ -187,6 +187,26 @@ func (l *List[R]) passQueryOption(querier Querier[R], options BaseQueryListOptio
 	}
 }
 
+// recoverListError 作为 defer 的直接目标（必须由 defer 直接调用的函数执行 recover）
+// 捕获 panic 并转换为 error 写入 *err；panic 时将 result 置为其类型的零值
+func recoverListError[R any](prefix string, errPtr *error, resultPtr *R) {
+	if r := recover(); r != nil {
+		var zero R
+		*errPtr = util.PanicToError(prefix, r)
+		*resultPtr = zero
+	}
+}
+
+// recoverCursorError 作为 defer 的直接目标，捕获 panic 并将游标迭代器替换为返回该错误的迭代器
+func recoverCursorError[R any](prefix string, seqPtr *iter.Seq2[*R, error]) {
+	if r := recover(); r != nil {
+		err := util.PanicToError(prefix, r)
+		*seqPtr = func(yield func(*R, error) bool) {
+			yield(nil, err)
+		}
+	}
+}
+
 // Query 执行查询
 // 该方法会根据传入的 QueryOption 选项执行查询
 // 通过 DataSource 枚举值自动创建对应的专属查询构建器
@@ -196,15 +216,9 @@ func (l *List[R]) Query(
 	opts ...QueryOption,
 ) (result *core.ListResult[R], err error) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
-	defer func() {
-		if r := recover(); r != nil {
-			result = nil
-			err = util.PanicToError("query panic recovered", r)
-		}
-	}()
+	defer recoverListError("query panic recovered", &err, &result)
 
 	options := LoadQueryOptions(opts...)
-
 	querier := l.buildQuerier(options)
 	l.passQueryOption(querier, options, false, true)
 	return querier.QueryList(ctx)
@@ -218,16 +232,9 @@ func (l *List[R]) QueryCursor(
 	opts ...QueryOption,
 ) (seq iter.Seq2[*R, error]) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为返回错误的迭代器
-	defer func() {
-		if r := recover(); r != nil {
-			seq = func(yield func(*R, error) bool) {
-				yield(nil, util.PanicToError("query cursor panic recovered", r))
-			}
-		}
-	}()
+	defer recoverCursorError[R]("query cursor panic recovered", &seq)
 
 	options := LoadQueryOptions(opts...)
-
 	querier := l.buildQuerier(options)
 	l.passQueryOption(querier, options, true, true)
 	return querier.QueryCursor(ctx)
@@ -241,15 +248,9 @@ func (l *List[R]) QueryPage(
 	opts ...QueryOption,
 ) (result *core.CursorPageResult[R], err error) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
-	defer func() {
-		if r := recover(); r != nil {
-			result = nil
-			err = util.PanicToError("query page panic recovered", r)
-		}
-	}()
+	defer recoverListError("query page panic recovered", &err, &result)
 
 	options := LoadQueryOptions(opts...)
-
 	querier := l.buildQuerier(options)
 	l.passQueryOption(querier, options, true, true)
 	return querier.QueryPage(ctx)
@@ -261,12 +262,7 @@ func (l *List[R]) QueryPageWithPIT(
 	ctx context.Context,
 	opts ...QueryOption,
 ) (result *core.ESPITPageResult[R], err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			result = nil
-			err = util.PanicToError("query page with pit panic recovered", r)
-		}
-	}()
+	defer recoverListError("query page with pit panic recovered", &err, &result)
 
 	options := LoadQueryOptions(opts...)
 	querier := l.buildQuerier(options)
@@ -283,12 +279,7 @@ func (l *List[R]) QueryPageWithPIT(
 // 用于调试场景，不会实际执行查询
 func (l *List[R]) Explain(ctx context.Context, opts ...QueryOption) (result string, err error) {
 	// 捕获 NewBuilder 等可能产生的 panic，转换为 error 返回
-	defer func() {
-		if r := recover(); r != nil {
-			result = ""
-			err = util.PanicToError("explain panic recovered", r)
-		}
-	}()
+	defer recoverListError("explain panic recovered", &err, &result)
 
 	options := LoadQueryOptions(opts...)
 	querier := l.buildQuerier(options)

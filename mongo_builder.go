@@ -368,10 +368,11 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 			// 多字段复合游标条件：
 			// {"$or": [{"a": {"$gt": v1}}, {"a": v1, "b": {"$gt": v2}}]}
 			var orConditions bson.A
-			for i := 0; i < len(cursorFields); i++ {
+			for i := range cursorFields {
 				cond := bson.D{}
 				// 前面的字段等于对应的游标值
-				for j := 0; j < i; j++ {
+				// 1.22+ 整型 range 写法
+				for j := range i {
 					cond = append(cond, bson.E{Key: cursorFields[j].Field, Value: cursorValues[j]})
 				}
 				op := "$gt"

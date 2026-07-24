@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -437,12 +438,7 @@ func isDistinctMetric(metric Metric) bool {
 
 // supportsDistinct 判断聚合函数是否支持去重修饰
 func supportsDistinct(fn Func) bool {
-	switch fn {
-	case Count, Sum:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains([]Func{Count, Sum}, fn)
 }
 
 // requiresMetricFacet 判断指标是否需要在 MongoDB 中使用独立分支计算

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -316,12 +317,9 @@ func (b *ElasticSearchBuilder[A]) elasticBucketSortField(alias string) string {
 
 // hasGroupAlias 判断别名是否引用分组输出
 func (b *ElasticSearchBuilder[A]) hasGroupAlias(alias string) bool {
-	for _, group := range b.spec.Groups {
-		if strings.EqualFold(group.Alias, alias) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(b.spec.Groups, func(group Group) bool {
+		return strings.EqualFold(group.Alias, alias)
+	})
 }
 
 // elasticHavingAggregation 构建用于 HAVING 过滤的 bucket_selector 聚合

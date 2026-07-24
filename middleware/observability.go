@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	builder "github.com/fantasticbin/QueryBuilder/v2"
@@ -417,17 +418,16 @@ func cloneAttributes(attrs []Attribute) []Attribute {
 }
 
 // normalizeSignalOrder 规范化信号顺序，去重并补齐未声明的默认信号
+// 使用 slices.Contains 线性去重（信号数量极少），保持输入声明的先后顺序
 func normalizeSignalOrder(order []ObservabilitySignal) []ObservabilitySignal {
 	normalized := make([]ObservabilitySignal, 0, len(defaultSignalOrder))
-	seen := make(map[ObservabilitySignal]struct{}, len(defaultSignalOrder))
 	appendSignal := func(signal ObservabilitySignal) {
 		if !isKnownSignal(signal) {
 			return
 		}
-		if _, ok := seen[signal]; ok {
+		if slices.Contains(normalized, signal) {
 			return
 		}
-		seen[signal] = struct{}{}
 		normalized = append(normalized, signal)
 	}
 
