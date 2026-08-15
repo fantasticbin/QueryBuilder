@@ -258,28 +258,22 @@ func TestMiddlewareChainOrder(t *testing.T) {
 	}
 }
 
-// TestUnsupportedDataSourcePanicRecovery 测试不支持的数据源类型时 panic 被正确恢复为 error
-func TestUnsupportedDataSourcePanicRecovery(t *testing.T) {
+// TestUnsupportedDataSourceReturnsInvalidError 测试未注册构建器的数据源返回 ErrDataSourceInvalid
+func TestUnsupportedDataSourceReturnsInvalidError(t *testing.T) {
 	ctx := context.Background()
 
 	list := NewList[TestEntity]()
-	// 设置一个不支持的数据源类型（枚举值 99）
 	list.SetDataSource(core.DataSource(99))
 
 	result, err := list.Query(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
-	if err == nil {
-		t.Fatal("expected error for unsupported data source, got nil")
+	if !errors.Is(err, ErrDataSourceInvalid) {
+		t.Fatalf("expected ErrDataSourceInvalid, got: %v", err)
 	}
 	if result != nil {
 		t.Errorf("expected nil result, got %v", result)
-	}
-	// 验证错误信息包含 panic 恢复标识
-	expectedErrPrefix := "query panic recovered:"
-	if len(err.Error()) < len(expectedErrPrefix) || err.Error()[:len(expectedErrPrefix)] != expectedErrPrefix {
-		t.Errorf("expected error starting with %q, got: %v", expectedErrPrefix, err)
 	}
 }
 
@@ -414,28 +408,22 @@ func TestExplainError(t *testing.T) {
 	}
 }
 
-// TestExplainPanicRecovery 测试 Explain 方法的 panic 恢复
-func TestExplainPanicRecovery(t *testing.T) {
+// TestExplainUnsupportedDataSource 测试 Explain 在未知数据源上返回 ErrDataSourceInvalid
+func TestExplainUnsupportedDataSource(t *testing.T) {
 	ctx := context.Background()
 
 	list := NewList[TestEntity]()
-	// 设置不支持的数据源类型，触发 NewBuilder panic
 	list.SetDataSource(core.DataSource(99))
 
 	result, err := list.Explain(ctx,
 		WithData(NewDBProxy(&gorm.DB{}, nil, nil)),
 	)
 
-	if err == nil {
-		t.Fatal("expected error for unsupported data source, got nil")
+	if !errors.Is(err, ErrDataSourceInvalid) {
+		t.Fatalf("expected ErrDataSourceInvalid, got: %v", err)
 	}
 	if result != "" {
 		t.Errorf("expected empty result, got: %s", result)
-	}
-
-	expectedErrPrefix := "explain panic recovered:"
-	if len(err.Error()) < len(expectedErrPrefix) || err.Error()[:len(expectedErrPrefix)] != expectedErrPrefix {
-		t.Errorf("expected error starting with %q, got: %v", expectedErrPrefix, err)
 	}
 }
 
@@ -535,12 +523,11 @@ func TestQueryCursor(t *testing.T) {
 	}
 }
 
-// TestQueryCursorPanicRecovery 测试 QueryCursor 方法的 panic 恢复
-func TestQueryCursorPanicRecovery(t *testing.T) {
+// TestQueryCursorUnsupportedDataSource 测试 QueryCursor 在未知数据源上返回 ErrDataSourceInvalid
+func TestQueryCursorUnsupportedDataSource(t *testing.T) {
 	ctx := context.Background()
 
 	list := NewList[TestEntity]()
-	// 设置不支持的数据源类型，触发 NewBuilder panic
 	list.SetDataSource(core.DataSource(99))
 
 	seq := list.QueryCursor(ctx,
@@ -556,13 +543,8 @@ func TestQueryCursorPanicRecovery(t *testing.T) {
 		}
 	}
 
-	if gotErr == nil {
-		t.Fatal("expected error for unsupported data source, got nil")
-	}
-
-	expectedErrPrefix := "query cursor panic recovered:"
-	if len(gotErr.Error()) < len(expectedErrPrefix) || gotErr.Error()[:len(expectedErrPrefix)] != expectedErrPrefix {
-		t.Errorf("expected error starting with %q, got: %v", expectedErrPrefix, gotErr)
+	if !errors.Is(gotErr, ErrDataSourceInvalid) {
+		t.Fatalf("expected ErrDataSourceInvalid, got: %v", gotErr)
 	}
 }
 

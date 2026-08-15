@@ -86,7 +86,7 @@ func main() {
     ctx := context.Background()
     db := &gorm.DB{} // your GORM instance
 
-    // Create a GORM builder
+    // Create a GORM builder (defaults: limit=10, paginated, needTotal=true)
     b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
     // Set strongly-typed filter & sort (GormScope = func(*gorm.DB) *gorm.DB)
@@ -129,6 +129,30 @@ esData := builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClien
 ```
 
 `builder.NewDBProxy(db, mongo, es)` is kept only for backward compatibility with earlier versions. New code should use adapter registration via `builder.NewDBProxyWithAdapters(...)`; the compatibility constructor will be removed in a future release.
+
+### Custom Data Source Builder Registration
+
+For a non-built-in data source, register a **builder factory** with `RegisterBuilder` so that `NewBuilder` can construct your `Querier`. The client adapter is still registered on the `DBProxy` as usual.
+
+```go
+const MyDataSource core.DataSource = 42
+
+func init() {
+    // Register the Querier factory for your custom data source
+    builder.RegisterBuilder[MyEntity](MyDataSource, func(data *core.DBProxy) builder.Querier[MyEntity] {
+        return NewMyBuilder[MyEntity](data)
+    })
+}
+
+// data carries the client adapter; NewBuilder dispatches to the registered factory
+data := builder.NewDBProxyWithAdapters(NewMyAdapter(client))
+b := builder.NewBuilder[MyEntity](MyDataSource, data)
+```
+
+- For a registered source, `NewBuilder` returns your custom builder; an **unregistered** source returns a `Querier` whose `Query*` / `Explain` yield `ErrDataSourceInvalid` (no panic).
+- Built-in sources (`Gorm` / `MongoDB` / `ElasticSearch`) cannot be overridden — `RegisterBuilder` panics to protect them.
+- Passing `factory == nil` deletes a previous registration, useful for test cleanup.
+- A custom `Querier` used with `QueryCursor` + `CacheMiddleware` should implement `CursorValueOverlayer` so each batch's cursor is injected into `GetQueryMeta` (see Cache section).
 
 ### 2. Using List with Options Pattern
 
@@ -436,8 +460,8 @@ Use it with the cache middleware:
 cache := NewGCacheProvider(1000) // LRU cache with 1000 entries
 
 b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
-b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
-    meta := b.GetQueryMeta()
+b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, q builder.Querier[User]) string {
+    meta := q.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
@@ -467,7 +491,7 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | Business resource name (e.g. `"users"`, `"orders"`) |
 | `datasource` | `QueryMeta` | Data source type (Gorm/MongoDB/ES) |
 | `fields` | `QueryMeta` | Field projection list |
-| `pagination` | `QueryMeta` | start, limit, needTotal, totalLimit, needPagination, isCursorQuery, isPITQuery, cursorFields |
+| `pagination` | `QueryMeta` | start, limit, needTotal, totalLimit, needPagination, isCursorQuery, isPITQuery, cursorFields, cursorValues |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | Query filter conditions |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | Sort conditions |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | Additional dimensions (e.g. tenant_id) |
@@ -594,13 +618,15 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCac
 #### Key Stability & Isolation Guarantees
 
 - **Stable**: Same inputs always produce the same key (`encoding/json` sorts map keys lexicographically, ensuring deterministic serialization + SHA1).
-- **Isolated**: Different prefix / filter / sort / pagination / extra values produce different keys.
+- **Isolated**: Different prefix / filter / sort / pagination / extra values produce different keys. Pagination includes `cursorValues`, so `QueryPage` pages and `QueryCursor` batches do not share a key.
 - **Defensive**: Non-serializable values (functions, channels) are gracefully degraded to string representations, avoiding empty-key collisions.
 - **Fallback**: Falls back to `fmt.Sprintf` formatting when JSON serialization fails, ensuring the key is never empty.
 - **Empty-result caching**: Empty query results are still cached to prevent cache penetration.
 - **Clone-safe**: Each Clone instance uses its own `DefaultCacheKeyBuilder` with independent `Hints`, ensuring no shared mutable state.
+- **Typed cursors**: Cached `NextCursorValues` keep their original Go types (`int64`, `uint32`, `time.Time`, …). Legacy untyped JSON numbers restore as `int64` when they are whole numbers.
+- **Custom Querier**: `QueryCursor` batches are cached per cursor value. A custom `Querier` must implement the `CursorValueOverlayer` interface (`OverlayCursorValues`) so each batch's cursor is injected into `GetQueryMeta`; otherwise all batches share the initial cursor and cache keys are not isolated by page (silent degradation).
 
-> **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` automatically bypass `ElasticSearchBuilder.QueryPageWithPIT`. PIT pages depend on evolving `pit_id` and `cursor_values`, so the built-in cache middleware skips cache read/write and calls the next query handler directly. Other middleware, including `ObservabilityMiddleware`, still runs for PIT queries.
+> **Note:** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` automatically bypass `ElasticSearchBuilder.QueryPageWithPIT`. PIT pages depend on evolving `pit_id` and `cursor_values`, so the built-in cache middleware skips cache read/write and calls the next query handler directly. Other middleware, including `ObservabilityMiddleware`, still runs for PIT queries. `QueryCursor` batches are cached as `CursorPageResult` so a hit can restore `NextCursorValues` and continue iteration.
 
 ### Observability Middleware
 
@@ -692,7 +718,7 @@ Behavior notes:
 - When `Logger`, `Metrics`, and `Tracer` are all nil, the middleware bypasses observability work and calls the next handler directly.
 - Observer adapters are best-effort: panics from `Logger`, `Metrics`, `Tracer`, `AttributeProvider`, `OperationNameBuilder`, or `ErrorClassifier` are isolated and do not interrupt the query.
 - Default operation names are `querybuilder.<DataSource>.list`, `querybuilder.<DataSource>.cursor`, and `querybuilder.ElasticSearch.pit_cursor` for PIT + `search_after`.
-- `QueryCursor` emits one event per fetched batch. `QueryPage` and `QueryPageWithPIT` emit one event per returned page.
+- `QueryCursor` emits one event per fetched batch as `ResultKindCursorPage` (the batch carries `NextCursorValues` for cache resume). `QueryPage` and `QueryPageWithPIT` emit one event per returned page.
 - Validation/configuration errors that happen before the middleware pipeline starts are not emitted by this middleware. If you need full API-entry observability, record those call-site errors at your service boundary as well.
 - `DefaultErrorClassifier` returns stable names for context cancellation and deadline errors: `context_canceled` and `context_deadline_exceeded`.
 
@@ -740,8 +766,8 @@ func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
 b.Use(MetaToCtxMiddleware[User]())
 
 // Retrieve in downstream code
-func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
-    meta, ok := ctx.Value(queryMetaKey).(builder.QueryMeta)
+func getMetaFromCtx(ctx context.Context) (core.QueryMeta, bool) {
+    meta, ok := ctx.Value(queryMetaKey).(core.QueryMeta)
     return meta, ok
 }
 ```

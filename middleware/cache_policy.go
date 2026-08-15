@@ -53,6 +53,7 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 		"isCursorQuery":  meta.IsCursorQuery,
 		"isPITQuery":     meta.IsPITQuery,
 		"cursorFields":   append([]string(nil), meta.CursorFields...),
+		"cursorValues":   append([]any(nil), meta.CursorValues...),
 	}
 
 	hints := resolveCacheKeyHints(ctx, b.Hints, b.HintsProvider)

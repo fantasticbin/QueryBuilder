@@ -46,7 +46,7 @@ func NewGormBuilder[R any](data *core.DBProxy) *GormBuilder[R] {
 	g := &GormBuilder[R]{}
 	g.builder.data = data
 	g.builder.dataSource = core.Gorm
-	g.builder.limit = defaultLimit
+	applyQueryConfigDefaults(&g.builder)
 	g.builder.setSelf(g, g)
 	return g
 }

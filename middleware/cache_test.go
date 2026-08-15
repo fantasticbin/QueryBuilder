@@ -199,8 +199,110 @@ func TestCacheMiddlewarePreservesCursorPageResult(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected cursor page result from cache, got %T", result)
 	}
-	if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0].(float64) != 1 {
+	if !page.HasMore || len(page.NextCursorValues) != 1 || page.NextCursorValues[0] != 1 {
 		t.Fatalf("cursor page metadata was not preserved: %+v", page)
+	}
+}
+
+func TestDefaultCacheKeyBuilderIsolatesCursorValues(t *testing.T) {
+	ctx := context.Background()
+	kb := DefaultCacheKeyBuilder{Prefix: "users"}
+	page1 := baseMeta()
+	page1.IsCursorQuery = true
+	page1.CursorFields = []string{"id"}
+	page1.CursorValues = []any{int64(1)}
+
+	page2 := page1
+	page2.CursorValues = []any{int64(2)}
+
+	samePage := page1
+	samePage.CursorValues = []any{int64(1)}
+
+	if kb.Build(ctx, page1) == kb.Build(ctx, page2) {
+		t.Fatal("expected cache keys to differ when cursor values change")
+	}
+	if kb.Build(ctx, page1) != kb.Build(ctx, samePage) {
+		t.Fatal("expected cache keys to match for the same cursor values")
+	}
+}
+
+func TestCacheMiddlewarePreservesTypedCursorValues(t *testing.T) {
+	cache := newMockCache()
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+	mq.meta.IsCursorQuery = true
+	mq.meta.CursorFields = []string{"created_at", "id"}
+	mq.meta.CursorValues = []any{int64(100), uint32(1)}
+
+	ctx := context.Background()
+	calls := 0
+	stamp := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	mw := CacheMiddlewareWithKeyBuilder[testUser](cache, time.Minute, DefaultCacheKeyBuilder{Prefix: "user-page"})
+	next := func(ctx context.Context) (core.Result[testUser], error) {
+		calls++
+		return &core.CursorPageResult[testUser]{
+			Items:            []*testUser{{ID: 1, Name: "A"}},
+			Total:            3,
+			HasMore:          true,
+			NextCursorValues: []any{int64(1700000000), uint32(500), stamp, "tok-1"},
+		}, nil
+	}
+
+	_, _ = mw(ctx, mq, next)
+	result, err := mw(ctx, mq, next)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected backend called once due to cache hit, got %d", calls)
+	}
+	page, ok := result.(*core.CursorPageResult[testUser])
+	if !ok {
+		t.Fatalf("expected cursor page result from cache, got %T", result)
+	}
+	if len(page.NextCursorValues) != 4 {
+		t.Fatalf("expected 4 cursor values, got %#v", page.NextCursorValues)
+	}
+	if _, ok := page.NextCursorValues[0].(int64); !ok || page.NextCursorValues[0].(int64) != 1700000000 {
+		t.Fatalf("expected int64 cursor, got %T %[1]v", page.NextCursorValues[0])
+	}
+	if _, ok := page.NextCursorValues[1].(uint32); !ok || page.NextCursorValues[1].(uint32) != 500 {
+		t.Fatalf("expected uint32 cursor, got %T %[1]v", page.NextCursorValues[1])
+	}
+	gotTime, ok := page.NextCursorValues[2].(time.Time)
+	if !ok || !gotTime.Equal(stamp) {
+		t.Fatalf("expected time cursor %v, got %T %[2]v", stamp, page.NextCursorValues[2])
+	}
+	if page.NextCursorValues[3] != "tok-1" {
+		t.Fatalf("expected string cursor, got %#v", page.NextCursorValues[3])
+	}
+}
+
+func TestCacheMiddlewareRestoresLegacyNumericCursorAsInt64(t *testing.T) {
+	cache := newMockCache()
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+	ctx := context.Background()
+	key := "legacy-cursor"
+	cache.Set(ctx, key, []byte(`{"kind":1,"items":[{"ID":1,"Name":"A"}],"total":3,"has_more":true,"next_cursor_values":[1]}`), time.Minute)
+
+	mw := CacheMiddleware[testUser](cache, time.Minute, func(context.Context, builder.Querier[testUser]) string {
+		return key
+	})
+	result, err := mw(ctx, mq, func(context.Context) (core.Result[testUser], error) {
+		t.Fatal("legacy cache hit should not call next")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	page, ok := result.(*core.CursorPageResult[testUser])
+	if !ok {
+		t.Fatalf("expected cursor page result, got %T", result)
+	}
+	if len(page.NextCursorValues) != 1 {
+		t.Fatalf("expected one cursor value, got %#v", page.NextCursorValues)
+	}
+	if _, ok := page.NextCursorValues[0].(int64); !ok || page.NextCursorValues[0].(int64) != 1 {
+		t.Fatalf("expected legacy number to restore as int64(1), got %T %[1]v", page.NextCursorValues[0])
 	}
 }
 

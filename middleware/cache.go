@@ -20,11 +20,11 @@ type CacheProvider interface {
 
 // cacheResult 缓存结果结构体，用于序列化/反序列化查询结果
 type cacheResult[R any] struct {
-	Kind             core.ResultKind `json:"kind"`
-	Items            []*R            `json:"items"`
-	Total            int64           `json:"total"`
-	HasMore          bool            `json:"has_more"`
-	NextCursorValues []any           `json:"next_cursor_values"`
+	Kind             core.ResultKind   `json:"kind"`
+	Items            []*R              `json:"items"`
+	Total            int64             `json:"total"`
+	HasMore          bool              `json:"has_more"`
+	NextCursorValues typedCursorValues `json:"next_cursor_values"`
 }
 
 // toResult 将 cacheResult 转换为 core.Result[R]，根据 Kind 字段区分 CursorPageResult 和 ListResult
@@ -39,7 +39,7 @@ func (r cacheResult[R]) toResult() core.Result[R] {
 		Items:            r.Items,
 		Total:            r.Total,
 		HasMore:          r.HasMore,
-		NextCursorValues: r.NextCursorValues,
+		NextCursorValues: []any(r.NextCursorValues),
 	}
 }
 
@@ -53,7 +53,7 @@ func cacheResultFromResult[R any](result core.Result[R]) cacheResult[R] {
 		Items:            result.GetItems(),
 		Total:            result.GetTotal(),
 		HasMore:          result.GetHasMore(),
-		NextCursorValues: result.GetNextCursorValues(),
+		NextCursorValues: typedCursorValues(result.GetNextCursorValues()),
 	}
 }
 
@@ -70,6 +70,11 @@ func CacheMiddlewareWithKeyBuilder[R any](cache CacheProvider, ttl time.Duration
 
 // CacheMiddleware 创建查询结果缓存中间件
 // 该中间件会在查询前检查缓存，命中则直接返回缓存结果，未命中则执行查询并写入缓存
+//
+// 注意：QueryCursor 的每个批次会经过中间件链并被独立缓存（缓存键含当前批次游标）
+// 需结合 TTL 评估数据新鲜度；自定义 Querier 须实现 builder.CursorValueOverlayer 才能让
+// 批次游标注入 GetQueryMeta，否则所有批次共用初始游标、缓存键无法按页隔离（静默降级）
+//
 // 参数:
 //
 //	cache - 缓存提供者实例，实现 CacheProvider 接口

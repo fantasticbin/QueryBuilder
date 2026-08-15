@@ -84,3 +84,13 @@ func TestDBProxy_CheckConfiguredInvalidDataSource(t *testing.T) {
 		t.Fatalf("expected invalid data source error, got: %v", err)
 	}
 }
+
+func TestDBProxy_RegisterAdapterNilReceiverPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when RegisterAdapter is called on nil *DBProxy")
+		}
+	}()
+	var proxy *DBProxy
+	proxy.RegisterAdapter(NewGormAdapter(&gorm.DB{}))
+}

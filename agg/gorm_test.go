@@ -126,7 +126,7 @@ func TestGormBuilderExplainAdvancedSpec(t *testing.T) {
 	for _, fragment := range []string{
 		`COUNT(CASE WHEN "status" = ? THEN 1 END) AS "paid_total"`,
 		`SUM(CASE WHEN "status" = ? THEN "amount" ELSE 0 END) AS "paid_amount"`,
-		`SUM(DISTINCT CASE WHEN "status" = ? THEN "amount" ELSE 0 END) AS "unique_paid_amount"`,
+		`SUM(DISTINCT CASE WHEN "status" = ? THEN "amount" END) AS "unique_paid_amount"`,
 		`HAVING SUM(CASE WHEN "status" = ? THEN "amount" ELSE 0 END) >= ?`,
 		`ORDER BY "paid_amount" DESC`,
 		`args: [paid, paid, paid, paid, 100, 5]`,

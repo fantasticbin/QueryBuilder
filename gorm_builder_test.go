@@ -261,6 +261,12 @@ func TestGormBuilderDefaultsAndChainableSetters(t *testing.T) {
 	if builder.builder.limit != defaultLimit {
 		t.Fatalf("expected default limit %d, got %d", defaultLimit, builder.builder.limit)
 	}
+	if !builder.builder.needPagination {
+		t.Fatal("expected default needPagination=true")
+	}
+	if !builder.builder.needTotal {
+		t.Fatal("expected default needTotal=true")
+	}
 
 	filter := func(db *gorm.DB) *gorm.DB { return db.Where("status = ?", "active") }
 	sort := func(db *gorm.DB) *gorm.DB { return db.Order("created_at DESC") }

@@ -131,6 +131,8 @@ type DBProxy struct {
 }
 
 // NewDBProxy 创建兼容旧调用方式的数据源注册表
+//
+// Deprecated: 请使用 NewDBProxyWithAdapters。该函数将在后续版本中移除
 func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *DBProxy {
 	return NewDBProxyWithAdapters(
 		NewGormAdapter(db),
@@ -150,8 +152,9 @@ func NewDBProxyWithAdapters(adapters ...DataSourceAdapter) *DBProxy {
 
 // RegisterAdapter 按数据源注册适配器
 func (p *DBProxy) RegisterAdapter(adapter DataSourceAdapter) *DBProxy {
+	// 必须在非 nil 的 *DBProxy 上调用；nil 接收者无法写回调用方变量，因此直接 panic
 	if p == nil {
-		p = &DBProxy{}
+		panic("core: RegisterAdapter called on nil *DBProxy")
 	}
 	if adapter == nil {
 		return p

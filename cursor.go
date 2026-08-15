@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// CursorValueOverlayer 由内置构建器实现，用于 QueryCursor 每批向 GetQueryMeta 注入当前游标
+// 自定义 Querier 实现该接口后，CacheMiddleware 等中间件才能按批次隔离缓存键、并在缓存命中后
+// 用正确游标续查；未实现时 QueryCursor 仍可工作，但批次级缓存隔离与续查游标恢复不可用（静默降级）
+type CursorValueOverlayer interface {
+	OverlayCursorValues(values []any)
+}
+
+// overlayQueryCursorValues 在 Querier 上设置当前批次游标，未实现 CursorValueOverlayer 时忽略
+func overlayQueryCursorValues[R any](querier Querier[R], values []any) {
+	if overlayer, ok := querier.(CursorValueOverlayer); ok {
+		overlayer.OverlayCursorValues(values)
+	}
+}
+
 // cursorFetchBatch 游标分批获取函数类型
 // 参数:
 //

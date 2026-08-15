@@ -3,7 +3,6 @@ package builder
 import (
 	"context"
 	"errors"
-	"fmt"
 	"iter"
 	"time"
 
@@ -60,6 +59,8 @@ func NewElasticSearchAdapter(client *elastic.Client) core.ElasticSearchAdapter {
 
 // NewDBProxy 创建数据实例
 // 保留旧构造函数签名以兼容现有调用；新数据源请使用 NewDBProxyWithAdapters 或 RegisterAdapter
+//
+// Deprecated: 请使用 NewDBProxyWithAdapters。该函数将在后续版本中移除
 func NewDBProxy(db *gorm.DB, mongodb *mongo.Collection, elasticsearch *elastic.Client) *core.DBProxy {
 	return core.NewDBProxy(db, mongodb, elasticsearch)
 }
@@ -176,11 +177,13 @@ func (c queryConfig) clone() queryConfig {
 
 // cursorConfig 游标配置
 type cursorConfig struct {
-	cursorFields       []string          // 游标分页排序字段列表
-	parsedCursorFields []cursorSortField // 解析后的游标字段与方向缓存
-	cursorValues       []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
-	isCursorQuery      bool              // 是否为游标查询模式
-	isPITQuery         bool              // 是否为 Elasticsearch PIT + search_after 查询模式
+	cursorFields          []string          // 游标分页排序字段列表
+	parsedCursorFields    []cursorSortField // 解析后的游标字段与方向缓存
+	cursorValues          []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
+	cursorValueOverlay    []any             // QueryCursor 当前批次游标，仅影响 GetQueryMeta
+	isCursorQuery         bool              // 是否为游标查询模式
+	isPITQuery            bool              // 是否为 Elasticsearch PIT + search_after 查询模式
+	cursorValueOverlaySet bool              // 是否已设置当前批次游标覆盖
 }
 
 // clone 返回 cursorConfig 的深拷贝
@@ -200,6 +203,8 @@ func (c cursorConfig) clone() cursorConfig {
 		copy(parsed, c.parsedCursorFields)
 		c.parsedCursorFields = parsed
 	}
+	c.cursorValueOverlay = nil
+	c.cursorValueOverlaySet = false
 	return c
 }
 
@@ -275,11 +280,40 @@ func (b *builder[B, R]) GetQueryMeta() core.QueryMeta {
 		meta.CursorFields = make([]string, len(b.cursorFields))
 		copy(meta.CursorFields, b.cursorFields)
 	}
-	if b.cursorValues != nil {
-		meta.CursorValues = make([]any, len(b.cursorValues))
-		copy(meta.CursorValues, b.cursorValues)
+	if cursorValues := b.metaCursorValues(); cursorValues != nil {
+		meta.CursorValues = make([]any, len(cursorValues))
+		copy(meta.CursorValues, cursorValues)
 	}
 	return meta
+}
+
+// metaCursorValues 返回写入 QueryMeta 的游标值。
+// QueryCursor 分批执行时优先使用当前批次覆盖值，以便缓存键按页隔离。
+func (b *builder[B, R]) metaCursorValues() []any {
+	if b.cursorValueOverlaySet {
+		return b.cursorValueOverlay
+	}
+	return b.cursorValues
+}
+
+// OverlayCursorValues 设置当前批次游标覆盖，不改动调用方配置的 SetCursorValue。
+// 该方法实现 CursorValueOverlayer 接口，通常由 QueryCursor 中间件链在每批执行前调用；
+// 自定义 Querier 可实现同接口以接入批次级缓存隔离。
+func (b *builder[B, R]) OverlayCursorValues(values []any) {
+	b.cursorValueOverlaySet = true
+	if values == nil {
+		b.cursorValueOverlay = nil
+		return
+	}
+	overlay := make([]any, len(values))
+	copy(overlay, values)
+	b.cursorValueOverlay = overlay
+}
+
+// clearCursorValueOverlay 清除当前批次游标覆盖。
+func (b *builder[B, R]) clearCursorValueOverlay() {
+	b.cursorValueOverlay = nil
+	b.cursorValueOverlaySet = false
 }
 
 // QueryList 执行查询列表操作，封装列表查询的通用生命周期
@@ -516,6 +550,7 @@ func (b *builder[B, R]) SetCursorField(fields ...string) B {
 // 用于断点续查或 App 分页场景，指定游标查询的起始位置
 // 如果同时设置了 start > 0 且未设置 cursorValues，start 将作为单字段数值游标的初始值
 func (b *builder[B, R]) SetCursorValue(values ...any) B {
+	b.clearCursorValueOverlay()
 	b.cursorValues = values
 	return b.selfRef
 }
@@ -528,6 +563,7 @@ func (b *builder[B, R]) beginQueryMode(isCursorQuery bool) {
 // finishCursorQuery 结束游标查询模式，避免复用 builder 时污染后续普通查询
 func (b *builder[B, R]) finishCursorQuery() {
 	b.isCursorQuery = false
+	b.clearCursorValueOverlay()
 }
 
 // ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker
@@ -548,7 +584,8 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 }
 
 // NewBuilder 通用工厂函数，根据 DataSource 枚举值创建对应的专属查询构建器
-// 返回 Querier[R] 通用查询接口
+// 内置源返回 Gorm / Mongo / ElasticSearch 构建器；已 RegisterBuilder 的自定义源走注册工厂。
+// 未知数据源不再 panic，返回的 Querier 在 Query/Explain 时给出 ErrDataSourceInvalid。
 func NewBuilder[R any](ds core.DataSource, data *core.DBProxy) Querier[R] {
 	switch ds {
 	case core.Gorm:
@@ -558,6 +595,16 @@ func NewBuilder[R any](ds core.DataSource, data *core.DBProxy) Querier[R] {
 	case core.ElasticSearch:
 		return NewElasticSearchBuilder[R](data, "")
 	default:
-		panic(fmt.Sprintf("unsupported data source: %d", ds))
+		if querier, ok := lookupCustomBuilder[R](ds, data); ok {
+			return querier
+		}
+		return unsupportedQuerier[R]{dataSource: ds}
 	}
+}
+
+// applyQueryConfigDefaults 将列表查询的默认分页与总数策略写到构建器上
+func applyQueryConfigDefaults[B queryBuilder[B, R], R any](b *builder[B, R]) {
+	b.limit = defaultLimit
+	b.needPagination = defaultNeedPagination
+	b.needTotal = defaultNeedTotal
 }

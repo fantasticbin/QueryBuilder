@@ -136,3 +136,19 @@ func TestMongoBuilderFilterNilDefault(t *testing.T) {
 		t.Error("expected filter to be non-nil after SetFilter")
 	}
 }
+
+func TestMongoBuilderDefaults(t *testing.T) {
+	b := NewMongoBuilder[MongoTestEntity](NewDBProxy(nil, nil, nil))
+	if b.builder.dataSource != MongoDB {
+		t.Fatalf("expected MongoDB data source, got %v", b.builder.dataSource)
+	}
+	if b.builder.limit != defaultLimit {
+		t.Fatalf("expected default limit %d, got %d", defaultLimit, b.builder.limit)
+	}
+	if !b.builder.needPagination {
+		t.Fatal("expected default needPagination=true")
+	}
+	if !b.builder.needTotal {
+		t.Fatal("expected default needTotal=true")
+	}
+}

@@ -199,16 +199,21 @@ func (mc *middlewareContext[R]) executeCursorWithMiddlewares(
 	ctx, batchSize, initialCursorValues, runChain := mc.prepareCursorPipeline(ctx)
 
 	// 包装 fetchBatch，使每批次查询经过中间件链
+	// 批次结果用 CursorPageResult 承载 NextCursorValues，缓存命中后仍能续查
 	wrappedFetch := func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*R, []any, int64, bool, error) {
+		overlayQueryCursorValues(mc.querierRef, cursorValues)
+
 		var nextCursorValues []any
 		var batchTotal int64
 		queryFn := func(ctx context.Context) (core.Result[R], error) {
-			batch, nextCV, total, _, err := cursorQueryFn(ctx, cursorValues, isFirstBatch)
+			batch, nextCV, total, more, err := cursorQueryFn(ctx, cursorValues, isFirstBatch)
 			nextCursorValues = nextCV
 			batchTotal = total
-			return &core.ListResult[R]{
-				Items: batch,
-				Total: mc.resolveResultTotal(batch, total),
+			return &core.CursorPageResult[R]{
+				Items:            batch,
+				Total:            mc.resolveResultTotal(batch, total),
+				HasMore:          more,
+				NextCursorValues: nextCV,
 			}, err
 		}
 
@@ -216,8 +221,13 @@ func (mc *middlewareContext[R]) executeCursorWithMiddlewares(
 		if result == nil {
 			return nil, nextCursorValues, batchTotal, false, err
 		}
-		list := result.GetItems()
-		return list, nextCursorValues, batchTotal, false, err
+		if restored := result.GetNextCursorValues(); restored != nil || result.GetResultKind() == core.ResultKindCursorPage {
+			nextCursorValues = restored
+		}
+		// 以中间件链返回的 total 为权威：缓存命中时它携带缓存的完整 total（含 0）
+		// 缓存未命中时与 queryFn 计算的 batchTotal 一致，直接采用即可
+		batchTotal = result.GetTotal()
+		return result.GetItems(), nextCursorValues, batchTotal, false, err
 	}
 
 	// 用于接收首批次查询返回的总数（needTotal 时有效）

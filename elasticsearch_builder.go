@@ -40,7 +40,7 @@ func NewElasticSearchBuilder[R any](data *core.DBProxy, index string) *ElasticSe
 	}
 	e.builder.data = data
 	e.builder.dataSource = core.ElasticSearch
-	e.builder.limit = defaultLimit
+	applyQueryConfigDefaults(&e.builder)
 	e.builder.setSelf(e, e)
 	return e
 }

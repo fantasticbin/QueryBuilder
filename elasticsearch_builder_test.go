@@ -247,3 +247,19 @@ func TestElasticSearchBuilderQueryPageWithPITRejectsCursorWithoutPITID(t *testin
 		t.Fatalf("expected ErrPITCursorWithoutPITID, got %v", err)
 	}
 }
+
+func TestElasticSearchBuilderDefaults(t *testing.T) {
+	b := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxy(nil, nil, nil), "test_index")
+	if b.builder.dataSource != ElasticSearch {
+		t.Fatalf("expected ElasticSearch data source, got %v", b.builder.dataSource)
+	}
+	if b.builder.limit != defaultLimit {
+		t.Fatalf("expected default limit %d, got %d", defaultLimit, b.builder.limit)
+	}
+	if !b.builder.needPagination {
+		t.Fatal("expected default needPagination=true")
+	}
+	if !b.builder.needTotal {
+		t.Fatal("expected default needTotal=true")
+	}
+}

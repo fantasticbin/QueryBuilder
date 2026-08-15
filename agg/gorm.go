@@ -256,7 +256,10 @@ func gormConditionalMetricExpression(db *gorm.DB, metric Metric) (string, []any)
 
 	field := quoteGormIdentifier(db, metric.Field)
 	valueExpression := "CASE WHEN " + condition + " THEN " + field
-	if metric.Func == Sum {
+	// 非去重 SUM 用 ELSE 0，空匹配仍得到 0
+	// 去重 SUM 不写 ELSE 0：让不匹配行产生 NULL 被 SUM 忽略
+	// 全不匹配时返回 NULL（而非 0），更准确地表达"无匹配数据"
+	if metric.Func == Sum && !metric.Distinct {
 		valueExpression += " ELSE 0"
 	}
 	valueExpression += " END"

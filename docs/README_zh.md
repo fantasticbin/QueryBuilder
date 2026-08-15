@@ -86,7 +86,7 @@ func main() {
     ctx := context.Background()
     db := &gorm.DB{} // 你的 GORM 实例
 
-    // 创建 GORM 构建器
+    // 创建 GORM 构建器（默认 limit=10、开启分页、统计总数）
     b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
 
     // 设置强类型的 filter 和 sort（GormScope = func(*gorm.DB) *gorm.DB）
@@ -129,6 +129,30 @@ esData := builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(esClien
 ```
 
 `builder.NewDBProxy(db, mongo, es)` 仅用于兼容旧版本。新代码应使用 `builder.NewDBProxyWithAdapters(...)` 注册 adapter；该兼容构造函数会在后续版本移除。
+
+### 自定义数据源 Builder 注册
+
+对非内置数据源，通过 `RegisterBuilder` 注册**构建器工厂**，`NewBuilder` 即可构造对应的 `Querier`；客户端适配器仍照常注册到 `DBProxy`。
+
+```go
+const MyDataSource core.DataSource = 42
+
+func init() {
+    // 为自定义数据源注册 Querier 工厂
+    builder.RegisterBuilder[MyEntity](MyDataSource, func(data *core.DBProxy) builder.Querier[MyEntity] {
+        return NewMyBuilder[MyEntity](data)
+    })
+}
+
+// data 携带客户端适配器；NewBuilder 分发到已注册工厂
+data := builder.NewDBProxyWithAdapters(NewMyAdapter(client))
+b := builder.NewBuilder[MyEntity](MyDataSource, data)
+```
+
+- 已注册的数据源，`NewBuilder` 返回自定义构建器；**未注册**的源返回的 `Querier` 在 `Query*` / `Explain` 时返回 `ErrDataSourceInvalid`（不再 panic）。
+- 内置数据源（`Gorm` / `MongoDB` / `ElasticSearch`）不可覆盖——`RegisterBuilder` 会 panic 保护。
+- `factory` 传 `nil` 可删除已注册工厂，便于测试复位。
+- 搭配 `QueryCursor` + `CacheMiddleware` 使用的自定义 `Querier` 应实现 `CursorValueOverlayer`，让每批游标注入 `GetQueryMeta`（见缓存章节）。
 
 ### 2. 使用 List 与选项模式
 
@@ -436,8 +460,8 @@ func (g *GCacheProvider) Set(ctx context.Context, key string, value []byte, ttl 
 cache := NewGCacheProvider(1000) // 1000 条目的 LRU 缓存
 
 b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
-b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, b core.QuerierMeta) string {
-    meta := b.GetQueryMeta()
+b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Context, q builder.Querier[User]) string {
+    meta := q.GetQueryMeta()
     return fmt.Sprintf("users:list:%d:%d", meta.Start, meta.Limit)
 }))
 
@@ -466,7 +490,7 @@ type CacheKeyBuilder interface {
 | `prefix` | `DefaultCacheKeyBuilder.Prefix` | 业务资源名（如 "users"、"orders"），隔离不同查询场景 |
 | `datasource` | `QueryMeta.DataSource` | 数据源类型（Gorm/MongoDB/ElasticSearch） |
 | `fields` | `QueryMeta.Fields` | 查询字段投影 |
-| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、totalLimit、needPagination、isCursorQuery、isPITQuery、cursorFields |
+| `pagination` | `QueryMeta` | 包含 start、limit、needTotal、totalLimit、needPagination、isCursorQuery、isPITQuery、cursorFields、cursorValues |
 | `filter` | `DefaultCacheKeyBuilder.Hints` | 业务过滤条件（map/struct/切片/标量） |
 | `sort` | `DefaultCacheKeyBuilder.Hints` | 业务排序条件 |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | 扩展维度（如 tenant_id 等多租户隔离字段） |
@@ -592,13 +616,15 @@ b.Use(middleware.CacheMiddlewareWithKeyBuilder[User](cache, 5*time.Minute, MyCac
 #### 设计说明
 
 - **稳定性**：相同查询条件始终生成相同的缓存键（`encoding/json` 对 map key 按字典序排序）。
-- **隔离性**：不同的 prefix / filter / sort / pagination / extra 值会生成不同的缓存键。
+- **隔离性**：不同的 prefix / filter / sort / pagination / extra 值会生成不同的缓存键。pagination 包含 `cursorValues`，因此 `QueryPage` 的不同页和 `QueryCursor` 的不同批次不会共用同一个 key。
 - **防御性**：对不可 JSON 序列化的值（如函数、channel）自动降级为字符串表示，避免 key 空串碰撞。
 - **兜底机制**：JSON 序列化失败时使用 `fmt.Sprintf` 格式化，确保 key 不为空。
 - **空结果缓存**：查询结果为空时仍会写入缓存，防止缓存穿透。
 - **Clone 安全**：每个 Clone 实例使用各自的 `DefaultCacheKeyBuilder`（携带独立的 `Hints`），确保无共享可变状态。
+- **类型化游标**：缓存中的 `NextCursorValues` 会保留原始 Go 类型（`int64`、`uint32`、`time.Time` 等）。旧版无类型 JSON 数字在值为整数时还原为 `int64`。
+- **自定义 Querier**：`QueryCursor` 的每个批次按游标值独立缓存。自定义 `Querier` 需实现 `CursorValueOverlayer` 接口（`OverlayCursorValues`），让每批游标注入 `GetQueryMeta`；否则所有批次共用初始游标、缓存键无法按页隔离（静默降级）。
 
-> **注意：** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` 会自动旁路 `ElasticSearchBuilder.QueryPageWithPIT`。PIT 页依赖持续演进的 `pit_id` 和 `cursor_values`，因此内置缓存中间件会跳过缓存读写，直接调用下一层查询处理器。其他中间件（包括 `ObservabilityMiddleware`）仍会在 PIT 查询中执行。
+> **注意：** `CacheMiddleware` / `CacheMiddlewareWithKeyBuilder` 会自动旁路 `ElasticSearchBuilder.QueryPageWithPIT`。PIT 页依赖持续演进的 `pit_id` 和 `cursor_values`，因此内置缓存中间件会跳过缓存读写，直接调用下一层查询处理器。其他中间件（包括 `ObservabilityMiddleware`）仍会在 PIT 查询中执行。`QueryCursor` 的每一批会按 `CursorPageResult` 缓存，命中后可以恢复 `NextCursorValues` 并继续迭代。
 
 ### 可观测中间件
 
@@ -690,7 +716,7 @@ func (s otelQuerySpan) EndQuery(ctx context.Context, event middleware.QueryEvent
 - 当 `Logger`、`Metrics` 和 `Tracer` 都为 nil 时，中间件会跳过可观测处理，直接调用下一层处理器。
 - 观测适配器是 best-effort 的：`Logger`、`Metrics`、`Tracer`、`AttributeProvider`、`OperationNameBuilder` 或 `ErrorClassifier` 自身 panic 时会被隔离，不会中断查询。
 - 默认 operation 名称为 `querybuilder.<DataSource>.list`、`querybuilder.<DataSource>.cursor`；ES PIT + `search_after` 场景为 `querybuilder.ElasticSearch.pit_cursor`。
-- `QueryCursor` 每次批量拉取会产生一个事件；`QueryPage` 和 `QueryPageWithPIT` 每次返回一页产生一个事件。
+- `QueryCursor` 每次批量拉取会产生一个 `ResultKindCursorPage` 事件（批次携带 `NextCursorValues`，供缓存命中后续查）；`QueryPage` 和 `QueryPageWithPIT` 每次返回一页产生一个事件。
 - 在中间件管道启动前发生的校验/配置错误不会由该中间件发出事件。如需覆盖完整 API 入口，请在业务服务边界额外记录这些调用点错误。
 - `DefaultErrorClassifier` 会为 context 取消和超时返回稳定分类：`context_canceled`、`context_deadline_exceeded`。
 
@@ -738,8 +764,8 @@ func MetaToCtxMiddleware[R any]() builder.Middleware[R] {
 b.Use(MetaToCtxMiddleware[User]())
 
 // 在下游代码中获取
-func getMetaFromCtx(ctx context.Context) (builder.QueryMeta, bool) {
-    meta, ok := ctx.Value(queryMetaKey).(builder.QueryMeta)
+func getMetaFromCtx(ctx context.Context) (core.QueryMeta, bool) {
+    meta, ok := ctx.Value(queryMetaKey).(core.QueryMeta)
     return meta, ok
 }
 ```

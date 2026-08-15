@@ -1393,19 +1393,317 @@ func TestListQueryPage_WithHooks(t *testing.T) {
 	}
 }
 
-// TestListQueryPage_PanicRecovery 测试 List.QueryPage panic 恢复
-func TestListQueryPage_PanicRecovery(t *testing.T) {
+// TestListQueryPage_UnsupportedDataSource 测试 List.QueryPage 在未知数据源上返回 ErrDataSourceInvalid
+func TestListQueryPage_UnsupportedDataSource(t *testing.T) {
 	ctx := context.Background()
 
 	list := NewList[CursorTestEntity]()
-	list.SetDataSource(core.DataSource(99)) // 无效数据源，触发 panic
+	list.SetDataSource(core.DataSource(99))
 
 	result, err := list.QueryPage(ctx, WithCursorField("ID"), WithData(&core.DBProxy{}))
 
-	if err == nil {
-		t.Fatal("expected error from panic recovery, got nil")
+	if !errors.Is(err, ErrDataSourceInvalid) {
+		t.Fatalf("expected ErrDataSourceInvalid, got: %v", err)
 	}
 	if result != nil {
 		t.Errorf("expected nil result, got %v", result)
+	}
+}
+
+func TestGetQueryMetaUsesCursorOverlay(t *testing.T) {
+	b := NewGormBuilder[CursorTestEntity](core.NewDBProxyWithAdapters(core.NewGormAdapter(nil)))
+	b.SetCursorValue(uint32(1))
+
+	if got := b.GetQueryMeta().CursorValues; len(got) != 1 || got[0] != uint32(1) {
+		t.Fatalf("configured cursor: %v", got)
+	}
+
+	b.OverlayCursorValues([]any{uint32(9)})
+	if got := b.GetQueryMeta().CursorValues; len(got) != 1 || got[0] != uint32(9) {
+		t.Fatalf("overlay cursor: %v", got)
+	}
+
+	cloned := b.Clone()
+	if got := cloned.GetQueryMeta().CursorValues; len(got) != 1 || got[0] != uint32(1) {
+		t.Fatalf("clone should keep configured cursor, got %v", got)
+	}
+
+	b.finishCursorQuery()
+	if got := b.GetQueryMeta().CursorValues; len(got) != 1 || got[0] != uint32(1) {
+		t.Fatalf("finishCursorQuery should drop overlay, got %v", got)
+	}
+}
+
+func TestExecuteCursorWithMiddlewaresRestoresCachedNextCursor(t *testing.T) {
+	seen := make([][]any, 0, 2)
+	backendCalls := 0
+	stub := &cursorPipelineStub{
+		meta: core.QueryMeta{
+			DataSource:     core.Gorm,
+			Limit:          2,
+			NeedPagination: false,
+			IsCursorQuery:  true,
+			CursorFields:   []string{"id"},
+		},
+	}
+	stub.middlewares = []Middleware[CursorTestEntity]{
+		func(ctx context.Context, q Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
+			cursor := append([]any(nil), q.GetQueryMeta().CursorValues...)
+			seen = append(seen, cursor)
+			if len(cursor) > 0 {
+				return &core.CursorPageResult[CursorTestEntity]{
+					Items:            []*CursorTestEntity{{ID: 3, Name: "cached"}},
+					NextCursorValues: []any{uint32(3)},
+				}, nil
+			}
+			return next(ctx)
+		},
+	}
+
+	mc := newMiddlewareContext[CursorTestEntity](stub)
+	seq := mc.executeCursorWithMiddlewares(context.Background(), func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		backendCalls++
+		if !isFirstBatch || cursorValues != nil {
+			t.Fatalf("backend should only run the first batch, cursor=%v first=%v", cursorValues, isFirstBatch)
+		}
+		return []*CursorTestEntity{
+			{ID: 1, Name: "Alice"},
+			{ID: 2, Name: "Bob"},
+		}, []any{uint32(2)}, 0, false, nil
+	})
+
+	var names []string
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		names = append(names, item.Name)
+	}
+
+	if backendCalls != 1 {
+		t.Fatalf("expected backend once, got %d", backendCalls)
+	}
+	if len(names) != 3 || names[2] != "cached" {
+		t.Fatalf("expected first page plus cached item, got %v", names)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected two middleware observations, got %d", len(seen))
+	}
+	if len(seen[0]) != 0 {
+		t.Fatalf("first batch should start without cursor values, got %v", seen[0])
+	}
+	if len(seen[1]) != 1 || seen[1][0] != uint32(2) {
+		t.Fatalf("second batch should use restored cursor [2], got %v", seen[1])
+	}
+}
+
+type cursorPipelineStub struct {
+	meta        core.QueryMeta
+	overlay     []any
+	overlaySet  bool
+	middlewares []Middleware[CursorTestEntity]
+}
+
+func (s *cursorPipelineStub) GetQueryMeta() core.QueryMeta {
+	meta := s.meta
+	if !s.overlaySet {
+		return meta
+	}
+	if s.overlay == nil {
+		meta.CursorValues = nil
+		return meta
+	}
+	meta.CursorValues = append([]any(nil), s.overlay...)
+	return meta
+}
+
+func (s *cursorPipelineStub) OverlayCursorValues(values []any) {
+	s.overlaySet = true
+	if values == nil {
+		s.overlay = nil
+		return
+	}
+	s.overlay = append([]any(nil), values...)
+}
+
+func (s *cursorPipelineStub) getMiddlewares() []Middleware[CursorTestEntity] {
+	return s.middlewares
+}
+
+func (s *cursorPipelineStub) getQuerierRef() Querier[CursorTestEntity] { return s }
+func (s *cursorPipelineStub) getBeforeHook() BeforeQueryHook           { return nil }
+func (s *cursorPipelineStub) getAfterHook() AfterQueryHook[CursorTestEntity] {
+	return nil
+}
+func (s *cursorPipelineStub) setStartTime(time.Time) {}
+
+func (s *cursorPipelineStub) Use(Middleware[CursorTestEntity]) Querier[CursorTestEntity] {
+	return s
+}
+func (s *cursorPipelineStub) SetStart(uint32) Querier[CursorTestEntity]        { return s }
+func (s *cursorPipelineStub) SetLimit(uint32) Querier[CursorTestEntity]        { return s }
+func (s *cursorPipelineStub) SetNeedTotal(bool) Querier[CursorTestEntity]      { return s }
+func (s *cursorPipelineStub) SetTotalLimit(uint32) Querier[CursorTestEntity]   { return s }
+func (s *cursorPipelineStub) SetNeedPagination(bool) Querier[CursorTestEntity] { return s }
+func (s *cursorPipelineStub) SetFields(...string) Querier[CursorTestEntity]    { return s }
+func (s *cursorPipelineStub) SetBeforeQueryHook(BeforeQueryHook) Querier[CursorTestEntity] {
+	return s
+}
+func (s *cursorPipelineStub) SetAfterQueryHook(AfterQueryHook[CursorTestEntity]) Querier[CursorTestEntity] {
+	return s
+}
+func (s *cursorPipelineStub) SetCursorField(...string) Querier[CursorTestEntity] { return s }
+func (s *cursorPipelineStub) SetCursorValue(...any) Querier[CursorTestEntity]    { return s }
+func (s *cursorPipelineStub) QueryList(context.Context) (*core.ListResult[CursorTestEntity], error) {
+	return nil, nil
+}
+func (s *cursorPipelineStub) QueryCursor(context.Context) iter.Seq2[*CursorTestEntity, error] {
+	return nil
+}
+func (s *cursorPipelineStub) QueryPage(context.Context) (*core.CursorPageResult[CursorTestEntity], error) {
+	return nil, nil
+}
+func (s *cursorPipelineStub) Explain(context.Context) (string, error) { return "", nil }
+
+// bareCursorPipelineStub 实现 Querier 与 middlewareProvider，但不实现 CursorValueOverlayer，
+// 用于验证自定义 Querier 未接入批次游标覆盖时的静默降级行为。
+type bareCursorPipelineStub struct {
+	meta        core.QueryMeta
+	middlewares []Middleware[CursorTestEntity]
+}
+
+var _ Querier[CursorTestEntity] = (*bareCursorPipelineStub)(nil)
+
+func (s *bareCursorPipelineStub) GetQueryMeta() core.QueryMeta { return s.meta }
+func (s *bareCursorPipelineStub) getMiddlewares() []Middleware[CursorTestEntity] {
+	return s.middlewares
+}
+func (s *bareCursorPipelineStub) getQuerierRef() Querier[CursorTestEntity] { return s }
+func (s *bareCursorPipelineStub) getBeforeHook() BeforeQueryHook           { return nil }
+func (s *bareCursorPipelineStub) getAfterHook() AfterQueryHook[CursorTestEntity] {
+	return nil
+}
+func (s *bareCursorPipelineStub) setStartTime(time.Time) {}
+
+func (s *bareCursorPipelineStub) Use(Middleware[CursorTestEntity]) Querier[CursorTestEntity] {
+	return s
+}
+func (s *bareCursorPipelineStub) SetStart(uint32) Querier[CursorTestEntity]        { return s }
+func (s *bareCursorPipelineStub) SetLimit(uint32) Querier[CursorTestEntity]        { return s }
+func (s *bareCursorPipelineStub) SetNeedTotal(bool) Querier[CursorTestEntity]      { return s }
+func (s *bareCursorPipelineStub) SetTotalLimit(uint32) Querier[CursorTestEntity]   { return s }
+func (s *bareCursorPipelineStub) SetNeedPagination(bool) Querier[CursorTestEntity] { return s }
+func (s *bareCursorPipelineStub) SetFields(...string) Querier[CursorTestEntity]    { return s }
+func (s *bareCursorPipelineStub) SetBeforeQueryHook(BeforeQueryHook) Querier[CursorTestEntity] {
+	return s
+}
+func (s *bareCursorPipelineStub) SetAfterQueryHook(AfterQueryHook[CursorTestEntity]) Querier[CursorTestEntity] {
+	return s
+}
+func (s *bareCursorPipelineStub) SetCursorField(...string) Querier[CursorTestEntity] { return s }
+func (s *bareCursorPipelineStub) SetCursorValue(...any) Querier[CursorTestEntity]    { return s }
+func (s *bareCursorPipelineStub) QueryList(context.Context) (*core.ListResult[CursorTestEntity], error) {
+	return nil, nil
+}
+func (s *bareCursorPipelineStub) QueryCursor(context.Context) iter.Seq2[*CursorTestEntity, error] {
+	return nil
+}
+func (s *bareCursorPipelineStub) QueryPage(context.Context) (*core.CursorPageResult[CursorTestEntity], error) {
+	return nil, nil
+}
+func (s *bareCursorPipelineStub) Explain(context.Context) (string, error) { return "", nil }
+
+// TestExecuteCursorSilentlyDegradesWithoutOverlay 验证自定义 Querier 未实现 CursorValueOverlayer 时，
+// QueryCursor 仍可正常迭代（静默降级），中间件观察到的 CursorValues 不随批次推进被注入。
+func TestExecuteCursorSilentlyDegradesWithoutOverlay(t *testing.T) {
+	observed := make([][]any, 0, 2)
+	stub := &bareCursorPipelineStub{
+		meta: core.QueryMeta{
+			DataSource:    core.Gorm,
+			Limit:         2,
+			IsCursorQuery: true,
+			CursorFields:  []string{"id"},
+		},
+		middlewares: []Middleware[CursorTestEntity]{
+			func(ctx context.Context, q Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
+				observed = append(observed, append([]any(nil), q.GetQueryMeta().CursorValues...))
+				return next(ctx)
+			},
+		},
+	}
+
+	mc := newMiddlewareContext[CursorTestEntity](stub)
+	seq := mc.executeCursorWithMiddlewares(context.Background(), func(ctx context.Context, cv []any, first bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		if !first {
+			return nil, nil, 0, false, nil // 第二批空，终止迭代
+		}
+		return []*CursorTestEntity{{ID: 1}, {ID: 2}}, []any{uint32(2)}, 0, false, nil
+	})
+
+	seen := 0
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_ = item
+		seen++
+	}
+	if seen != 2 {
+		t.Fatalf("expected 2 items, got %d", seen)
+	}
+	if len(observed) != 2 {
+		t.Fatalf("expected 2 middleware observations, got %d", len(observed))
+	}
+	for i, cv := range observed {
+		if cv != nil {
+			t.Fatalf("batch %d: expected nil CursorValues without overlay, got %v", i, cv)
+		}
+	}
+}
+
+// TestExecuteCursorPropagatesPreciseHasMore 验证 QueryCursor 批次的 CursorPageResult.HasMore
+// 来自 cursorQueryFn 的精确 more，而非 len(batch)>=batchSize 启发式。
+// 构造恰好返回 batchSize 条但 more=false 的场景，区分新旧实现。
+func TestExecuteCursorPropagatesPreciseHasMore(t *testing.T) {
+	var observedHasMore []bool
+	stub := &cursorPipelineStub{
+		meta: core.QueryMeta{
+			DataSource:    core.Gorm,
+			Limit:         2,
+			IsCursorQuery: true,
+			CursorFields:  []string{"id"},
+			// NeedPagination 为零值 false：多批次迭代，首批满批后还会进入第二批
+		},
+		middlewares: []Middleware[CursorTestEntity]{
+			func(ctx context.Context, q Querier[CursorTestEntity], next func(context.Context) (core.Result[CursorTestEntity], error)) (core.Result[CursorTestEntity], error) {
+				result, err := next(ctx)
+				if result != nil {
+					observedHasMore = append(observedHasMore, result.GetHasMore())
+				}
+				return result, err
+			},
+		},
+	}
+
+	mc := newMiddlewareContext[CursorTestEntity](stub)
+	seq := mc.executeCursorWithMiddlewares(context.Background(), func(ctx context.Context, cv []any, first bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		if !first {
+			return nil, nil, 0, false, nil // 第二批空，终止迭代
+		}
+		// 首批恰好返回 batchSize 条，但 more=false（无更多数据）
+		return []*CursorTestEntity{{ID: 1}, {ID: 2}}, []any{uint32(2)}, 0, false, nil
+	})
+
+	for item, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		_ = item
+	}
+	if len(observedHasMore) == 0 {
+		t.Fatal("middleware did not observe a result")
+	}
+	if observedHasMore[0] {
+		t.Fatalf("expected first batch HasMore=false (precise more from fetchBatch), got %v", observedHasMore)
 	}
 }

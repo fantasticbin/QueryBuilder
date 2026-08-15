@@ -17,7 +17,7 @@ type QueryMeta struct {
 	TotalLimit     uint32     // 总数统计上限，0 表示精确统计
 	Fields         []string   // 查询字段投影
 	CursorFields   []string   // 游标分页排序字段列表
-	CursorValues   []any      // 游标初始值（外部传入，用于断点续查/App分页场景）
+	CursorValues   []any      // 当前游标位置：调用方 SetCursorValue，或 QueryCursor 当前批次覆盖值
 	StartTime      time.Time  // 查询开始时间
 	DataSource     DataSource // 数据源类型
 	NeedTotal      bool       // 是否需要查询总数
