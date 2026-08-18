@@ -171,6 +171,37 @@ type Querier[R any] interface {
 | `builder.go`、`core/data.go`、`agg/spec.go` 中的 `Err*` | Go blog：[Working with Errors](https://go.dev/blog/go1.13-errors)；Dave Cheney 等关于哨兵错误（sentinel）与错误包装（wrapping）的讨论 |
 | `util/util.go`：`PanicToError`、`panicError.Unwrap` | 同上；`runtime/debug.Stack` 用于并发路径上的调用栈 |
 
+### 2.8 位掩码标志（Bitmask Flags）
+
+**是什么**  
+用 `1 << iota` 让每个常量占据独立比特位，多个特征可用 `|` 组合进一个整数，用 `&` 按位检测，替代「一堆 bool 字段」的结构体，节省空间且便于整体传递与序列化。
+
+**项目中的形态**
+
+```go
+type PlanFlags uint64
+
+const (
+    PlanHasDistinctMetrics PlanFlags = 1 << iota
+    PlanHasConditionalMetrics
+    PlanHasDateGroups
+    PlanUsesMongoFacet
+    // ...
+)
+
+// 组合：plan.Flags |= PlanHasDateGroups
+// 检测：plan.Has(PlanUsesMongoFacet)
+func (f PlanFlags) Has(flag PlanFlags) bool {
+    return flag != 0 && f&flag == flag
+}
+```
+
+`AnalyzeSpec` 静态分析聚合规范后，把「是否有去重指标 / 是否走 Mongo facet / 是否需要客户端后处理」等执行特征一次性压缩进 `Plan.Flags`，供中间件与执行层按需探测；`PlanFlags` 直接作为 `Plan` 的字段随 JSON / BSON 序列化。
+
+| 项目出处 | 理论/社区出处 |
+| --- | --- |
+| `agg/spec.go`：`PlanFlags`、`PlanFlags.Has`、`AnalyzeSpec` | Go 规范中的 [iota](https://go.dev/ref/spec#Iota)；标准库同类用法：`log.Logger` 的 flags、`os.FileMode` 位或组合；位标志（bit flags）惯用法 |
+
 ---
 
 ## 3. 设计模式
@@ -457,6 +488,7 @@ ES PIT 的关闭使用 `context.WithTimeout(context.Background(), ...)`，与请
 | 语言 | 小接口组合                           | `builder.go` `Querier*` |
 | 语言 | 结构体嵌入                           | `builder` / `*Builder` / `ESPITPageResult` |
 | 语言 | 哨兵错误与错误链                     | `builder.go`、`core/data.go`、`agg/spec.go` |
+| 语言 | 位掩码标志（`1 << iota`）            | `agg/spec.go` `PlanFlags` |
 | 模式 | 适配器（Adapter）                    | `core/data.go` |
 | 模式 | 工厂（Factory）                      | `NewBuilder` |
 | 模式 | 模板方法（Template Method）          | `QueryList` + `doQuery` |
