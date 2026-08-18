@@ -231,7 +231,7 @@ result, err := list.Query(ctx, opts...)
 ```go
 // 直接使用构建器
 b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
-b.SetFields("id", "name", "email")
+b.SetFields("id", "name", "email") // 仅允许标识符或点分路径
 result, err := b.QueryList(ctx)
 
 // 通过 List 选项
@@ -272,6 +272,8 @@ b.SetAfterQueryHook(func(ctx context.Context, result core.Result[User], err erro
 
 result, err := b.QueryList(ctx)
 ```
+
+`QueryCursor` 的 `AfterQueryHook` **按批次回调**，每次只带上本批数据，全量导出不会再把整段流装进内存。`QueryList` / `QueryPage` 仍是每次调用触发一次。
 
 ### 超时控制
 
@@ -707,7 +709,7 @@ func (s otelQuerySpan) EndQuery(ctx context.Context, event middleware.QueryEvent
 }
 ```
 
-默认属性只包含低敏查询维度，例如数据源、查询模式、分页标记、start/limit、结果类型、成功状态和错误分类。QueryBuilder 不会自动暴露 filter/sort 或 cursor values；如需记录业务维度，请在确认安全后通过 `AttributeProvider` 显式补充。
+默认属性只包含低敏查询维度，例如数据源、查询模式、分页标记、start/limit、结果类型、成功状态和错误分类。QueryBuilder 不会自动暴露 filter/sort 或 cursor values；分发前也会清空 `QueryEvent.Meta.CursorValues`。如需记录业务维度，请在确认安全后通过 `AttributeProvider` 显式补充。
 
 行为说明：
 
@@ -1238,8 +1240,10 @@ b.SetCursorField("created_at", "_id")
 b.SetLimit(20)
 
 page, err := b.QueryPage(ctx)
-// PIT 自动打开，HasMore=false 时自动关闭
+// 首页打开 PIT，同一 Builder 在 HasMore=true 时复用；HasMore=false 或出错时关闭
 ```
+
+未设置 `SetCursorValue` 时，`QueryPage` 与 GORM / MongoDB 一样，可以把 `SetStart` 当作单字段数值游标。
 
 > **注意：** 如果需要显式控制 PIT（例如跨请求分页、客户端管理 PIT ID 的场景），请使用 `QueryPageWithPIT` —— 参见下方 [ElasticSearch 跨请求分页](#elasticsearch-跨请求分页pit--search_after) 章节。
 

@@ -423,7 +423,7 @@ func TestGormBuilderQueryPageDefaultCursorField(t *testing.T) {
 	}
 	db, state := newGormTestDB(t, rows, 0)
 	builder := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil))
-	builder.SetLimit(1)
+	builder.SetLimit(1).SetNeedTotal(false)
 
 	result, err := builder.QueryPage(context.Background())
 	qbtest.AssertNoError(t, err)
@@ -433,8 +433,8 @@ func TestGormBuilderQueryPageDefaultCursorField(t *testing.T) {
 	if meta.IsCursorQuery {
 		t.Fatal("QueryPage should restore IsCursorQuery after execution")
 	}
-	if len(meta.CursorFields) != 1 || meta.CursorFields[0] != "id" {
-		t.Fatalf("expected default Gorm cursor field id, got %+v", meta.CursorFields)
+	if len(meta.CursorFields) != 0 {
+		t.Fatalf("auto-injected cursor fields should be cleared after QueryPage, got %+v", meta.CursorFields)
 	}
 
 	query := assertAnyRecordedSQL(t, state, func(query gormRecordedQuery) bool {
@@ -483,7 +483,7 @@ func TestGormBuilderQueryPageCursorConditions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db, state := newGormTestDB(t, tt.resultRows, 0)
 			builder := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil))
-			builder.SetCursorField(tt.fields...).SetCursorValue(tt.values...).SetLimit(1)
+			builder.SetCursorField(tt.fields...).SetCursorValue(tt.values...).SetLimit(1).SetNeedTotal(false)
 
 			result, err := builder.QueryPage(context.Background())
 			qbtest.AssertNoError(t, err)
@@ -515,7 +515,7 @@ func TestGormBuilderQueryPageProjectionIncludesCursorFields(t *testing.T) {
 	rows := []*GormTestEntity{{ID: 1, Name: "Alice", CreatedAt: 100, Status: "active"}}
 	db, state := newGormTestDB(t, rows, 0)
 	builder := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil))
-	builder.SetFields("name").SetCursorField("id").SetLimit(1)
+	builder.SetFields("name").SetCursorField("id").SetLimit(1).SetNeedTotal(false)
 
 	result, err := builder.QueryPage(context.Background())
 	qbtest.AssertNoError(t, err)

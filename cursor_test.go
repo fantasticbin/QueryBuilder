@@ -1434,6 +1434,109 @@ func TestGetQueryMetaUsesCursorOverlay(t *testing.T) {
 	}
 }
 
+func TestFinishCursorQueryClearsAutoCursorFields(t *testing.T) {
+	b := NewGormBuilder[CursorTestEntity](core.NewDBProxyWithAdapters(core.NewGormAdapter(nil)))
+	if err := b.ensureDefaultCursorField(); err != nil {
+		t.Fatalf("ensure default cursor field: %v", err)
+	}
+	if len(b.builder.cursorFields) != 1 || b.builder.cursorFields[0] != "id" {
+		t.Fatalf("expected auto id cursor field, got %v", b.builder.cursorFields)
+	}
+
+	b.finishCursorQuery()
+	if len(b.builder.cursorFields) != 0 {
+		t.Fatalf("auto cursor fields should be cleared after finish, got %v", b.builder.cursorFields)
+	}
+
+	b.SetCursorField("created_at")
+	b.finishCursorQuery()
+	if len(b.builder.cursorFields) != 1 || b.builder.cursorFields[0] != "created_at" {
+		t.Fatalf("explicit cursor fields should survive finish, got %v", b.builder.cursorFields)
+	}
+}
+
+func TestResolveQueryTotalTreatsZeroAsExactCount(t *testing.T) {
+	if got := resolveQueryTotal(true, 3, 0); got != 0 {
+		t.Fatalf("needTotal with count 0 should stay 0, got %d", got)
+	}
+	if got := resolveQueryTotal(false, 3, 0); got != 3 {
+		t.Fatalf("needTotal=false should fall back to item count, got %d", got)
+	}
+	if got := resolveQueryTotal(true, 3, 10); got != 10 {
+		t.Fatalf("needTotal should use count result, got %d", got)
+	}
+}
+
+func TestExecuteCursorAfterHookIsPerBatch(t *testing.T) {
+	var hookSizes []int
+	stub := &cursorPipelineStub{
+		meta: core.QueryMeta{Limit: 2, NeedPagination: false, IsCursorQuery: true},
+	}
+	mc := &middlewareContext[CursorTestEntity]{
+		querierRef: stub,
+		afterHook: func(ctx context.Context, result core.Result[CursorTestEntity], err error) {
+			hookSizes = append(hookSizes, len(result.GetItems()))
+		},
+		limit: 2,
+		onStartTime: func(time.Time) {
+		},
+	}
+
+	seq := mc.executeCursorWithMiddlewares(context.Background(), func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		if isFirstBatch {
+			return []*CursorTestEntity{{ID: 1}, {ID: 2}}, []any{uint32(2)}, 3, false, nil
+		}
+		return []*CursorTestEntity{{ID: 3}}, []any{uint32(3)}, 0, false, nil
+	})
+
+	var n int
+	for _, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		n++
+	}
+	if n != 3 {
+		t.Fatalf("expected 3 items, got %d", n)
+	}
+	if len(hookSizes) != 2 || hookSizes[0] != 2 || hookSizes[1] != 1 {
+		t.Fatalf("expected per-batch hook sizes [2 1], got %v", hookSizes)
+	}
+}
+
+func TestExecuteCursorAfterHookFiresOnceOnEmptyResult(t *testing.T) {
+	var hookSizes []int
+	var hookErr error
+	stub := &cursorPipelineStub{
+		meta: core.QueryMeta{Limit: 2, NeedPagination: false, IsCursorQuery: true},
+	}
+	mc := &middlewareContext[CursorTestEntity]{
+		querierRef: stub,
+		afterHook: func(ctx context.Context, result core.Result[CursorTestEntity], err error) {
+			hookSizes = append(hookSizes, len(result.GetItems()))
+			hookErr = err
+		},
+		limit: 2,
+		onStartTime: func(time.Time) {
+		},
+	}
+
+	seq := mc.executeCursorWithMiddlewares(context.Background(), func(ctx context.Context, cursorValues []any, isFirstBatch bool) ([]*CursorTestEntity, []any, int64, bool, error) {
+		return nil, nil, 0, false, nil
+	})
+	for _, err := range seq {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if hookErr != nil {
+		t.Fatalf("expected nil hook error, got %v", hookErr)
+	}
+	if len(hookSizes) != 1 || hookSizes[0] != 0 {
+		t.Fatalf("expected one empty-result hook, got %v", hookSizes)
+	}
+}
+
 func TestExecuteCursorWithMiddlewaresRestoresCachedNextCursor(t *testing.T) {
 	seen := make([][]any, 0, 2)
 	backendCalls := 0

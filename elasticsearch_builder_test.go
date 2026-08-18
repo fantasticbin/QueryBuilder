@@ -248,6 +248,32 @@ func TestElasticSearchBuilderQueryPageWithPITRejectsCursorWithoutPITID(t *testin
 	}
 }
 
+func TestElasticSearchBuilderCleanupCursorQueryKeepsPITWhenHasMore(t *testing.T) {
+	es := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxyWithAdapters(), "idx")
+	es.cursorPitID = "pit-keep"
+	es.cleanupCursorQuery(&core.CursorPageResult[ElasticTestEntity]{HasMore: true}, nil)
+	if es.cursorPitID != "pit-keep" {
+		t.Fatalf("expected PIT to stay open when HasMore=true, got %q", es.cursorPitID)
+	}
+
+	es.cleanupCursorQuery(&core.CursorPageResult[ElasticTestEntity]{HasMore: false}, nil)
+	if es.cursorPitID != "" {
+		t.Fatalf("expected PIT to close when HasMore=false, got %q", es.cursorPitID)
+	}
+
+	es.cursorPitID = "pit-err"
+	es.cleanupCursorQuery(&core.CursorPageResult[ElasticTestEntity]{HasMore: true}, errors.New("query failed"))
+	if es.cursorPitID != "" {
+		t.Fatalf("expected PIT to close on error, got %q", es.cursorPitID)
+	}
+
+	es.cursorPitID = "pit-cursor"
+	es.cleanupCursorQuery(nil, nil)
+	if es.cursorPitID != "" {
+		t.Fatalf("expected QueryCursor cleanup (nil result) to close PIT, got %q", es.cursorPitID)
+	}
+}
+
 func TestElasticSearchBuilderDefaults(t *testing.T) {
 	b := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxy(nil, nil, nil), "test_index")
 	if b.builder.dataSource != ElasticSearch {

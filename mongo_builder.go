@@ -183,6 +183,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 			return err
 		}
 		defer func(cursor *mongo.Cursor, ctx context.Context) {
+			// 游标已由 All() 消费完，Close 错误无实际意义，忽略以免掩盖查询结果
 			_ = cursor.Close(ctx)
 		}(cursor, ctx)
 
@@ -415,6 +416,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 			return err
 		}
 		defer func(cursor *mongo.Cursor, ctx context.Context) {
+			// 游标已逐条解码完，Close 错误无实际意义，忽略以免掩盖解码/迭代错误
 			_ = cursor.Close(ctx)
 		}(cursor, ctx)
 

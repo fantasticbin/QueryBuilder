@@ -3,7 +3,9 @@ package builder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
+	"regexp"
 	"time"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
@@ -40,6 +42,8 @@ var (
 	ErrPITRequiresESBuilder = errors.New("QueryPageWithPIT requires ElasticSearchBuilder")
 	// ErrFetchBatchCursorMissing 游标批次非空时未返回下一页游标值
 	ErrFetchBatchCursorMissing = errors.New("fetchBatch must return nextCursorValues when batch is not empty")
+	// ErrInvalidField 字段投影名不是安全的标识符或点分路径
+	ErrInvalidField = errors.New("invalid field name")
 )
 
 // NewGormAdapter 创建 GORM 数据源适配器
@@ -184,6 +188,7 @@ type cursorConfig struct {
 	isCursorQuery         bool              // 是否为游标查询模式
 	isPITQuery            bool              // 是否为 Elasticsearch PIT + search_after 查询模式
 	cursorValueOverlaySet bool              // 是否已设置当前批次游标覆盖
+	cursorFieldsAuto      bool              // 游标字段是否由 ensureDefaultCursorField 自动注入
 }
 
 // clone 返回 cursorConfig 的深拷贝
@@ -406,6 +411,9 @@ func (b *builder[B, R]) prepareAndValidate() error {
 
 	// fields 自动清洗
 	b.fields = sanitizeFields(b.fields)
+	if err := validateFieldNames(b.fields); err != nil {
+		return err
+	}
 	if b.isCursorQuery {
 		if err := b.ensureDefaultCursorField(); err != nil {
 			return err
@@ -439,6 +447,19 @@ func (b *builder[B, R]) getParsedCursorFields() []cursorSortField {
 		b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
 	}
 	return b.parsedCursorFields
+}
+
+var fieldNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+
+// validateFieldNames 拒绝不能安全用于投影的字段名（原始表达式、SQL 片段等）
+func validateFieldNames(fields []string) error {
+	var errs []error
+	for _, field := range fields {
+		if !fieldNamePattern.MatchString(field) {
+			errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidField, field))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // sanitizeFields 对字符串切片去重并过滤空串，保留首次出现顺序
@@ -541,6 +562,7 @@ func (b *builder[B, R]) SetAfterQueryHook(hook AfterQueryHook[R]) B {
 
 // SetCursorField 设置游标分页排序字段（支持多字段）
 func (b *builder[B, R]) SetCursorField(fields ...string) B {
+	b.cursorFieldsAuto = false
 	b.cursorFields = fields
 	b.parsedCursorFields = parseCursorSortFields(fields)
 	return b.selfRef
@@ -564,6 +586,11 @@ func (b *builder[B, R]) beginQueryMode(isCursorQuery bool) {
 func (b *builder[B, R]) finishCursorQuery() {
 	b.isCursorQuery = false
 	b.clearCursorValueOverlay()
+	if b.cursorFieldsAuto {
+		b.cursorFields = nil
+		b.parsedCursorFields = nil
+		b.cursorFieldsAuto = false
+	}
 }
 
 // ensureDefaultCursorField 在游标查询模式下为未显式设置 cursorFields 的场景自动追加唯一 tie-breaker
@@ -580,6 +607,7 @@ func (b *builder[B, R]) ensureDefaultCursorField() error {
 		b.cursorFields = []string{"_shard_doc"}
 	}
 	b.parsedCursorFields = parseCursorSortFields(b.cursorFields)
+	b.cursorFieldsAuto = true
 	return nil
 }
 

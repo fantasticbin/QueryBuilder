@@ -212,7 +212,7 @@ func ObservabilityMiddleware[R any](opts ObservabilityOptions) builder.Middlewar
 		if traceEnabled {
 			ctx, span = safeStartQuery(ctx, opts.Tracer, QuerySpanStart{
 				Operation:  operation,
-				Meta:       meta,
+				Meta:       redactQueryMeta(meta),
 				StartTime:  startTime,
 				Attributes: cloneAttributes(attrs),
 			})
@@ -356,7 +356,7 @@ func buildQueryEvent[R any](input queryEventBuildInput[R]) (event QueryEvent) {
 
 	event = QueryEvent{
 		Operation:  input.operation,
-		Meta:       input.meta,
+		Meta:       redactQueryMeta(input.meta),
 		StartTime:  input.startTime,
 		Error:      eventErr,
 		ErrorType:  safeErrorClass(input.errorClassifier, eventErr),
@@ -372,6 +372,15 @@ func buildQueryEvent[R any](input queryEventBuildInput[R]) (event QueryEvent) {
 	}
 	event.Attributes = append(event.Attributes, resultAttributes(event, hasResult)...)
 	return event
+}
+
+// redactQueryMeta 去掉续查 token，避免 Logger 打印 event.Meta 时泄露 CursorValues
+func redactQueryMeta(meta core.QueryMeta) core.QueryMeta {
+	if len(meta.CursorValues) == 0 {
+		return meta
+	}
+	meta.CursorValues = nil
+	return meta
 }
 
 // defaultQueryAttributes 返回官方默认低敏属性集合

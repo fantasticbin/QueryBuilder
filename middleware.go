@@ -242,35 +242,43 @@ func (mc *middlewareContext[R]) executeCursorWithMiddlewares(
 		&cursorTotal,
 	)
 
-	// 包装迭代器，在遍历结束后执行 AfterQueryHook
+	// 包装迭代器：AfterQueryHook 按批回调，只保留当前批次，避免全量导出时把流式结果再装进内存
 	return func(yield func(*R, error) bool) {
-		var allResults []*R
-		if mc.afterHook != nil {
-			allResults = []*R{}
+		var batchItems []*R
+		hooked := false
+		invokeBatchHook := func(err error) {
+			if mc.afterHook == nil {
+				return
+			}
+			mc.invokeAfterHook(ctx, &core.CursorPageResult[R]{
+				Items: batchItems,
+				Total: mc.resolveResultTotal(batchItems, cursorTotal),
+			}, err)
+			batchItems = nil
+			hooked = true
 		}
-		var lastErr error
 
 		for item, err := range innerIter {
 			if err != nil {
-				lastErr = err
-				if !yield(nil, err) {
-					break
-				}
-				break
+				invokeBatchHook(err)
+				yield(nil, err)
+				return
 			}
 			if mc.afterHook != nil {
-				allResults = append(allResults, item)
+				batchItems = append(batchItems, item)
 			}
 			if !yield(item, nil) {
-				break
+				invokeBatchHook(nil)
+				return
+			}
+			if mc.afterHook != nil && len(batchItems) >= batchSize {
+				invokeBatchHook(nil)
 			}
 		}
-
-		// 执行后置钩子
-		mc.invokeAfterHook(ctx, &core.ListResult[R]{
-			Items: allResults,
-			Total: mc.resolveResultTotal(allResults, cursorTotal),
-		}, lastErr)
+		// 尾批不足一批，或空结果：与 QueryList/QueryPage 一样至少回调一次
+		if len(batchItems) > 0 || (mc.afterHook != nil && !hooked) {
+			invokeBatchHook(nil)
+		}
 	}
 }
 
@@ -326,10 +334,15 @@ func (mc *middlewareContext[R]) invokeAfterHook(ctx context.Context, result core
 
 // resolveResultTotal 根据中间件上下文的 needTotal 和实际查询结果决定最终的 Total 值
 func (mc *middlewareContext[R]) resolveResultTotal(list []*R, queryTotal int64) int64 {
-	if mc.needTotal && queryTotal > 0 {
+	return resolveQueryTotal(mc.needTotal, len(list), queryTotal)
+}
+
+// resolveQueryTotal 在 needTotal 时采用 COUNT 结果（含 0）；未请求总数时回落到本批条数
+func resolveQueryTotal(needTotal bool, itemCount int, queryTotal int64) int64 {
+	if needTotal {
 		return queryTotal
 	}
-	return int64(len(list))
+	return int64(itemCount)
 }
 
 // normalizeCursorPageResult 根据 batchSize 和实际返回的 Items 数量调整 HasMore 和 NextCursorValues 字段

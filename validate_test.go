@@ -282,6 +282,26 @@ func TestSanitizeFields_FilterEmpty_Gorm(t *testing.T) {
 	qbtest.AssertStringSliceEqual(t, capturedFields, expected)
 }
 
+func TestValidateFieldNamesRejectsSQLFragments(t *testing.T) {
+	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+	g.SetFields("id", "name; drop table users")
+
+	_, err := g.QueryList(context.Background())
+	if !errors.Is(err, ErrInvalidField) {
+		t.Fatalf("expected ErrInvalidField, got %v", err)
+	}
+}
+
+func TestValidateFieldNamesAllowsDottedPaths(t *testing.T) {
+	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil))
+	g.SetFields("profile.name")
+	g.Use(qbtest.EmptyListMiddleware[ValidateTestEntity, Querier[ValidateTestEntity]]())
+
+	if _, err := g.QueryList(context.Background()); err != nil {
+		t.Fatalf("dotted field should be accepted, got %v", err)
+	}
+}
+
 func TestSanitizeFields_FilterEmpty_Mongo(t *testing.T) {
 	m := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil))
 	m.SetFields("id", "", "name", "")

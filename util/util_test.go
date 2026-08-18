@@ -84,3 +84,13 @@ func TestWaitAndGoWithContextRecoversPanic(t *testing.T) {
 		t.Fatalf("unexpected panic error: %v", err)
 	}
 }
+
+func TestWaitAndGoWithContextRecoversErrorPanicPreservesChain(t *testing.T) {
+	root := errors.New("root cause")
+	err := WaitAndGoWithContext(context.Background(), func(context.Context) error {
+		panic(root)
+	})
+	if !errors.Is(err, root) {
+		t.Fatalf("expected unwrapped panic error, got %v", err)
+	}
+}

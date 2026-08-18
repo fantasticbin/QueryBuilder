@@ -3,7 +3,6 @@ package util
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
 	"strings"
 	"time"
 
@@ -89,7 +88,7 @@ func GoWithNotify(ctx context.Context, fn ...ConcurrentTask) (<-chan TaskEvent, 
 			start := time.Now()
 			defer func() {
 				if r := recover(); r != nil {
-					err = fmt.Errorf("panic recovered: %+v\n%s", r, string(debug.Stack()))
+					err = PanicToError("panic recovered", r)
 				}
 				events <- TaskEvent{
 					Index:    i,

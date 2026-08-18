@@ -176,15 +176,19 @@ func (e *ElasticSearchBuilder[R]) doCursorQuery(
 	probeHasMore bool,
 ) ([]*R, []any, int64, bool, error) {
 	if probeHasMore {
-		// QueryPage 保持原语义：只使用显式 cursorValues，并按其是否为空判断是否统计总数
-		cursorValues = e.builder.cursorValues
-		isFirstBatch = len(e.builder.cursorValues) == 0
+		// QueryPage 使用与 GORM/Mongo 相同的初始游标解析（显式 cursorValues 优先，否则 start）
+		isFirstBatch = len(cursorValues) == 0
 	}
 	return e.doElasticCursorQuery(ctx, cursorValues, isFirstBatch, probeHasMore, &e.cursorPitID)
 }
 
 // cleanupCursorQuery 清理 QueryCursor/QueryPage 内部自动管理的 PIT
-func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {
+// QueryPage 在 HasMore=true 且成功时保留 PIT，供同一 Builder 实例续页
+// QueryCursor 结束时传入 nil result，始终关闭
+func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResult[R], err error) {
+	if err == nil && result != nil && result.HasMore {
+		return
+	}
 	e.closePIT(e.cursorPitID)
 	e.cursorPitID = ""
 }
@@ -236,7 +240,7 @@ func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.E
 
 		return &core.CursorPageResult[R]{
 			Items:            batchList,
-			Total:            batchTotal,
+			Total:            resolveQueryTotal(e.builder.needTotal, len(batchList), batchTotal),
 			HasMore:          batchHasMore,
 			NextCursorValues: batchNextCursorValues,
 		}, nil

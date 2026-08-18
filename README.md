@@ -231,7 +231,7 @@ Use `SetFields` to select only specific fields, reducing bandwidth and memory us
 ```go
 // Direct builder usage
 b := builder.NewGormBuilder[User](builder.NewDBProxyWithAdapters(builder.NewGormAdapter(db)))
-b.SetFields("id", "name", "email")
+b.SetFields("id", "name", "email") // identifiers or dotted paths only
 result, err := b.QueryList(ctx)
 
 // Via List options
@@ -272,6 +272,8 @@ b.SetAfterQueryHook(func(ctx context.Context, result core.Result[User], err erro
 
 result, err := b.QueryList(ctx)
 ```
+
+`QueryCursor` invokes `AfterQueryHook` **once per fetched batch** with that batch's items only, so full-table export does not buffer the entire stream. `QueryList` / `QueryPage` still invoke it once per call.
 
 ### Timeout Control
 
@@ -709,7 +711,7 @@ func (s otelQuerySpan) EndQuery(ctx context.Context, event middleware.QueryEvent
 }
 ```
 
-Default attributes only include low-sensitive query dimensions such as data source, query mode, pagination flags, start/limit, result kind, success, and error type. QueryBuilder does not automatically expose filter/sort or cursor values; add business dimensions explicitly through `AttributeProvider` when they are safe and useful.
+Default attributes only include low-sensitive query dimensions such as data source, query mode, pagination flags, start/limit, result kind, success, and error type. QueryBuilder does not automatically expose filter/sort or cursor values; `QueryEvent.Meta.CursorValues` is also cleared before dispatch. Add business dimensions explicitly through `AttributeProvider` when they are safe and useful.
 
 Behavior notes:
 
@@ -1240,8 +1242,11 @@ b.SetCursorField("created_at", "_id")
 b.SetLimit(20)
 
 page, err := b.QueryPage(ctx)
-// PIT is automatically opened and closed when HasMore=false
+// PIT is opened on the first page and kept on this builder while HasMore=true;
+// it is closed when HasMore=false or the query errors.
 ```
+
+`QueryPage` also honors `SetStart` as a single-field numeric cursor, same as GORM and MongoDB, when `SetCursorValue` is not set.
 
 > **Note:** For scenarios where you need explicit PIT control (e.g., cross-request pagination with client-managed PIT ID), use `QueryPageWithPIT` instead — see [Elasticsearch Cross-Request Pagination](#elasticsearch-cross-request-pagination-pit--search_after) below.
 

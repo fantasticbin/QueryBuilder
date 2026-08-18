@@ -504,12 +504,13 @@ func TestObservabilityMiddlewarePITCursorEvent(t *testing.T) {
 
 func TestObservabilityMiddlewareCursorPageAndSensitiveDefaults(t *testing.T) {
 	logger := &recordingLogger{}
+	tracer := &recordingTracer{}
 	meta := baseMeta()
 	meta.IsCursorQuery = true
 	meta.CursorFields = []string{"id"}
 	meta.CursorValues = []any{123}
 	mq := &mockQuerier[testUser]{meta: meta}
-	mw := ObservabilityMiddleware[testUser](ObservabilityOptions{Logger: logger})
+	mw := ObservabilityMiddleware[testUser](ObservabilityOptions{Logger: logger, Tracer: tracer})
 
 	_, err := mw(context.Background(), mq, func(ctx context.Context) (core.Result[testUser], error) {
 		return &core.CursorPageResult[testUser]{
@@ -538,6 +539,18 @@ func TestObservabilityMiddlewareCursorPageAndSensitiveDefaults(t *testing.T) {
 	if hasAttribute(event.Attributes, "querybuilder.cursor_values") ||
 		hasAttribute(event.Attributes, "querybuilder.next_cursor_values") {
 		t.Fatalf("default attributes must not expose cursor values: %+v", event.Attributes)
+	}
+	if len(event.Meta.CursorValues) != 0 {
+		t.Fatalf("event.Meta must not carry cursor values, got %#v", event.Meta.CursorValues)
+	}
+	if len(tracer.starts) != 1 {
+		t.Fatalf("expected one span start, got %d", len(tracer.starts))
+	}
+	if len(tracer.starts[0].Meta.CursorValues) != 0 {
+		t.Fatalf("span start Meta must not carry cursor values, got %#v", tracer.starts[0].Meta.CursorValues)
+	}
+	if len(tracer.span.events) != 1 || len(tracer.span.events[0].Meta.CursorValues) != 0 {
+		t.Fatalf("span end Meta must not carry cursor values")
 	}
 }
 
