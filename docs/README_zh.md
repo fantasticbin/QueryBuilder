@@ -470,6 +470,8 @@ b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Co
 result, err := b.QueryList(ctx)
 ```
 
+`CacheMiddleware` 与 `AggregateCacheMiddleware` 在 `cache` 为 nil 或 key 函数为 nil 时直接透传，不执行缓存逻辑；相同 key 的并发未命中由 `singleflight` 合并为一次查询。如需删除缓存条目，可调用 `middleware.DeleteCache`：后端可实现带错误返回的 `CacheBackend`（`Lookup` / `Store` / `Delete`），或单独实现 `Delete(ctx, key) error` 方法；两者均未实现时返回 `ErrCacheDeleteUnsupported`。
+
 ### 缓存键生成策略
 
 为解决缓存键设计不统一、命中率不稳定的问题，QueryBuilder 提供了 `CacheKeyBuilder` 接口及开箱即用的 `DefaultCacheKeyBuilder` 默认实现。
@@ -497,7 +499,7 @@ type CacheKeyBuilder interface {
 | `sort` | `DefaultCacheKeyBuilder.Hints` | 业务排序条件 |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | 扩展维度（如 tenant_id 等多租户隔离字段） |
 
-最终将所有维度 JSON 序列化后取 SHA1 哈希，生成格式为 `qb:cache:<sha1hex>` 的固定长度缓存键。
+最终将所有维度序列化为规范化 JSON 后取 SHA-256 哈希，生成 `qb:cache:<sha256hex>` 格式的固定长度缓存键。列表缓存与聚合缓存的默认键均基于 SHA-256 生成。
 
 `CacheKeyHints` 完全由 `DefaultCacheKeyBuilder` 自身管理——**不存储在构建器基类中，也不注入到 context 中**。这种设计保持了查询构建器的职责纯净，并避免了 `Clone` 并发场景下的数据混乱。
 
@@ -1455,7 +1457,7 @@ func summarize(ctx context.Context, db *gorm.DB) error {
 
 > **与列表/游标查询的 API 对称性：** 聚合构建器刻意暴露与列表、游标构建器**完全一致**的分页 API —— `SetStart` / `SetLimit` / `SetNeedTotal` / `SetTotalLimit`，且 `Result.Total` 与 `core.ListResult.Total` 对齐。这样同一套带偏移与总数页脚的翻页 UI 组件可以无缝驱动列表视图和聚合视图，无需分支判断。`needTotal` 默认 `true`，与列表查询默认值一致；聚合的缓存/可观测中间件也按相同的分页维度（`start`、`limit`、`needTotal`、`totalLimit`）生成缓存键与指标，从而保证两类查询在缓存与监控上表现一致。
 
-> ⚠️ **Elasticsearch 全量扫描风险：** 由于 `needTotal` 默认 `true`，Elasticsearch 分组查询在同时使用 HAVING 过滤与按指标/非前缀分组排序时，为了算出精确的 `Total`，必须收集**所有** composite buckets —— 也就是构建器会从"收满一页即停"退化为**全量扫描所有 bucket**。在高基数分组场景下代价可能很高。建议优先用 `SetNeedTotal(false)` 直接跳过总数统计，或用 `SetTotalLimit(n)` 限制总数（封顶后的 `Total` 应读作 `n+` 而非精确值）。当必须收集全部 buckets 时，`Explain` 会在 `client_post_processing` 中输出 `full_scan` 加以提示。
+> ⚠️ **Elasticsearch 全量扫描风险：** 分组查询在 `needTotal=true` 且未设 `totalLimit` 时，或排序无法由 composite 源顺序表达（按指标 / 非前缀分组排序）时，必须扫描全部 composite 页。HAVING 在每页通过服务端 `bucket_selector` 提前过滤；按指标排序时仍需在客户端物化剩余 bucket。高基数分组建议优先 `SetNeedTotal(false)` 跳过总数，或用 `SetTotalLimit(n)` 封顶总数统计。`Explain` 的 `client_post_processing` 会标注 `full_scan`，并列出 `total` / `orders` 等触发原因。
 
 需要按时间字段截断后再分组时，可以使用 `GroupByDate` 或 `GroupByDateWithTimeZone`：
 
@@ -1486,6 +1488,8 @@ mongoQuery.SetSpec(spec)
 esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders")
 esQuery.SetSpec(spec)
 ```
+
+在 GORM、MongoDB、Elasticsearch 上，`EXISTS` / `IS NOT NULL` 统一表示「字段存在且非空」，`NOT EXISTS` / `IS NULL` 统一表示「字段缺失或为 null」。跨数据源复用同一份 `Spec` 前，建议调用 `agg.AnalyzeSpec(ds, spec)` 检查 `Plan.Notes`，其中会列出仍需知晓的差异，例如 Elasticsearch 的近似 `CountDistinct` 与周 / 季度桶的方言差异。
 
 三个构建器都提供 `SetFilter`、`Clone`、`Use`、`Query` 和 `Explain`。`SetFilter` 保留各数据源自己的写法：GORM 使用 `func(*gorm.DB) *gorm.DB`，MongoDB 使用 `bson.D`，Elasticsearch 使用 `elastic.Query`。
 

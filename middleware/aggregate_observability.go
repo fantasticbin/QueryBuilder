@@ -242,7 +242,7 @@ func defaultAggregateAttributes(meta queryagg.Meta) []Attribute {
 		{Key: "querybuilder.aggregate.has_distinct_metrics", Value: plan.Has(queryagg.PlanHasDistinctMetrics)},
 		{Key: "querybuilder.aggregate.has_conditional_metrics", Value: plan.Has(queryagg.PlanHasConditionalMetrics)},
 		{Key: "querybuilder.aggregate.has_date_groups", Value: plan.Has(queryagg.PlanHasDateGroups)},
-		{Key: "querybuilder.aggregate.uses_mongo_facet", Value: plan.Has(queryagg.PlanUsesMongoFacet)},
+		{Key: "querybuilder.aggregate.uses_mongo_distinct_set", Value: plan.Has(queryagg.PlanUsesMongoDistinctSet)},
 		{Key: "querybuilder.aggregate.uses_elastic_scripted_metric", Value: plan.Has(queryagg.PlanUsesElasticScriptedMetric)},
 		{Key: "querybuilder.aggregate.needs_client_post_processing", Value: plan.Has(queryagg.PlanNeedsClientPostProcessing)},
 		{Key: "querybuilder.aggregate.needs_full_client_post_processing", Value: plan.Has(queryagg.PlanNeedsFullClientPostProcessing)},

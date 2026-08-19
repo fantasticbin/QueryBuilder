@@ -48,7 +48,7 @@ Querier[R]  ──►  GormBuilder / MongoBuilder / ElasticSearchBuilder
 
 ### 2.1 自引用泛型 / CRTP 风格的链式调用
 
-**是什么**  
+**定义**  
 用「构建器类型自己作为类型参数」约束接口，使基类方法返回**具体子类型**而非接口，从而在无需类型断言的前提下保持流式 API（fluent API）。
 
 **项目中的形态**
@@ -77,7 +77,7 @@ type builder[B queryBuilder[B, R], R any] struct { /* ... */ }
 
 ### 2.2 Go 1.23+ 迭代器（`iter.Seq2`）
 
-**是什么**  
+**定义**  
 标准库 `iter` 包提供的推送（push）风格序列：`iter.Seq2[V, E]` 适合「值 + 错误」成对产出（yield），用于流式消费大数据集，避免一次性装入内存。
 
 **项目中的形态**  
@@ -90,7 +90,7 @@ type builder[B queryBuilder[B, R], R any] struct { /* ... */ }
 
 ### 2.3 函数选项模式（Functional Options）
 
-**是什么**  
+**定义**  
 用 `func(*Options)` 配置默认结构体，避免过长的参数列表与布尔值陷阱（boolean trap），新增选项时不破坏既有调用方。
 
 **项目中的形态**
@@ -108,7 +108,7 @@ func LoadQueryOptions(opts ...QueryOption) BaseQueryListOptions { /* 先取默�
 
 ### 2.4 泛型结果抽象
 
-**是什么**  
+**定义**  
 用接口统一「列表结果 / 游标页结果 / ES PIT 页结果」，中间件与缓存只依赖 `Result[R]`，不关心底层后端实现。
 
 **项目中的形态**
@@ -123,7 +123,7 @@ func LoadQueryOptions(opts ...QueryOption) BaseQueryListOptions { /* 先取默�
 
 ### 2.5 接口拆分与组合（接口隔离原则，ISP）
 
-**是什么**  
+**定义**  
 把「列表 / 游标 / Explain / Meta」拆成小接口，再组合成 `Querier[R]`，调用方可以只依赖自己需要的能力。
 
 ```go
@@ -148,7 +148,7 @@ type Querier[R any] interface {
 
 ### 2.6 结构体嵌入（组合优于继承，Composition over Inheritance）
 
-**是什么**  
+**定义**  
 通过匿名嵌入复用字段与方法，而非类继承。
 
 **项目中的形态**
@@ -163,7 +163,7 @@ type Querier[R any] interface {
 
 ### 2.7 哨兵错误（Sentinel Errors）与错误链
 
-**是什么**  
+**定义**  
 包级 `var ErrXxx = errors.New(...)` 作为可判定的哨兵错误（sentinel error）；panic 恢复路径用自定义类型实现 `Unwrap`，保留 `errors.Is` / `errors.As` 的能力。
 
 | 项目出处 | 理论/社区出处 |
@@ -173,7 +173,7 @@ type Querier[R any] interface {
 
 ### 2.8 位掩码标志（Bitmask Flags）
 
-**是什么**  
+**定义**  
 用 `1 << iota` 让每个常量占据独立比特位，多个特征可用 `|` 组合进一个整数，用 `&` 按位检测，替代「一堆 bool 字段」的结构体，节省空间且便于整体传递与序列化。
 
 **项目中的形态**
@@ -185,18 +185,18 @@ const (
     PlanHasDistinctMetrics PlanFlags = 1 << iota
     PlanHasConditionalMetrics
     PlanHasDateGroups
-    PlanUsesMongoFacet
+    PlanUsesMongoDistinctSet
     // ...
 )
 
 // 组合：plan.Flags |= PlanHasDateGroups
-// 检测：plan.Has(PlanUsesMongoFacet)
+// 检测：plan.Has(PlanUsesMongoDistinctSet)
 func (f PlanFlags) Has(flag PlanFlags) bool {
     return flag != 0 && f&flag == flag
 }
 ```
 
-`AnalyzeSpec` 静态分析聚合规范后，把「是否有去重指标 / 是否走 Mongo facet / 是否需要客户端后处理」等执行特征一次性压缩进 `Plan.Flags`，供中间件与执行层按需探测；`PlanFlags` 直接作为 `Plan` 的字段随 JSON / BSON 序列化。
+`AnalyzeSpec` 静态分析聚合规范后，把「是否有去重指标 / 是否走 Mongo `$addToSet` / 是否需要客户端后处理」等执行特征一次性压缩进 `Plan.Flags`，供中间件与执行层按需探测；`PlanFlags` 直接作为 `Plan` 的字段随 JSON / BSON 序列化。
 
 | 项目出处 | 理论/社区出处 |
 | --- | --- |
@@ -420,11 +420,25 @@ type Middleware[R any] func(
 | 组件 | 作用 | 出处 |
 | --- | --- | --- |
 | `CacheProvider` | 读取 / 写入（Get/Set），对接 Redis、内存等 | `middleware/cache.go` |
+| `CacheBackend` | 可选的带错误与删除能力的后端（Lookup/Store/Delete）；未实现时降级到 `CacheProvider` | `middleware/cache.go` |
 | `CacheKeyBuilder` | 自定义缓存键（key） | `middleware/cache_policy.go` |
-| `DefaultCacheKeyBuilder` | 规范化 JSON 载荷 + **SHA1** 摘要 → `qb:cache:<hex>` | 同上 |
+| `DefaultCacheKeyBuilder` | 规范化 JSON 载荷 + **SHA-256** 摘要 → `qb:cache:<hex>` | 同上 |
 | `CacheKeyHints` | 过滤 / 排序 / 附加信息（如多租户标识） | 同上 |
 
-### 5.4 可观测性中间件（厂商无关）
+### 5.4 缓存防穿透（singleflight）
+
+**定义**  
+`CacheMiddleware` 与 `AggregateCacheMiddleware` 在缓存未命中时，用 `golang.org/x/sync/singleflight` 合并同一 key 的并发请求：同 key 只有一个请求真正落到后端查询，其余请求等待并共享其结果，避免热点 key 失效瞬间的缓存击穿（cache stampede / dogpile effect）。
+
+**要点**
+- 缓存读取或反序列化失败均视为未命中，不阻断查询
+- `cache` 为 nil 或 key 函数为 nil 时直接透传，不执行缓存逻辑
+
+| 项目出处 | 理论/社区出处 |
+| --- | --- |
+| `middleware/cache.go`、`middleware/aggregate_cache.go`：`group.Do(key, ...)` | [golang.org/x/sync/singleflight](https://pkg.go.dev/golang.org/x/sync/singleflight)；缓存击穿 / 惊群防护的经典做法 |
+
+### 5.5 可观测性中间件（厂商无关）
 
 抽象出 `Attribute`、`QuerySpanStart`、`QueryEvent` 与信号类型（追踪 Trace / 指标 Metrics / 日志 Logger），不绑定 OpenTelemetry（OTel）/ Prometheus 等具体 SDK；观测回调中先隔离 panic，再重新抛出。
 
@@ -432,7 +446,7 @@ type Middleware[R any] func(
 | --- | --- |
 | `middleware/observability.go` | OpenTelemetry 语义启发；三大支柱：日志（Logs）/ 指标（Metrics）/ 追踪（Traces）；依赖倒置 |
 
-### 5.5 Panic 恢复（Recovery）分层策略
+### 5.6 Panic 恢复（Recovery）分层策略
 
 | 层级 | 行为 | 出处 |
 | --- | --- | --- |
@@ -440,7 +454,7 @@ type Middleware[R any] func(
 | 并发工具 | 恢复（recover）+ 调用栈（stack）→ error | `util/util.go` |
 | 观测中间件 | 记录后重新抛出，避免吞掉严重错误 | `middleware/observability.go`（及相关测试） |
 
-### 5.6 查询元信息快照（QueryMeta）
+### 5.7 查询元信息快照（QueryMeta）
 
 中间件通过 `GetQueryMeta()` 拿到数据源、分页、游标、PIT 标志、开始时间等**只读快照**（切片字段均为拷贝），无需往 context 中塞入私有键（key）。
 
@@ -448,7 +462,7 @@ type Middleware[R any] func(
 | --- | --- |
 | `core/meta.go`；`builder.GetQueryMeta` | 避免滥用 context 传值（Go 社区惯例）；只读快照防止别名修改 |
 
-### 5.7 测试体系
+### 5.8 测试体系
 
 - 标准库 `testing` + 表驱动测试习惯（各 `*_test.go`）
 - **gomock** 生成的泛型 `MockQuerier[R]`（`mock_querier.go`）
@@ -458,7 +472,7 @@ type Middleware[R any] func(
 | --- | --- |
 | `mock_querier.go`；`go.uber.org/mock` | 模拟（Mock）对象模式；[uber-go/mock](https://github.com/uber-go/mock)（原 golang/mock） |
 
-### 5.8 性能与分配意识（小而实用的工程技巧）
+### 5.9 性能与分配意识（小而实用的工程技巧）
 
 | 技巧 | 说明 | 出处 |
 | --- | --- | --- |
@@ -467,7 +481,7 @@ type Middleware[R any] func(
 | `PanicToError` 避免 `fmt.Errorf` 反射装箱 | 降低 recover 路径上的分配 | `util/util.go` 注释 |
 | 游标字段解析缓存 | GORM 模式（schema）解析结果缓存 | `gorm_builder.go` 字段 `cursorFieldCache` |
 
-### 5.9 资源生命周期（PIT 关闭）
+### 5.10 资源生命周期（PIT 关闭）
 
 ES PIT 的关闭使用 `context.WithTimeout(context.Background(), ...)`，与请求上下文解耦，防止客户端取消后清理逻辑无法运行。
 
@@ -504,6 +518,7 @@ ES PIT 的关闭使用 `context.WithTimeout(context.Background(), ...)`，与请
 | 查询 | 聚合 DSL                             | `agg/*` |
 | 工程 | 上下文（Context）/ errgroup          | `util/util.go` |
 | 工程 | 可插拔缓存                           | `middleware/cache*.go` |
+| 工程 | singleflight 缓存防穿透              | `middleware/cache*.go` |
 | 工程 | 可观测抽象                           | `middleware/observability.go` |
 | 工程 | Panic → error                        | `list.go`、`util` |
 | 工程 | gomock                               | `mock_querier.go` |

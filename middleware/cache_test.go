@@ -3,7 +3,10 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -374,5 +377,85 @@ func TestCloneCacheIsolation(t *testing.T) {
 	cache.Set(ctx, k1, []byte(`{"list":[{"ID":1}],"total":1}`), time.Minute)
 	if _, ok := cache.Get(ctx, k2); ok {
 		t.Fatalf("cache for k1 should not be accessible via k2")
+	}
+}
+
+func TestDefaultCacheKeyBuilderUsesSHA256(t *testing.T) {
+	key := DefaultCacheKeyBuilder{Prefix: "users"}.Build(context.Background(), baseMeta())
+	if !strings.HasPrefix(key, "qb:cache:") {
+		t.Fatalf("unexpected prefix: %s", key)
+	}
+	hexPart := strings.TrimPrefix(key, "qb:cache:")
+	if len(hexPart) != 64 {
+		t.Fatalf("expected sha256 hex length 64, got %d (%s)", len(hexPart), key)
+	}
+}
+
+func TestCacheMiddlewareNilPassthrough(t *testing.T) {
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+	called := 0
+	mw := CacheMiddleware[testUser](nil, time.Minute, nil)
+	_, err := mw(context.Background(), mq, func(context.Context) (core.Result[testUser], error) {
+		called++
+		return &core.ListResult[testUser]{Total: 1}, nil
+	})
+	if err != nil || called != 1 {
+		t.Fatalf("nil cache should pass through, called=%d err=%v", called, err)
+	}
+}
+
+func TestCacheMiddlewareSingleflight(t *testing.T) {
+	cache := newMockCache()
+	mq := &mockQuerier[testUser]{meta: baseMeta()}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	mw := CacheMiddleware[testUser](cache, time.Minute, func(context.Context, builder.Querier[testUser]) string {
+		return "same"
+	})
+	next := func(context.Context) (core.Result[testUser], error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return &core.ListResult[testUser]{Total: 3}, nil
+	}
+	errCh := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := mw(context.Background(), mq, next)
+			errCh <- err
+		}()
+	}
+	<-started
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected singleflight to call next once, got %d", got)
+	}
+}
+
+type deleteCache struct {
+	mockCache
+}
+
+func (d *deleteCache) Delete(_ context.Context, key string) error {
+	delete(d.store, key)
+	return nil
+}
+
+func TestDeleteCache(t *testing.T) {
+	cache := &deleteCache{mockCache: mockCache{store: map[string][]byte{"k": []byte("v")}}}
+	if err := DeleteCache(context.Background(), cache, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cache.Get(context.Background(), "k"); ok {
+		t.Fatal("expected key to be deleted")
+	}
+	if err := DeleteCache(context.Background(), newMockCache(), "k"); !errors.Is(err, ErrCacheDeleteUnsupported) {
+		t.Fatalf("expected unsupported delete, got %v", err)
 	}
 }

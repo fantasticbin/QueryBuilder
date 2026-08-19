@@ -8,6 +8,7 @@ import (
 	"time"
 
 	queryagg "github.com/fantasticbin/QueryBuilder/v2/agg"
+	"golang.org/x/sync/singleflight"
 )
 
 // AggregateCacheKeyBuilder 定义聚合缓存键构建接口
@@ -48,6 +49,11 @@ type aggregateCacheResult[A any] struct {
 }
 
 // AggregateCacheMiddlewareWithKeyBuilder 使用指定缓存键构建器创建聚合缓存中间件
+// 参数:
+//
+//	cache      - 缓存提供者实例，实现 CacheProvider 接口
+//	ttl        - 缓存过期时间
+//	keyBuilder - 缓存键构建器，基于 queryagg.Meta 生成确定性的缓存键
 func AggregateCacheMiddlewareWithKeyBuilder[A any](
 	cache CacheProvider,
 	ttl time.Duration,
@@ -62,11 +68,14 @@ func AggregateCacheMiddlewareWithKeyBuilder[A any](
 }
 
 // AggregateCacheMiddleware 创建聚合结果缓存中间件
+// 命中缓存时直接返回缓存结果；未命中则执行查询并写入缓存。
+// 同 key 的并发查询由 singleflight 合并为一次执行；缓存读取或反序列化失败均视为未命中，不阻断查询。
 func AggregateCacheMiddleware[A any](
 	cache CacheProvider,
 	ttl time.Duration,
 	key func(context.Context, queryagg.Querier[A]) string,
 ) queryagg.Middleware[A] {
+	group := new(singleflight.Group)
 	return func(
 		ctx context.Context,
 		querier queryagg.Querier[A],
@@ -77,24 +86,30 @@ func AggregateCacheMiddleware[A any](
 		}
 
 		cacheKey := key(ctx, querier)
-		if data, ok := cache.Get(ctx, cacheKey); ok {
-			var cached aggregateCacheResult[A]
-			if err := json.Unmarshal(data, &cached); err == nil {
-				if cached.Rows == nil {
-					cached.Rows = make([]*A, 0)
+		value, err, _ := group.Do(cacheKey, func() (any, error) {
+			if data, hit, lookupErr := cacheLookup(ctx, cache, cacheKey); lookupErr == nil && hit {
+				var cached aggregateCacheResult[A]
+				if err := json.Unmarshal(data, &cached); err == nil {
+					if cached.Rows == nil {
+						cached.Rows = make([]*A, 0)
+					}
+					return &queryagg.Result[A]{Rows: cached.Rows, Total: cached.Total}, nil
 				}
-				return &queryagg.Result[A]{Rows: cached.Rows, Total: cached.Total}, nil
 			}
-		}
 
-		result, err := next(ctx)
-		if err != nil || result == nil {
-			return result, err
+			result, err := next(ctx)
+			if err != nil || result == nil {
+				return result, err
+			}
+			encoded, marshalErr := json.Marshal(aggregateCacheResult[A]{Rows: result.Rows, Total: result.Total})
+			if marshalErr == nil {
+				_ = cacheStore(ctx, cache, cacheKey, encoded, ttl)
+			}
+			return result, nil
+		})
+		if value == nil {
+			return nil, err
 		}
-		encoded, marshalErr := json.Marshal(aggregateCacheResult[A]{Rows: result.Rows, Total: result.Total})
-		if marshalErr == nil {
-			cache.Set(ctx, cacheKey, encoded, ttl)
-		}
-		return result, nil
+		return value.(*queryagg.Result[A]), err
 	}
 }

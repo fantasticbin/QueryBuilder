@@ -35,6 +35,8 @@ var (
 	// ErrAggMetricMissing 表示 Elasticsearch 聚合结果缺失指标聚合
 	ErrAggMetricMissing = errors.New("decoding elasticsearch aggregate result: metric missing")
 
+	// 下列正则分别用于校验字段 / 别名标识符，以及解析 GORM-like 条件表达式
+	// （比较、IN/NOT IN、BETWEEN、LIKE、EXISTS / IS NULL 等一元表达式）与时区格式
 	fieldPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 	aliasPattern                = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	comparisonExpressionPattern = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*(==|<>|!=|>=|<=|=|>|<)\s*\?\s*$`)
@@ -264,13 +266,24 @@ func (m Meta) QueryMode() string { return "aggregate" }
 type PlanFlags uint64
 
 const (
+	// PlanHasDistinctMetrics 表示聚合包含去重指标（CountDistinct / SumDistinct）
 	PlanHasDistinctMetrics PlanFlags = 1 << iota
+	// PlanHasConditionalMetrics 表示聚合包含带条件过滤的指标
 	PlanHasConditionalMetrics
+	// PlanHasDateGroups 表示分组包含时间桶（interval 非空）
 	PlanHasDateGroups
-	PlanUsesMongoFacet
+	// PlanUsesElasticScriptedMetric 表示 Elasticsearch 去重求和走 scripted_metric
 	PlanUsesElasticScriptedMetric
+	// PlanNeedsClientPostProcessing 表示 Elasticsearch 需要在客户端完成聚合后处理（HAVING 或全量排序）
 	PlanNeedsClientPostProcessing
+	// PlanNeedsFullClientPostProcessing 表示 Elasticsearch 必须把全部分组 bucket 装进内存后再排序
 	PlanNeedsFullClientPostProcessing
+	// PlanUsesApproximateDistinct 表示 CountDistinct 走近似算法（Elasticsearch cardinality）
+	PlanUsesApproximateDistinct
+	// PlanUsesMongoDistinctSet 表示 Mongo 去重指标走单阶段 $addToSet
+	PlanUsesMongoDistinctSet
+	// PlanHasDialectDateBuckets 表示周 / 季度桶仍依赖各引擎方言，分组键格式可能不同
+	PlanHasDialectDateBuckets
 )
 
 // Has 判断当前掩码是否包含指定执行特征
@@ -281,6 +294,7 @@ func (f PlanFlags) Has(flag PlanFlags) bool {
 // Plan 描述一次聚合查询在通用层面的执行特征
 type Plan struct {
 	Flags PlanFlags `json:"flags" bson:"flags"`
+	Notes []string  `json:"notes,omitempty" bson:"notes,omitempty"`
 }
 
 // Has 判断聚合计划是否包含指定执行特征
@@ -305,12 +319,18 @@ func AnalyzeSpec(dataSource core.DataSource, spec Spec) Plan {
 		if metric.Condition != nil {
 			plan.Flags |= PlanHasConditionalMetrics
 		}
-		if dataSource == core.MongoDB && requiresMetricFacet(metric) {
-			plan.Flags |= PlanUsesMongoFacet
+		if dataSource == core.MongoDB && isDistinctMetric(metric) {
+			plan.Flags |= PlanUsesMongoDistinctSet
 		}
 		if dataSource == core.ElasticSearch && isDistinctSum(metric) {
 			plan.Flags |= PlanUsesElasticScriptedMetric
 		}
+		if dataSource == core.ElasticSearch && isDistinctCount(metric) {
+			plan.Flags |= PlanUsesApproximateDistinct
+		}
+	}
+	if hasDialectDateBucket(spec) {
+		plan.Flags |= PlanHasDialectDateBuckets
 	}
 	if dataSource == core.ElasticSearch && len(spec.Groups) > 0 {
 		if elasticOrdersNeedClientPostProcessingSpec(spec) {
@@ -320,7 +340,51 @@ func AnalyzeSpec(dataSource core.DataSource, spec Spec) Plan {
 			plan.Flags |= PlanNeedsClientPostProcessing
 		}
 	}
+	plan.Notes = specCompatNotes(dataSource, spec, plan)
 	return plan
+}
+
+// specCompatNotes 列出 SetSpec 跨源复用时仍需调用方知晓的语义差异
+func specCompatNotes(dataSource core.DataSource, spec Spec, plan Plan) []string {
+	notes := make([]string, 0, 3)
+	if plan.Has(PlanUsesApproximateDistinct) {
+		notes = append(notes, "CountDistinct on ElasticSearch uses approximate cardinality")
+	}
+	if plan.Has(PlanUsesElasticScriptedMetric) {
+		notes = append(notes, "SumDistinct on ElasticSearch uses scripted_metric; high cardinality is expensive")
+	}
+	if plan.Has(PlanUsesMongoDistinctSet) {
+		notes = append(notes, "Mongo distinct metrics use $addToSet; a very high-cardinality group can exceed 16MB")
+	}
+	if plan.Has(PlanHasDialectDateBuckets) {
+		notes = append(notes, "week and quarter buckets follow each engine's calendar; bucket key format may differ")
+	}
+	if dataSource == core.Gorm && hasUnaryNullAlias(spec) {
+		notes = append(notes, "GORM maps EXISTS to IS NOT NULL and NOT EXISTS to IS NULL")
+	}
+	return notes
+}
+
+// hasDialectDateBucket 判断分组是否包含依赖引擎方言的周 / 季度时间桶
+func hasDialectDateBucket(spec Spec) bool {
+	return slices.ContainsFunc(spec.Groups, func(group Group) bool {
+		return group.Interval == TimeIntervalWeek || group.Interval == TimeIntervalQuarter
+	})
+}
+
+// hasUnaryNullAlias 判断指标条件中是否包含 EXISTS / IS NULL 等一元空值操作符
+func hasUnaryNullAlias(spec Spec) bool {
+	return slices.ContainsFunc(spec.Metrics, func(metric Metric) bool {
+		if metric.Condition == nil {
+			return false
+		}
+		switch metric.Condition.Op {
+		case Exists, NotExists, IsNull, IsNotNull:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 // normalizeSpec 复制并规范化聚合查询配置，为分组查询补充默认 limit
@@ -439,11 +503,6 @@ func isDistinctMetric(metric Metric) bool {
 // supportsDistinct 判断聚合函数是否支持去重修饰
 func supportsDistinct(fn Func) bool {
 	return slices.Contains([]Func{Count, Sum}, fn)
-}
-
-// requiresMetricFacet 判断指标是否需要在 MongoDB 中使用独立分支计算
-func requiresMetricFacet(metric Metric) bool {
-	return isDistinctMetric(metric) || metric.Condition != nil
 }
 
 // effectiveOrders 返回显式排序；未设置时保持按分组字段排序的兼容行为
@@ -935,6 +994,7 @@ func sqlLikePatternToWildcard(pattern string) string {
 	return builder.String()
 }
 
+// writeElasticWildcardLiteral 写入 wildcard 模式字面量，对 * ? \ 保留字符做转义
 func writeElasticWildcardLiteral(builder *strings.Builder, r rune) {
 	switch r {
 	case '*', '?', '\\':

@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -39,7 +39,7 @@ type DefaultCacheKeyBuilder struct {
 
 // Build 根据查询元信息和 Hints 构建确定性、抗碰撞的缓存键
 // 内部将 prefix、datasource、fields、pagination 及 hints（filter/sort/extra）组装为规范化 JSON，
-// 再取 SHA1 摘要生成最终 key，格式为 "qb:cache:<hex>"
+// 再取 SHA-256 摘要生成最终 key，格式为 "qb:cache:<hex>"
 func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) string {
 	payload := map[string]any{"prefix": b.Prefix}
 	payload["datasource"] = meta.DataSource.String()
@@ -60,7 +60,7 @@ func (b DefaultCacheKeyBuilder) Build(ctx context.Context, meta core.QueryMeta) 
 	appendCacheKeyHints(payload, hints)
 
 	canonical := canonicalCachePayload(payload)
-	h := sha1.Sum([]byte(canonical))
+	h := sha256.Sum256([]byte(canonical))
 	return fmt.Sprintf("qb:cache:%s", hex.EncodeToString(h[:]))
 }
 

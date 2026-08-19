@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 
@@ -15,7 +14,6 @@ import (
 const (
 	elasticRootAggregation   = "_querybuilder_aggregate"
 	elasticBucketAggregation = "_querybuilder_groups"
-	elasticOrderAggregation  = "_querybuilder_order"
 	elasticCompositePageSize = 5000
 )
 
@@ -110,13 +108,15 @@ func (b *ElasticSearchBuilder[A]) Explain(context.Context) (string, error) {
 		},
 		"plan": b.Meta().Plan,
 	}
-	if b.needsElasticClientPostProcessing() {
+	if b.needsElasticClientPostProcessing() || b.needsElasticCompleteCompositeScan() {
 		payload["client_post_processing"] = map[string]any{
-			"full_scan": b.needsElasticFullClientPostProcessing(),
+			"full_scan": b.needsElasticCompleteCompositeScan(),
 			"havings":   len(b.spec.Havings) > 0,
-			"orders":    len(b.spec.Orders) > 0,
+			"orders":    b.elasticOrdersNeedClientPostProcessing(),
+			"total":     b.needsElasticExactTotalScan(),
 			"start":     b.spec.Start,
 			"limit":     b.spec.Limit,
+			"pipeline":  b.elasticPipelineNames(),
 		}
 	}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
@@ -152,7 +152,7 @@ func (b *ElasticSearchBuilder[A]) buildAggregation() *elastic.FilterAggregation 
 	}
 	return b.buildAggregationWithOptions(elasticAggregationOptions{
 		size:            size,
-		includePipeline: !b.needsElasticClientPostProcessing(),
+		includePipeline: b.shouldAttachHavingPipeline(),
 	})
 }
 
@@ -195,9 +195,6 @@ func (b *ElasticSearchBuilder[A]) buildAggregationWithOptions(options elasticAgg
 		for i, having := range b.spec.Havings {
 			buckets = buckets.SubAggregation(elasticHavingAggregationName(i), b.elasticHavingAggregation(having))
 		}
-		if b.elasticOrdersNeedClientPostProcessing() {
-			buckets = buckets.SubAggregation(elasticOrderAggregation, b.elasticBucketSortAggregation())
-		}
 	}
 	return root.SubAggregation(elasticBucketAggregation, buckets)
 }
@@ -236,7 +233,8 @@ func elasticBaseMetric(metric Metric) elastic.Aggregation {
 	return nil
 }
 
-// elasticSumDistinctMetric 构建去重求和脚本聚合
+// elasticSumDistinctMetric 构建基于 scripted_metric 的去重求和聚合：
+// map 阶段按字段值去重收集，combine / reduce 阶段累加去重后的数值
 func elasticSumDistinctMetric(metric Metric) elastic.Aggregation {
 	return elastic.NewScriptedMetricAggregation().
 		InitScript(elastic.NewScript("state.values = [:]")).
@@ -296,30 +294,6 @@ func (b *ElasticSearchBuilder[A]) elasticGroupOrder(group Group) string {
 		return "desc"
 	}
 	return "asc"
-}
-
-// elasticBucketSortAggregation 构建用于显式结果排序的 bucket_sort 聚合
-func (b *ElasticSearchBuilder[A]) elasticBucketSortAggregation() elastic.Aggregation {
-	bucketSort := elastic.NewBucketSortAggregation().Size(int(b.spec.Limit))
-	for _, order := range b.spec.Orders {
-		bucketSort = bucketSort.Sort(b.elasticBucketSortField(order.Alias), !order.Descending)
-	}
-	return bucketSort
-}
-
-// elasticBucketSortField 返回 bucket_sort 引用的分组键或指标路径
-func (b *ElasticSearchBuilder[A]) elasticBucketSortField(alias string) string {
-	if b.hasGroupAlias(alias) {
-		return "_key." + alias
-	}
-	return b.elasticHavingBucketPath(alias)
-}
-
-// hasGroupAlias 判断别名是否引用分组输出
-func (b *ElasticSearchBuilder[A]) hasGroupAlias(alias string) bool {
-	return slices.ContainsFunc(b.spec.Groups, func(group Group) bool {
-		return strings.EqualFold(group.Alias, alias)
-	})
 }
 
 // elasticHavingAggregation 构建用于 HAVING 过滤的 bucket_selector 聚合
@@ -387,9 +361,32 @@ func (b *ElasticSearchBuilder[A]) needsElasticClientPostProcessing() bool {
 	return len(b.spec.Groups) > 0 && (len(b.spec.Havings) > 0 || b.needsElasticFullClientPostProcessing())
 }
 
-// needsElasticFullClientPostProcessing 判断是否必须读取完整 bucket 集合后才能排序或截断
+// needsElasticFullClientPostProcessing 判断是否必须把全部 bucket 装进内存后再排序
 func (b *ElasticSearchBuilder[A]) needsElasticFullClientPostProcessing() bool {
 	return len(b.spec.Groups) > 0 && b.elasticOrdersNeedClientPostProcessing()
+}
+
+// needsElasticExactTotalScan 判断精确 Total 是否会扫完所有 composite 页
+func (b *ElasticSearchBuilder[A]) needsElasticExactTotalScan() bool {
+	return len(b.spec.Groups) > 0 && b.needTotal && b.totalLimit == 0
+}
+
+// needsElasticCompleteCompositeScan 判断是否必须访问全部分组页（指标排序或精确 Total）
+func (b *ElasticSearchBuilder[A]) needsElasticCompleteCompositeScan() bool {
+	return b.needsElasticFullClientPostProcessing() || b.needsElasticExactTotalScan()
+}
+
+// shouldAttachHavingPipeline 在 composite 页上挂 bucket_selector，减少未通过 HAVING 的 bucket 传输
+func (b *ElasticSearchBuilder[A]) shouldAttachHavingPipeline() bool {
+	return len(b.spec.Havings) > 0
+}
+
+// elasticPipelineNames 返回 Explain 展示的 composite 页上挂载的 pipeline 聚合名称
+func (b *ElasticSearchBuilder[A]) elasticPipelineNames() []string {
+	if !b.shouldAttachHavingPipeline() {
+		return nil
+	}
+	return []string{"bucket_selector"}
 }
 
 // elasticOrdersNeedClientPostProcessing 判断显式排序是否无法由 composite source 顺序表达
@@ -482,8 +479,9 @@ func (b *ElasticSearchBuilder[A]) fetchElasticCompositeRowValues(
 	after map[string]any,
 ) ([]map[string]any, map[string]any, bool, error) {
 	root := b.buildAggregationWithOptions(elasticAggregationOptions{
-		size:  elasticCompositePageSize,
-		after: after,
+		size:            elasticCompositePageSize,
+		after:           after,
+		includePipeline: b.shouldAttachHavingPipeline(),
 	})
 	searchResult, err := client.Search().
 		Index(b.index).
@@ -690,7 +688,7 @@ func elasticNumber(value any) (float64, bool) {
 // decodeResult 将一次 Elasticsearch 聚合响应解码为类型安全的结果，并对该次响应返回的
 // buckets 做收尾式的分页与总数统计。
 //
-// 注意：真正的多页遍历与精确总数由上层 queryGroupedWithCompositeOrder /
+// 注意：真正的多页遍历与精确总数由上层 queryGroupedInCompositeOrder /
 // queryGroupedWithFullPostProcessing 负责，它们不会调用本方法。在本方法被常规 Query
 // 路径直接调用的简单分支（Start==0 且 !needTotal 且无需客户端后处理）下，本方法尾部的
 // elasticTotal / paginateElasticRowValues 实为 no-op：单次请求的 buckets 已经按 size 收口，
@@ -934,7 +932,8 @@ func decodeElasticRow[A any](values map[string]any) (*A, error) {
 	return row, nil
 }
 
-// elasticGroupSource 构建 composite 分组源
+// elasticGroupSource 按分组字段构建 composite 分组源
+// 时间桶分组使用 date_histogram 源，并按 interval 与 timezone 配置
 func elasticGroupSource(group Group, order string) elastic.CompositeAggregationValuesSource {
 	if group.Interval == "" {
 		return elastic.NewCompositeAggregationTermsValuesSource(group.Alias).

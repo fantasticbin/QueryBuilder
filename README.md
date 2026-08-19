@@ -470,6 +470,8 @@ b.Use(middleware.CacheMiddleware[User](cache, 5*time.Minute, func(ctx context.Co
 result, err := b.QueryList(ctx)
 ```
 
+`CacheMiddleware` and `AggregateCacheMiddleware` pass through — skipping the cache layer entirely — when `cache` or the key function is nil. Concurrent misses for the same key are coalesced into a single query via `singleflight`. To drop an entry, call `middleware.DeleteCache`: backends may implement `CacheBackend` (Lookup/Store/Delete with error returns) or a standalone `Delete(ctx, key) error` method; if neither is implemented, `ErrCacheDeleteUnsupported` is returned.
+
 ### Cache Key Strategy
 
 For production use, manually constructing cache keys (like `fmt.Sprintf("users:list:%d:%d", start, limit)`) is error-prone and hard to maintain. QueryBuilder provides a built-in **Cache Key Strategy** system with a `CacheKeyBuilder` interface and a ready-to-use default implementation.
@@ -498,7 +500,7 @@ The `DefaultCacheKeyBuilder` generates deterministic, collision-resistant cache 
 | `sort` | `DefaultCacheKeyBuilder.Hints` | Sort conditions |
 | `extra` | `DefaultCacheKeyBuilder.Hints` | Additional dimensions (e.g. tenant_id) |
 
-The final key format is `qb:cache:<sha1hex>` — fixed length, safe for Redis and other backends.
+The final key is a fixed-length `qb:cache:<sha256hex>` string, safe for Redis and other backends. Both the list and aggregate default key builders use SHA-256.
 
 `CacheKeyHints` is managed entirely by `DefaultCacheKeyBuilder` — it is **not** stored in the builder base class or injected into context. This design keeps the query builder's responsibilities clean and avoids data corruption in concurrent `Clone` scenarios.
 
@@ -1458,7 +1460,7 @@ Grouped aggregate results use offset pagination: `SetStart(start)` skips groups 
 
 > **API symmetry with list/cursor queries:** The aggregate builders deliberately expose the **same** pagination API as the list and cursor builders — `SetStart` / `SetLimit` / `SetNeedTotal` / `SetTotalLimit` — and `Result.Total` mirrors `core.ListResult.Total`. This lets a shared paginated UI component (offset + total footer) drive both list and aggregate views without branching. The default `needTotal=true` matches the list-query default, and the aggregate cache/observability middleware keys on the same pagination dimensions (`start`, `limit`, `needTotal`, `totalLimit`) so cache keys and metrics stay consistent across both.
 
-> ⚠️ **Elasticsearch full-scan risk:** Because `needTotal` defaults to `true`, Elasticsearch grouped queries that combine HAVING filters **and** non-prefix/metric ordering must collect **all** composite buckets to compute an exact `Total` — the builder degrades from "collect until the page is full" into a **full bucket scan**. For high-cardinality groupings this can be expensive. Prefer `SetNeedTotal(false)` to skip the total entirely, or `SetTotalLimit(n)` to cap it (a capped `Total` reads as `n+` rather than an exact count). `Explain` reports `full_scan` in `client_post_processing` when all buckets must be collected.
+> ⚠️ **Elasticsearch full-scan risk:** Grouped queries must scan every composite page when `needTotal` is true with no `totalLimit`, or when ordering cannot be expressed by composite source order (metric / non-prefix sort). HAVING is applied per page via a server-side `bucket_selector`; metric sort still materializes the remaining buckets on the client. For high-cardinality groupings, prefer `SetNeedTotal(false)` to skip the total, or `SetTotalLimit(n)` to cap it. `Explain` marks `full_scan` in `client_post_processing` and reports the triggering `total` / `orders` flags.
 
 Time buckets are available with `GroupByDate` or `GroupByDateWithTimeZone` when a date/time field should be truncated before grouping:
 
@@ -1489,6 +1491,8 @@ mongoQuery.SetSpec(spec)
 esQuery := agg.NewElasticSearchBuilder[SalesSummary](data, "orders")
 esQuery.SetSpec(spec)
 ```
+
+`EXISTS` / `IS NOT NULL` now uniformly mean “present and non-null”, and `NOT EXISTS` / `IS NULL` mean “missing or null” across GORM, MongoDB, and Elasticsearch. Before reusing a `Spec` across data sources, call `agg.AnalyzeSpec(ds, spec)` and inspect `Plan.Notes` — it lists remaining differences such as Elasticsearch's approximate `CountDistinct` and dialect-specific week/quarter buckets.
 
 All three builders provide `SetFilter`, `Clone`, `Use`, `Query`, and `Explain`. `SetFilter` stays native to the data source: GORM uses `func(*gorm.DB) *gorm.DB`, MongoDB uses `bson.D`, and Elasticsearch uses `elastic.Query`.
 

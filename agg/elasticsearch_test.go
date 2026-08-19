@@ -152,10 +152,11 @@ func TestElasticSearchBuilderExplainAdvancedSpec(t *testing.T) {
 			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
 		}
 	}
-	for _, fragment := range []string{`"bucket_selector"`, `"bucket_sort"`} {
-		if strings.Contains(explanation, fragment) {
-			t.Fatalf("expected explanation not to contain %q: %s", fragment, explanation)
-		}
+	if !strings.Contains(explanation, `"bucket_selector"`) {
+		t.Fatalf("expected HAVING to attach bucket_selector: %s", explanation)
+	}
+	if strings.Contains(explanation, `"bucket_sort"`) {
+		t.Fatalf("expected explanation not to contain bucket_sort: %s", explanation)
 	}
 }
 
@@ -168,6 +169,7 @@ func TestElasticSearchBuilderExplainGroupAliasOrderUsesComposite(t *testing.T) {
 		GroupBy("channel.keyword", "channel").
 		Count("total").
 		OrderByDesc("region").
+		SetNeedTotal(false).
 		SetLimit(5)
 
 	if builder.needsElasticClientPostProcessing() {
@@ -197,6 +199,7 @@ func TestElasticSearchBuilderExplainHavingOnlyAvoidsFullScan(t *testing.T) {
 	builder.GroupBy("region.keyword", "region").
 		Count("total").
 		Having("total >= ?", 2).
+		SetNeedTotal(false).
 		SetLimit(5)
 
 	if !builder.needsElasticClientPostProcessing() {
@@ -209,13 +212,36 @@ func TestElasticSearchBuilderExplainHavingOnlyAvoidsFullScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, fragment := range []string{`"client_post_processing"`, `"full_scan": false`, `"havings": true`, `"size": 5000`} {
+	for _, fragment := range []string{`"client_post_processing"`, `"full_scan": false`, `"havings": true`, `"bucket_selector"`, `"size": 5000`} {
 		if !strings.Contains(explanation, fragment) {
 			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
 		}
 	}
 	if strings.Contains(explanation, `"bucket_sort"`) {
 		t.Fatalf("expected having-only explanation not to contain bucket_sort: %s", explanation)
+	}
+}
+
+func TestElasticSearchBuilderExplainExactTotalMarksFullScan(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[elasticAdvancedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		SetLimit(5)
+
+	if !builder.needsElasticCompleteCompositeScan() || !builder.needsElasticExactTotalScan() {
+		t.Fatal("default needTotal should scan all composite pages for an exact total")
+	}
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, fragment := range []string{`"full_scan": true`, `"total": true`} {
+		if !strings.Contains(explanation, fragment) {
+			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)
+		}
 	}
 }
 func TestElasticSearchBuilderDecodeConditionalMetrics(t *testing.T) {

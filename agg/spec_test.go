@@ -623,6 +623,21 @@ func TestAnalyzeSpec(t *testing.T) {
 	if elasticPlan.Flags != expectedElasticFlags || !elasticPlan.Has(PlanNeedsClientPostProcessing) || !elasticPlan.Has(PlanNeedsFullClientPostProcessing) || !elasticPlan.Has(PlanUsesElasticScriptedMetric) {
 		t.Fatalf("unexpected elastic plan: %+v", elasticPlan)
 	}
+	if len(elasticPlan.Notes) == 0 {
+		t.Fatal("elastic plan should expose SetSpec compatibility notes")
+	}
+
+	mongoPlan := AnalyzeSpec(core.MongoDB, spec)
+	if !mongoPlan.Has(PlanUsesMongoDistinctSet) {
+		t.Fatalf("mongo distinct should use $addToSet: %+v", mongoPlan)
+	}
+
+	countDistinct := AnalyzeSpec(core.ElasticSearch, Spec{
+		Metrics: []Metric{{Func: Count, Field: "customer_id", Alias: "buyers", Distinct: true}},
+	})
+	if !countDistinct.Has(PlanUsesApproximateDistinct) {
+		t.Fatalf("ES CountDistinct should be marked approximate: %+v", countDistinct)
+	}
 }
 
 func TestBuilderSpecChainPaginationMeta(t *testing.T) {

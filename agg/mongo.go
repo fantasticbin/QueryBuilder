@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/fantasticbin/QueryBuilder/v2/util"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // MongoFilter 表示有序的 MongoDB 过滤文档
@@ -24,11 +24,7 @@ type MongoBuilder[A any] struct {
 	filter MongoFilter
 }
 
-const (
-	mongoBaseFacet = "_base"
-	mongoRowsField = "_rows"
-)
-
+// mongoAggregateTotal 承载 $count 阶段输出的分组总数
 type mongoAggregateTotal struct {
 	Total int64 `bson:"total"`
 }
@@ -108,7 +104,7 @@ func (b *MongoBuilder[A]) Query(ctx context.Context) (*Result[A], error) {
 
 // queryRows 执行聚合数据页 pipeline 并解码结果行
 func (b *MongoBuilder[A]) queryRows(ctx context.Context, collection *mongo.Collection) ([]*A, error) {
-	cursor, err := collection.Aggregate(ctx, b.buildPipeline())
+	cursor, err := collection.Aggregate(ctx, b.buildPipeline(), mongoAllowDiskUse())
 	if err != nil {
 		return nil, fmt.Errorf("executing mongodb aggregate query: %w", err)
 	}
@@ -121,7 +117,7 @@ func (b *MongoBuilder[A]) queryRows(ctx context.Context, collection *mongo.Colle
 
 // queryTotal 统计聚合后、HAVING 后的分组行数
 func (b *MongoBuilder[A]) queryTotal(ctx context.Context, collection *mongo.Collection) (int64, error) {
-	cursor, err := collection.Aggregate(ctx, b.buildTotalPipeline())
+	cursor, err := collection.Aggregate(ctx, b.buildTotalPipeline(), mongoAllowDiskUse())
 	if err != nil {
 		return 0, fmt.Errorf("counting mongodb aggregate groups: %w", err)
 	}
@@ -133,6 +129,11 @@ func (b *MongoBuilder[A]) queryTotal(ctx context.Context, collection *mongo.Coll
 		return 0, nil
 	}
 	return totals[0].Total, nil
+}
+
+// mongoAllowDiskUse 返回允许磁盘溢出的聚合选项，避免大分组查询触发内存限制
+func mongoAllowDiskUse() *options.AggregateOptionsBuilder {
+	return options.Aggregate().SetAllowDiskUse(true)
 }
 
 // Explain 返回生成的 MongoDB 聚合管道，但不会执行查询
@@ -181,19 +182,10 @@ func (b *MongoBuilder[A]) buildTotalPipeline() mongo.Pipeline {
 
 // buildPipelineBase 构建不含 HAVING、排序和分页的基础聚合 pipeline
 func (b *MongoBuilder[A]) buildPipelineBase() mongo.Pipeline {
-	if b.hasFacetMetric() {
-		return b.buildFacetPipeline()
-	}
-	return b.buildSimplePipeline()
-}
-
-// buildSimplePipeline 构建不含去重或条件指标的单阶段统计管道
-func (b *MongoBuilder[A]) buildSimplePipeline() mongo.Pipeline {
 	pipeline := make(mongo.Pipeline, 0, 6)
 	if match := b.buildMatch(); len(match) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
-
 	return append(
 		pipeline,
 		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), b.spec.Metrics)}},
@@ -201,138 +193,54 @@ func (b *MongoBuilder[A]) buildSimplePipeline() mongo.Pipeline {
 	)
 }
 
-// buildFacetPipeline 构建包含去重或条件指标的统计管道
-func (b *MongoBuilder[A]) buildFacetPipeline() mongo.Pipeline {
-	pipeline := make(mongo.Pipeline, 0, 10)
-	if match := b.buildMatch(); len(match) > 0 {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
-	}
-
-	facets := bson.D{{Key: mongoBaseFacet, Value: b.buildBaseFacetPipeline()}}
-	facetArrays := bson.A{"$" + mongoBaseFacet}
-	for index, metric := range b.spec.Metrics {
-		if !requiresMetricFacet(metric) {
-			continue
-		}
-		facetName := mongoMetricFacetName(index, metric)
-		facets = append(facets, bson.E{Key: facetName, Value: b.buildMetricFacetPipeline(metric)})
-		facetArrays = append(facetArrays, "$"+facetName)
-	}
-
-	pipeline = append(
-		pipeline,
-		bson.D{{Key: "$facet", Value: facets}},
-		bson.D{{Key: "$project", Value: bson.D{{Key: mongoRowsField, Value: bson.D{{Key: "$concatArrays", Value: facetArrays}}}}}},
-		bson.D{{Key: "$unwind", Value: "$" + mongoRowsField}},
-		bson.D{{Key: "$replaceRoot", Value: bson.D{{Key: "newRoot", Value: "$" + mongoRowsField}}}},
-	)
-
-	mergeGroup := bson.D{{Key: "_id", Value: b.buildOutputGroupID()}}
-	for _, metric := range b.spec.Metrics {
-		value := any("$" + metric.Alias)
-		operator := "$max"
-		if requiresMetricFacet(metric) && usesSummingMerge(metric) {
-			value = bson.D{{Key: "$ifNull", Value: bson.A{"$" + metric.Alias, 0}}}
-			operator = "$sum"
-		}
-		mergeGroup = append(mergeGroup, bson.E{
-			Key: metric.Alias,
-			Value: bson.D{{
-				Key:   operator,
-				Value: value,
-			}},
-		})
-	}
-
-	return append(
-		pipeline,
-		bson.D{{Key: "$group", Value: mergeGroup}},
-		bson.D{{Key: "$project", Value: b.buildProjection(b.spec.Metrics)}},
-	)
-}
-
-// buildBaseFacetPipeline 构建保留原始统计语义的基础分支
-func (b *MongoBuilder[A]) buildBaseFacetPipeline() mongo.Pipeline {
-	metrics := make([]Metric, 0, len(b.spec.Metrics))
-	for _, metric := range b.spec.Metrics {
-		if !requiresMetricFacet(metric) {
-			metrics = append(metrics, metric)
-		}
-	}
-	return mongo.Pipeline{
-		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), metrics)}},
-		bson.D{{Key: "$project", Value: b.buildProjection(metrics)}},
-	}
-}
-
-// buildMetricFacetPipeline 构建单个需要独立分支计算的指标管道
-func (b *MongoBuilder[A]) buildMetricFacetPipeline(metric Metric) mongo.Pipeline {
-	if isDistinctMetric(metric) {
-		return b.buildDistinctMetricFacetPipeline(metric)
-	}
-
-	pipeline := make(mongo.Pipeline, 0, 3)
-	if metric.Condition != nil {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: b.buildConditionMatch(*metric.Condition)}})
-	}
-	return append(
-		pipeline,
-		bson.D{{Key: "$group", Value: b.buildMetricGroupStage(b.buildSourceGroupID(), []Metric{metric})}},
-		bson.D{{Key: "$project", Value: b.buildProjection([]Metric{metric})}},
-	)
-}
-
-// buildDistinctMetricFacetPipeline 构建单个去重指标分支的两阶段分组
-func (b *MongoBuilder[A]) buildDistinctMetricFacetPipeline(metric Metric) mongo.Pipeline {
-	firstGroupID := any(bson.D{{Key: "value", Value: "$" + metric.Field}})
-	secondGroupID := any(nil)
-	if len(b.spec.Groups) > 0 {
-		firstGroupID = bson.D{
-			{Key: "group", Value: b.buildSourceGroupID()},
-			{Key: "value", Value: "$" + metric.Field},
-		}
-		secondGroupID = "$_id.group"
-	}
-
-	accumulator := bson.D{{Key: "$sum", Value: 1}}
-	if isDistinctSum(metric) {
-		accumulator = bson.D{{Key: "$sum", Value: "$_id.value"}}
-	}
-
-	return mongo.Pipeline{
-		bson.D{{Key: "$match", Value: b.buildMetricMatch(metric)}},
-		bson.D{{Key: "$group", Value: bson.D{{Key: "_id", Value: firstGroupID}}}},
-		bson.D{{Key: "$group", Value: bson.D{
-			{Key: "_id", Value: secondGroupID},
-			{Key: metric.Alias, Value: accumulator},
-		}}},
-		bson.D{{Key: "$project", Value: b.buildProjection([]Metric{metric})}},
-	}
-}
-
-// buildMetricGroupStage 构建普通指标使用的 MongoDB $group 内容
+// buildMetricGroupStage 构建指标使用的 MongoDB $group 内容
+// 条件指标用 $cond 折进同一阶段；去重指标用 $addToSet，避免 $facet 复制全量文档
 func (b *MongoBuilder[A]) buildMetricGroupStage(groupID any, metrics []Metric) bson.D {
 	groupStage := bson.D{{Key: "_id", Value: groupID}}
 	for _, metric := range metrics {
-		if isDistinctMetric(metric) {
-			continue
-		}
-		operator := "$" + metric.Func.String()
-		value := any(1)
-		if metric.Func == Count {
-			operator = "$sum"
-		} else {
-			value = "$" + metric.Field
-		}
 		groupStage = append(groupStage, bson.E{
-			Key: metric.Alias,
-			Value: bson.D{{
-				Key:   operator,
-				Value: value,
-			}},
+			Key:   metric.Alias,
+			Value: b.mongoMetricAccumulator(metric),
 		})
 	}
 	return groupStage
+}
+
+// mongoMetricAccumulator 将单个指标转换为 $group 累加器
+func (b *MongoBuilder[A]) mongoMetricAccumulator(metric Metric) bson.D {
+	if isDistinctMetric(metric) {
+		return bson.D{{Key: "$addToSet", Value: b.mongoConditionalValue(metric, "$"+metric.Field, nil)}}
+	}
+	if metric.Func == Count {
+		return bson.D{{Key: "$sum", Value: b.mongoConditionalValue(metric, 1, 0)}}
+	}
+	fieldRef := "$" + metric.Field
+	operator := "$" + metric.Func.String()
+	var otherwise any
+	if metric.Func == Sum {
+		otherwise = 0
+	}
+	return bson.D{{Key: operator, Value: b.mongoConditionalValue(metric, fieldRef, otherwise)}}
+}
+
+// mongoConditionalValue 无谓词时直接返回 when；否则返回 $cond 表达式：
+// 谓词成立取 when，否则取 otherwise。谓词由字段存在性检查与字段条件（如有）组成
+func (b *MongoBuilder[A]) mongoConditionalValue(metric Metric, when any, otherwise any) any {
+	predicates := make(bson.A, 0, 2)
+	if metric.Field != "" && (isDistinctMetric(metric) || metric.Func != Count) {
+		predicates = append(predicates, mongoFieldPresentExpr(metric.Field))
+	}
+	if metric.Condition != nil {
+		predicates = append(predicates, mongoConditionExpr(*metric.Condition))
+	}
+	if len(predicates) == 0 {
+		return when
+	}
+	predicate := any(predicates[0])
+	if len(predicates) > 1 {
+		predicate = bson.D{{Key: "$and", Value: predicates}}
+	}
+	return bson.D{{Key: "$cond", Value: bson.A{predicate, when, otherwise}}}
 }
 
 // buildSourceGroupID 构建基于原始文档字段的分组键
@@ -347,18 +255,6 @@ func (b *MongoBuilder[A]) buildSourceGroupID() any {
 	return keys
 }
 
-// buildOutputGroupID 构建基于中间结果字段的分组键
-func (b *MongoBuilder[A]) buildOutputGroupID() any {
-	if len(b.spec.Groups) == 0 {
-		return nil
-	}
-	keys := make(bson.D, 0, len(b.spec.Groups))
-	for _, group := range b.spec.Groups {
-		keys = append(keys, bson.E{Key: group.Alias, Value: "$" + group.Alias})
-	}
-	return keys
-}
-
 // buildProjection 构建把分组键和指标别名展开到结果行的投影
 func (b *MongoBuilder[A]) buildProjection(metrics []Metric) bson.D {
 	projection := bson.D{{Key: "_id", Value: 0}}
@@ -366,24 +262,29 @@ func (b *MongoBuilder[A]) buildProjection(metrics []Metric) bson.D {
 		projection = append(projection, bson.E{Key: group.Alias, Value: "$_id." + group.Alias})
 	}
 	for _, metric := range metrics {
-		projection = append(projection, bson.E{Key: metric.Alias, Value: 1})
+		projection = append(projection, bson.E{Key: metric.Alias, Value: mongoProjectedMetric(metric)})
 	}
 	return projection
 }
 
-// buildMetricMatch 构建单个去重指标字段的非空过滤条件
-func (b *MongoBuilder[A]) buildMetricMatch(metric Metric) bson.D {
-	clauses := bson.A{bson.D{{
-		Key: metric.Field,
-		Value: bson.D{
-			{Key: "$exists", Value: true},
-			{Key: "$ne", Value: nil},
-		},
-	}}}
-	if metric.Condition != nil {
-		clauses = append(clauses, b.buildConditionMatch(*metric.Condition))
+// mongoProjectedMetric 构建指标在 $project 阶段的取值表达式
+// 去重指标在 $group 阶段得到的是数组，需先过滤 null 再取大小或求和
+func mongoProjectedMetric(metric Metric) any {
+	if isDistinctCount(metric) {
+		return bson.D{{Key: "$size", Value: mongoFilterNulls("$" + metric.Alias)}}
 	}
-	return mergeMongoClauses(clauses)
+	if isDistinctSum(metric) {
+		return bson.D{{Key: "$sum", Value: mongoFilterNulls("$" + metric.Alias)}}
+	}
+	return 1
+}
+
+// mongoFilterNulls 构建 $filter 表达式，剔除数组中的 null 元素
+func mongoFilterNulls(ref string) bson.D {
+	return bson.D{{Key: "$filter", Value: bson.D{
+		{Key: "input", Value: ref},
+		{Key: "cond", Value: bson.D{{Key: "$ne", Value: bson.A{"$$this", nil}}}},
+	}}}
 }
 
 // buildConditionMatch 构建字段级条件过滤文档
@@ -404,17 +305,13 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 			bson.D{{Key: "$gte", Value: bson.A{"$" + condition.Field, start}}},
 			bson.D{{Key: "$lte", Value: bson.A{"$" + condition.Field, end}}},
 		}}}}}
-	case Exists:
-		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: true}}}}
-	case NotExists:
-		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: false}}}}
-	case IsNull:
+	case Exists, IsNotNull:
+		return mongoFieldExistsAndNotNull(condition.Field)
+	case NotExists, IsNull:
 		return bson.D{{Key: "$or", Value: bson.A{
 			bson.D{{Key: condition.Field, Value: bson.D{{Key: "$exists", Value: false}}}},
 			bson.D{{Key: condition.Field, Value: nil}},
 		}}}
-	case IsNotNull:
-		return mongoFieldExistsAndNotNull(condition.Field)
 	case Like:
 		return bson.D{{Key: condition.Field, Value: bson.D{{Key: "$regex", Value: sqlLikePatternToRegexp(condition.Value.(string))}}}}
 	case NotLike:
@@ -424,7 +321,7 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 		})
 	}
 
-	// 上述 case 未显式列出的算术比较操作符（Eq/Ne/Gt/Gte/Lt/Lte）会落空到此，
+	// 其余算术比较操作符（Eq/Ne/Gt/Gte/Lt/Lte）落入默认分支，
 	// 统一通过 mongoConditionExpression + mongoOperator 转换为 $expr 比较表达式。
 	expression := bson.D{{Key: "$expr", Value: mongoConditionExpression(condition)}}
 	if condition.Op != Ne {
@@ -434,6 +331,68 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 		mongoFieldExistsAndNotNull(condition.Field),
 		expression,
 	})
+}
+
+// mongoConditionExpr 将字段条件转换为可放进 $cond 的布尔表达式
+func mongoConditionExpr(condition Condition) any {
+	field := "$" + condition.Field
+	switch condition.Op {
+	case In:
+		values, _ := conditionListValues(condition.Value)
+		return bson.D{{Key: "$in", Value: bson.A{field, bson.A(values)}}}
+	case NotIn:
+		values, _ := conditionListValues(condition.Value)
+		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
+			bson.D{{Key: "$not", Value: bson.D{{Key: "$in", Value: bson.A{field, bson.A(values)}}}}},
+		}}}
+	case Between:
+		start, end, _ := conditionRangeValues(condition.Value)
+		return bson.D{{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$gte", Value: bson.A{field, start}}},
+			bson.D{{Key: "$lte", Value: bson.A{field, end}}},
+		}}}
+	case Exists, IsNotNull:
+		return mongoFieldPresentExpr(condition.Field)
+	case NotExists, IsNull:
+		return bson.D{{Key: "$not", Value: mongoFieldPresentExpr(condition.Field)}}
+	case Like:
+		// 与 SQL 一致：NULL LIKE 不成立，不用 $ifNull 把 null 当成空串
+		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
+			mongoRegexMatchExpr(field, condition.Value.(string)),
+		}}}
+	case NotLike:
+		// 与 SQL 一致：NULL NOT LIKE 也不成立，输入同样用 $toString(field)
+		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
+			bson.D{{Key: "$not", Value: mongoRegexMatchExpr(field, condition.Value.(string))}},
+		}}}
+	case Ne:
+		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
+			bson.D{{Key: "$ne", Value: bson.A{field, condition.Value}}},
+		}}}
+	default:
+		return mongoConditionExpression(condition)
+	}
+}
+
+// mongoRegexMatchExpr 构建 $regexMatch 表达式，将字段值转为字符串后按模式匹配
+func mongoRegexMatchExpr(fieldRef, pattern string) bson.D {
+	return bson.D{{Key: "$regexMatch", Value: bson.D{
+		{Key: "input", Value: bson.D{{Key: "$toString", Value: fieldRef}}},
+		{Key: "regex", Value: sqlLikePatternToRegexp(pattern)},
+	}}}
+}
+
+// mongoFieldPresentExpr 构建字段存在且非 null 的 $expr 布尔表达式
+func mongoFieldPresentExpr(field string) bson.D {
+	ref := "$" + field
+	return bson.D{{Key: "$and", Value: bson.A{
+		bson.D{{Key: "$ne", Value: bson.A{bson.D{{Key: "$type", Value: ref}}, "missing"}}},
+		bson.D{{Key: "$ne", Value: bson.A{ref, nil}}},
+	}}}
 }
 
 // appendHaving 为分组结果追加 HAVING 过滤
@@ -498,11 +457,6 @@ func (b *MongoBuilder[A]) buildHavingClause(having Having) bson.D {
 	})
 }
 
-// hasFacetMetric 判断当前规范是否包含需要独立分支计算的指标
-func (b *MongoBuilder[A]) hasFacetMetric() bool {
-	return slices.ContainsFunc(b.spec.Metrics, requiresMetricFacet)
-}
-
 // buildMatch 合并业务过滤条件与分组字段非空条件
 func (b *MongoBuilder[A]) buildMatch() bson.D {
 	clauses := make(bson.A, 0, len(b.spec.Groups)+1)
@@ -519,19 +473,6 @@ func (b *MongoBuilder[A]) buildMatch() bson.D {
 		}})
 	}
 	return mergeMongoClauses(clauses)
-}
-
-// mongoMetricFacetName 返回需要独立分支计算的指标 facet 名称
-func mongoMetricFacetName(index int, metric Metric) string {
-	if isDistinctMetric(metric) {
-		return fmt.Sprintf("_distinct_%d", index)
-	}
-	return fmt.Sprintf("_conditional_%d", index)
-}
-
-// usesSummingMerge 判断 facet 合并阶段是否应累加指标值
-func usesSummingMerge(metric Metric) bool {
-	return metric.Func == Count || metric.Func == Sum
 }
 
 // mongoConditionExpression 构建 MongoDB $expr 条件表达式
@@ -658,6 +599,7 @@ func (b *MongoBuilder[A]) mongoGroupExpression(group Group) any {
 	return bson.D{{Key: "$dateTrunc", Value: dateTrunc}}
 }
 
+// mongoFieldExistsAndNotNull 构建字段存在且非 null 的匹配文档
 func mongoFieldExistsAndNotNull(field string) bson.D {
 	return bson.D{{
 		Key: field,

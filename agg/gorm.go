@@ -367,10 +367,16 @@ func gormDateGroupExpression(db *gorm.DB, group Group) string {
 	dialect := strings.ToLower(db.Dialector.Name())
 	switch dialect {
 	case "mysql":
+		if group.TimeZone != "" {
+			field = "CONVERT_TZ(" + field + ", @@session.time_zone, " + quoteSQLString(group.TimeZone) + ")"
+		}
 		return gormMySQLDateGroupExpression(field, group.Interval)
 	case "sqlite", "sqlite3":
 		return gormSQLiteDateGroupExpression(field, group.Interval)
 	case "sqlserver":
+		if group.TimeZone != "" {
+			field = "CAST(CAST(" + field + " AS datetimeoffset) AT TIME ZONE " + quoteSQLString(group.TimeZone) + " AS datetime2)"
+		}
 		return gormSQLServerDateGroupExpression(field, group.Interval)
 	default:
 		if group.TimeZone != "" {
@@ -380,6 +386,7 @@ func gormDateGroupExpression(db *gorm.DB, group Group) string {
 	}
 }
 
+// gormMySQLDateGroupExpression 构建 MySQL 方言的时间桶分组表达式
 func gormMySQLDateGroupExpression(field string, interval TimeInterval) string {
 	switch interval {
 	case TimeIntervalMinute:
@@ -401,6 +408,7 @@ func gormMySQLDateGroupExpression(field string, interval TimeInterval) string {
 	}
 }
 
+// gormSQLiteDateGroupExpression 构建 SQLite 方言的时间桶分组表达式
 func gormSQLiteDateGroupExpression(field string, interval TimeInterval) string {
 	switch interval {
 	case TimeIntervalMinute:
@@ -410,7 +418,8 @@ func gormSQLiteDateGroupExpression(field string, interval TimeInterval) string {
 	case TimeIntervalDay:
 		return "strftime('%Y-%m-%d 00:00:00', " + field + ")"
 	case TimeIntervalWeek:
-		return "strftime('%Y-W%W', " + field + ")"
+		// 对齐到当周周一，避免 %W 以周日为一周起始
+		return "date(" + field + ", '-' || ((CAST(strftime('%w', " + field + ") AS INTEGER) + 6) % 7) || ' days')"
 	case TimeIntervalMonth:
 		return "strftime('%Y-%m-01 00:00:00', " + field + ")"
 	case TimeIntervalQuarter:
@@ -422,6 +431,7 @@ func gormSQLiteDateGroupExpression(field string, interval TimeInterval) string {
 	}
 }
 
+// gormSQLServerDateGroupExpression 构建 SQL Server 方言的时间桶分组表达式
 func gormSQLServerDateGroupExpression(field string, interval TimeInterval) string {
 	part := string(interval)
 	if interval == TimeIntervalQuarter {
@@ -430,6 +440,7 @@ func gormSQLServerDateGroupExpression(field string, interval TimeInterval) strin
 	return "DATEADD(" + part + ", DATEDIFF(" + part + ", 0, " + field + "), 0)"
 }
 
+// quoteSQLString 返回单引号包裹的 SQL 字符串字面量，内部单引号按 SQL 规则转义
 func quoteSQLString(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
@@ -455,9 +466,10 @@ func validateGormDateGroups(db *gorm.DB, spec Spec) error {
 	return nil
 }
 
+// gormDialectSupportsDateGroupTimeZone 判断当前方言是否支持时间桶分组中的时区转换
 func gormDialectSupportsDateGroupTimeZone(dialect string) bool {
 	switch strings.ToLower(dialect) {
-	case "mysql", "sqlite", "sqlite3", "sqlserver":
+	case "sqlite", "sqlite3":
 		return false
 	default:
 		return true

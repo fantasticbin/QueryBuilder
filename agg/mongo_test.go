@@ -83,53 +83,29 @@ func TestMongoBuilderExplainDistinctMetrics(t *testing.T) {
 		t.Fatalf("decoding explanation: %v", err)
 	}
 	pipeline := payload["pipeline"].([]any)
-	if len(pipeline) != 9 {
-		t.Fatalf("expected nine pipeline stages, got %d: %s", len(pipeline), explanation)
+	if len(pipeline) != 5 {
+		t.Fatalf("expected five pipeline stages, got %d: %s", len(pipeline), explanation)
+	}
+	if strings.Contains(explanation, `"$facet"`) {
+		t.Fatalf("distinct metrics should not use $facet: %s", explanation)
 	}
 
-	facet := pipeline[1].(map[string]any)["$facet"].(map[string]any)
-	if _, ok := facet[mongoBaseFacet].([]any); !ok {
-		t.Fatalf("expected base facet: %s", explanation)
+	group := pipeline[1].(map[string]any)["$group"].(map[string]any)
+	if _, ok := group["buyer_count"].(map[string]any)["$addToSet"]; !ok {
+		t.Fatalf("expected distinct count to use $addToSet: %v", group["buyer_count"])
 	}
-	distinct := facet["_distinct_1"].([]any)
-	if len(distinct) != 4 {
-		t.Fatalf("expected four distinct facet stages, got %d: %v", len(distinct), distinct)
-	}
-	match := distinct[0].(map[string]any)["$match"].(map[string]any)
-	if _, ok := match["customer.id"]; !ok {
-		t.Fatalf("expected distinct field non-empty match: %v", match)
-	}
-	if _, ok := distinct[1].(map[string]any)["$group"]; !ok {
-		t.Fatalf("expected first distinct group stage: %v", distinct[1])
-	}
-	if _, ok := distinct[2].(map[string]any)["$group"]; !ok {
-		t.Fatalf("expected second distinct group stage: %v", distinct[2])
-	}
-	distinctSum := facet["_distinct_2"].([]any)
-	sumGroup := distinctSum[2].(map[string]any)["$group"].(map[string]any)
-	if sumGroup["unique_amount_sum"].(map[string]any)["$sum"] != "$_id.value" {
-		t.Fatalf("expected sum distinct to add unique values: %v", sumGroup)
+	if _, ok := group["unique_amount_sum"].(map[string]any)["$addToSet"]; !ok {
+		t.Fatalf("expected distinct sum to use $addToSet: %v", group["unique_amount_sum"])
 	}
 
 	project := pipeline[2].(map[string]any)["$project"].(map[string]any)
-	concat := project[mongoRowsField].(map[string]any)["$concatArrays"].([]any)
-	if len(concat) != 3 || concat[0] != "$"+mongoBaseFacet || concat[1] != "$_distinct_1" || concat[2] != "$_distinct_2" {
-		t.Fatalf("unexpected concat arrays: %v", concat)
+	if _, ok := project["buyer_count"].(map[string]any)["$size"]; !ok {
+		t.Fatalf("expected distinct count projection $size: %v", project["buyer_count"])
 	}
-
-	merge := pipeline[5].(map[string]any)["$group"].(map[string]any)
-	if _, ok := merge["total"].(map[string]any)["$max"]; !ok {
-		t.Fatalf("expected regular metrics to use max during facet merge: %v", merge["total"])
+	if _, ok := project["unique_amount_sum"].(map[string]any)["$sum"]; !ok {
+		t.Fatalf("expected distinct sum projection $sum: %v", project["unique_amount_sum"])
 	}
-	buyerCount := merge["buyer_count"].(map[string]any)["$sum"].(map[string]any)
-	if _, ok := buyerCount["$ifNull"]; !ok {
-		t.Fatalf("expected distinct count to default missing values to zero: %v", buyerCount)
-	}
-	uniqueAmountSum := merge["unique_amount_sum"].(map[string]any)["$sum"].(map[string]any)
-	if _, ok := uniqueAmountSum["$ifNull"]; !ok {
-		t.Fatalf("expected sum distinct to preserve negative values while defaulting missing branches: %v", uniqueAmountSum)
-	}
-	sort := pipeline[7].(map[string]any)["$sort"].(map[string]any)
+	sort := pipeline[3].(map[string]any)["$sort"].(map[string]any)
 	if sort["region"].(map[string]any)["$numberInt"] != "-1" {
 		t.Fatalf("unexpected sort stage: %v", sort)
 	}
@@ -184,14 +160,12 @@ func TestMongoBuilderExplainAdvancedSpec(t *testing.T) {
 		t.Fatalf("decoding explanation: %v", err)
 	}
 	pipeline := payload["pipeline"].([]any)
-	facet := pipeline[1].(map[string]any)["$facet"].(map[string]any)
-	if _, ok := facet[mongoBaseFacet].([]any); !ok {
-		t.Fatalf("expected base facet: %s", explanation)
+	if strings.Contains(explanation, `"$facet"`) {
+		t.Fatalf("conditional metrics should not use $facet: %s", explanation)
 	}
-	conditional := facet["_conditional_1"].([]any)
-	match := conditional[0].(map[string]any)["$match"].(map[string]any)
-	if _, ok := match["$expr"]; !ok {
-		t.Fatalf("expected conditional metric match to use $expr: %v", match)
+	group := pipeline[1].(map[string]any)["$group"].(map[string]any)
+	if _, ok := group["paid_total"].(map[string]any)["$sum"].(map[string]any)["$cond"]; !ok {
+		t.Fatalf("expected conditional count to use $cond: %v", group["paid_total"])
 	}
 	postHaving := pipeline[len(pipeline)-3].(map[string]any)["$match"].(map[string]any)
 	if _, ok := postHaving["paid_amount"]; !ok {
@@ -200,6 +174,62 @@ func TestMongoBuilderExplainAdvancedSpec(t *testing.T) {
 	sort := pipeline[len(pipeline)-2].(map[string]any)["$sort"].(map[string]any)
 	if sort["paid_amount"].(map[string]any)["$numberInt"] != "-1" {
 		t.Fatalf("unexpected sort stage: %v", sort)
+	}
+}
+
+func TestMongoExistsAlignsWithIsNotNull(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[mongoSummary](nil)
+	exists := builder.buildConditionMatch(Condition{Field: "paid_at", Op: Exists})
+	notNull := builder.buildConditionMatch(Condition{Field: "paid_at", Op: IsNotNull})
+	if exists[0].Key != "paid_at" {
+		t.Fatalf("expected field match, got %#v", exists)
+	}
+	operators := exists[0].Value.(bson.D)
+	if operators[0].Key != "$exists" || operators[0].Value != true || operators[1].Key != "$ne" || operators[1].Value != nil {
+		t.Fatalf("EXISTS should require present non-null field, got %#v", operators)
+	}
+	if len(exists) != len(notNull) || exists[0].Key != notNull[0].Key {
+		t.Fatalf("EXISTS and IS NOT NULL should match, exists=%#v notNull=%#v", exists, notNull)
+	}
+
+	missing := builder.buildConditionMatch(Condition{Field: "paid_at", Op: NotExists})
+	isNull := builder.buildConditionMatch(Condition{Field: "paid_at", Op: IsNull})
+	if missing[0].Key != "$or" || isNull[0].Key != "$or" {
+		t.Fatalf("NOT EXISTS / IS NULL should treat missing or null as empty, got %#v / %#v", missing, isNull)
+	}
+}
+
+func TestMongoLikeAndNotLikeSharePresentAndToString(t *testing.T) {
+	t.Parallel()
+
+	like := mongoConditionExpr(Condition{Field: "customer.name", Op: Like, Value: "A%"})
+	notLike := mongoConditionExpr(Condition{Field: "customer.name", Op: NotLike, Value: "A%"})
+	likeDoc, ok := like.(bson.D)
+	if !ok || len(likeDoc) != 1 || likeDoc[0].Key != "$and" {
+		t.Fatalf("LIKE should require present field, got %#v", like)
+	}
+	notLikeDoc, ok := notLike.(bson.D)
+	if !ok || len(notLikeDoc) != 1 || notLikeDoc[0].Key != "$and" {
+		t.Fatalf("NOT LIKE should require present field, got %#v", notLike)
+	}
+
+	likeEncoded, err := bson.MarshalExtJSON(likeDoc, true, false)
+	if err != nil {
+		t.Fatalf("encode LIKE: %v", err)
+	}
+	notLikeEncoded, err := bson.MarshalExtJSON(notLikeDoc, true, false)
+	if err != nil {
+		t.Fatalf("encode NOT LIKE: %v", err)
+	}
+	for _, payload := range []string{string(likeEncoded), string(notLikeEncoded)} {
+		if strings.Contains(payload, "$ifNull") {
+			t.Fatalf("null must not be coerced to empty string: %s", payload)
+		}
+		if !strings.Contains(payload, `"$toString"`) || !strings.Contains(payload, `"$regexMatch"`) {
+			t.Fatalf("expected $toString+$regexMatch, got %s", payload)
+		}
 	}
 }
 
@@ -274,9 +304,9 @@ func TestMongoBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
 		`"$dateTrunc"`,
 		`"timezone": "Asia/Shanghai"`,
 		`"$in"`,
-		`"$regex"`,
+		`"$regexMatch"`,
 		`"flags": {`,
-		`"$numberLong": "14"`,
+		`"$numberLong": "6"`,
 	} {
 		if !strings.Contains(explanation, fragment) {
 			t.Fatalf("expected explanation to contain %q: %s", fragment, explanation)

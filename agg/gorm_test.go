@@ -174,7 +174,7 @@ func TestGormBuilderExplainRichConditionsAndDateGroup(t *testing.T) {
 func TestGormBuilderRejectsUnsupportedDateGroupTimeZoneDialect(t *testing.T) {
 	t.Parallel()
 
-	db, err := gorm.Open(aggregateTestDialector{name: "mysql"}, &gorm.Config{DisableAutomaticPing: true})
+	db, err := gorm.Open(aggregateTestDialector{name: "sqlite"}, &gorm.Config{DisableAutomaticPing: true})
 	if err != nil {
 		t.Fatalf("opening test gorm db: %v", err)
 	}
@@ -186,6 +186,48 @@ func TestGormBuilderRejectsUnsupportedDateGroupTimeZoneDialect(t *testing.T) {
 	_, err = builder.Explain(context.Background())
 	if !errors.Is(err, ErrInvalidSpec) {
 		t.Fatalf("expected invalid spec error, got %v", err)
+	}
+}
+
+func TestGormBuilderMySQLDateGroupUsesConvertTZ(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{name: "mysql"}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupByDateWithTimeZone("created_at", "created_day", TimeIntervalDay, "UTC").
+		Count("total")
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(explanation, "CONVERT_TZ") || !strings.Contains(explanation, "UTC") {
+		t.Fatalf("expected MySQL timezone conversion, got %s", explanation)
+	}
+}
+
+func TestGormBuilderSQLiteWeekStartsOnMonday(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(aggregateTestDialector{name: "sqlite"}, &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("opening test gorm db: %v", err)
+	}
+	data := core.NewDBProxyWithAdapters(core.NewGormAdapter(db))
+	builder := NewGormBuilder[gormOrder, gormSummary](data)
+	builder.GroupByDate("created_at", "created_week", TimeIntervalWeek).
+		Count("total")
+
+	explanation, err := builder.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(explanation, "strftime('%w'") {
+		t.Fatalf("expected Monday-aligned SQLite week expression, got %s", explanation)
 	}
 }
 
