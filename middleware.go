@@ -297,11 +297,14 @@ func (mc *middlewareContext[R]) executePageWithMiddlewares(
 	ctx context.Context,
 	pageFetchFn cursorFetchBatch[R],
 ) (*core.CursorPageResult[R], error) {
-	ctx, batchSize, initialCursorValues, runChain := mc.prepareCursorPipeline(ctx)
+	ctx, _, initialCursorValues, runChain := mc.prepareCursorPipeline(ctx)
 
 	// 单批次查询：先组装完整 CursorPageResult，再交给中间件链
 	queryFn := func(ctx context.Context) (core.Result[R], error) {
 		batch, nextCV, total, more, err := pageFetchFn(ctx, initialCursorValues, true)
+		if !more {
+			nextCV = nil
+		}
 		result := &core.CursorPageResult[R]{
 			Items:            batch,
 			Total:            mc.resolveResultTotal(batch, total),
@@ -313,7 +316,6 @@ func (mc *middlewareContext[R]) executePageWithMiddlewares(
 
 	result, err := runChain(ctx, queryFn)
 	pageResult := cursorPageResultFromResult(result)
-	normalizeCursorPageResult(pageResult, batchSize)
 	// 执行后置钩子
 	mc.invokeAfterHook(ctx, pageResult, err)
 	if err != nil {
@@ -343,17 +345,6 @@ func resolveQueryTotal(needTotal bool, itemCount int, queryTotal int64) int64 {
 		return queryTotal
 	}
 	return int64(itemCount)
-}
-
-// normalizeCursorPageResult 根据 batchSize 和实际返回的 Items 数量调整 HasMore 和 NextCursorValues 字段
-func normalizeCursorPageResult[R any](result *core.CursorPageResult[R], batchSize int) {
-	if result == nil {
-		return
-	}
-	if !result.HasMore || len(result.Items) < batchSize {
-		result.HasMore = false
-		result.NextCursorValues = nil
-	}
 }
 
 // cursorPageResultFromResult 根据通用 Result[R] 组装 *CursorPageResult[R]

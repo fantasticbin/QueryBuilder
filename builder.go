@@ -255,6 +255,13 @@ func (b *builder[B, R]) setSelf(self B, querier Querier[R]) {
 	b.querierRef = querier
 }
 
+// applyQueryConfigDefaults 将列表查询的默认分页与总数策略写到构建器上
+func (b *builder[B, R]) applyQueryConfigDefaults() {
+	b.limit = defaultLimit
+	b.needPagination = defaultNeedPagination
+	b.needTotal = defaultNeedTotal
+}
+
 // 以下方法实现 middlewareProvider[R] 接口，供 newMiddlewareContext 通过接口约束获取数据
 func (b *builder[B, R]) getMiddlewares() []Middleware[R] { return b.middlewares }
 func (b *builder[B, R]) getQuerierRef() Querier[R]       { return b.querierRef }
@@ -628,11 +635,4 @@ func NewBuilder[R any](ds core.DataSource, data *core.DBProxy) Querier[R] {
 		}
 		return unsupportedQuerier[R]{dataSource: ds}
 	}
-}
-
-// applyQueryConfigDefaults 将列表查询的默认分页与总数策略写到构建器上
-func applyQueryConfigDefaults[B queryBuilder[B, R], R any](b *builder[B, R]) {
-	b.limit = defaultLimit
-	b.needPagination = defaultNeedPagination
-	b.needTotal = defaultNeedTotal
 }

@@ -38,7 +38,7 @@ func NewMongoBuilder[R any](data *core.DBProxy) *MongoBuilder[R] {
 	m := &MongoBuilder[R]{}
 	m.builder.data = data
 	m.builder.dataSource = core.MongoDB
-	applyQueryConfigDefaults(&m.builder)
+	m.builder.applyQueryConfigDefaults()
 	m.builder.setSelf(m, m)
 	return m
 }
