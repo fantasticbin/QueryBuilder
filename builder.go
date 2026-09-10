@@ -10,6 +10,7 @@ import (
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/olivere/elastic/v7"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
@@ -21,6 +22,8 @@ const (
 	MongoDB = core.MongoDB
 	// ElasticSearch 数据源
 	ElasticSearch = core.ElasticSearch
+	// RedisSearch 数据源（Redis Query Engine / RediSearch）
+	RedisSearch = core.RedisSearch
 )
 
 var (
@@ -59,6 +62,11 @@ func NewMongoAdapter(collection *mongo.Collection) core.MongoAdapter {
 // NewElasticSearchAdapter 创建 ElasticSearch 数据源适配器
 func NewElasticSearchAdapter(client *elastic.Client) core.ElasticSearchAdapter {
 	return core.NewElasticSearchAdapter(client)
+}
+
+// NewRedisAdapter 创建 RedisSearch 数据源适配器
+func NewRedisAdapter(client redis.UniversalClient) core.RedisAdapter {
+	return core.NewRedisAdapter(client)
 }
 
 // NewDBProxy 创建数据实例
@@ -629,6 +637,8 @@ func NewBuilder[R any](ds core.DataSource, data *core.DBProxy) Querier[R] {
 		return NewMongoBuilder[R](data)
 	case core.ElasticSearch:
 		return NewElasticSearchBuilder[R](data, "")
+	case core.RedisSearch:
+		return NewRedisSearchBuilder[R](data, "")
 	default:
 		if querier, ok := lookupCustomBuilder[R](ds, data); ok {
 			return querier

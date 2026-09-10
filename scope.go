@@ -68,3 +68,31 @@ func NewElasticSearchScope[R any](filter elastic.Query, sort ...elastic.Sorter) 
 		}
 	}
 }
+
+// NewRedisSearchScope 创建一个 RedisSearch 构建器的 ScopeConfigurer
+// 用于 List.SetScope，在 Query 内部自动设置 filter 和 sort，无需手写中间件
+// 参数:
+//
+//	filter - Redis 过滤条件（RedisFilter 类型），零值时跳过
+//	sort   - Redis 排序条件（RedisSort 可变参数，单字段约束），可为空
+func NewRedisSearchScope[R any](filter RedisFilter, sort ...RedisSort) ScopeConfigurer[R] {
+	return func(querier Querier[R]) {
+		if rb, ok := querier.(*RedisSearchBuilder[R]); ok {
+			if !isZeroRedisFilter(filter) {
+				rb.SetFilter(filter)
+			}
+			if len(sort) > 0 {
+				rb.SetSort(sort...)
+			}
+		}
+	}
+}
+
+// isZeroRedisFilter 判断 RedisFilter 是否为零值（含切片字段，不可直接 == 比较）
+func isZeroRedisFilter(filter RedisFilter) bool {
+	return filter.Query == "" &&
+		filter.NumericFilters == nil &&
+		filter.InKeys == nil &&
+		filter.InFields == nil &&
+		filter.Params == nil
+}

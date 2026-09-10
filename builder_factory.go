@@ -48,7 +48,7 @@ func lookupCustomBuilder[R any](ds core.DataSource, data *core.DBProxy) (Querier
 // isBuiltInQueryDataSource 判断数据源是否已有内置 Builder
 func isBuiltInQueryDataSource(ds core.DataSource) bool {
 	switch ds {
-	case Gorm, MongoDB, ElasticSearch:
+	case Gorm, MongoDB, ElasticSearch, RedisSearch:
 		return true
 	default:
 		return false

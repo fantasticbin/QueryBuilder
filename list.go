@@ -115,6 +115,8 @@ func cloneQuerier[R any](querier Querier[R]) Querier[R] {
 		return q.Clone()
 	case *ElasticSearchBuilder[R]:
 		return q.Clone()
+	case *RedisSearchBuilder[R]:
+		return q.Clone()
 	default:
 		return querier
 	}
@@ -131,6 +133,11 @@ func (l *List[R]) applyBackendOptions(querier Querier[R], options BaseQueryListO
 		}
 		if options.pitKeepAlive > 0 {
 			es.SetPitKeepAlive(options.pitKeepAlive)
+		}
+	}
+	if rb, ok := querier.(*RedisSearchBuilder[R]); ok {
+		if options.redisIndex != "" {
+			rb.SetIndex(options.redisIndex)
 		}
 	}
 }

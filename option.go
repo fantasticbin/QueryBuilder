@@ -60,6 +60,7 @@ type BaseQueryListOptions struct {
 	cursorValues   []any         // 游标初始值（用于断点续查/App分页场景）
 	esIndex        string        // Elasticsearch 索引名
 	pitID          string        // Elasticsearch PIT ID（跨请求分页）
+	redisIndex     string        // Redis 索引名
 }
 
 // GetData 返回本次查询显式传入的数据源注册表
@@ -214,5 +215,12 @@ func WithPITID(pitID string) QueryOption {
 func WithPitKeepAlive(keepAlive time.Duration) QueryOption {
 	return func(o *BaseQueryListOptions) {
 		o.pitKeepAlive = keepAlive
+	}
+}
+
+// WithRedisIndex 设置 Redis 查询索引名
+func WithRedisIndex(index string) QueryOption {
+	return func(o *BaseQueryListOptions) {
+		o.redisIndex = index
 	}
 }

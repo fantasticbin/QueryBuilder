@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/olivere/elastic/v7"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
@@ -25,6 +26,9 @@ const (
 	MongoDB
 	// ElasticSearch 数据源
 	ElasticSearch
+	// RedisSearch 数据源（Redis Query Engine / RediSearch，基于 FT.SEARCH）
+	// 注意与 CacheProvider 的 Redis 缓存后端语义区分：本数据源只面向搜索查询
+	RedisSearch
 )
 
 // String 返回 DataSource 枚举值的字符串表示
@@ -36,6 +40,8 @@ func (ds DataSource) String() string {
 		return "MongoDB"
 	case ElasticSearch:
 		return "ElasticSearch"
+	case RedisSearch:
+		return "RedisSearch"
 	default:
 		return "Unknown"
 	}
@@ -66,6 +72,13 @@ type mongoCollectionProvider interface {
 type elasticSearchClientProvider interface {
 	// ElasticSearchClient 返回适配器持有的 ElasticSearch 客户端实例
 	ElasticSearchClient() *elastic.Client
+}
+
+// redisClientProvider 暴露 go-redis 客户端，供 DBProxy 在运行时取回强类型实例
+// 使用 UniversalClient 以同时支持 Standalone 与 Cluster 客户端注入
+type redisClientProvider interface {
+	// RedisClient 返回适配器持有的 go-redis 客户端实例
+	RedisClient() redis.UniversalClient
 }
 
 // GormAdapter GORM 数据源适配器
@@ -124,6 +137,26 @@ func (a ElasticSearchAdapter) IsConfigured() bool { return a.Client != nil }
 
 // ElasticSearchClient 返回 ElasticSearch 客户端实例
 func (a ElasticSearchAdapter) ElasticSearchClient() *elastic.Client { return a.Client }
+
+// RedisAdapter RedisSearch 数据源适配器
+// 仅持有客户端实例，不持有索引名；索引与 ES 一致，由具体构建器管理
+type RedisAdapter struct {
+	Client redis.UniversalClient
+}
+
+// NewRedisAdapter 创建 RedisSearch 数据源适配器
+func NewRedisAdapter(client redis.UniversalClient) RedisAdapter {
+	return RedisAdapter{Client: client}
+}
+
+// DataSource 返回 RedisSearch 数据源类型
+func (a RedisAdapter) DataSource() DataSource { return RedisSearch }
+
+// IsConfigured 返回 go-redis 客户端是否已配置
+func (a RedisAdapter) IsConfigured() bool { return a.Client != nil }
+
+// RedisClient 返回 go-redis 客户端实例
+func (a RedisAdapter) RedisClient() redis.UniversalClient { return a.Client }
 
 // DBProxy 数据源适配器注册表
 type DBProxy struct {
@@ -199,7 +232,7 @@ func (p *DBProxy) adapterFor(ds DataSource) (DataSourceAdapter, error) {
 // isBuiltInDataSource 返回数据源类型是否属于库内置实现
 func isBuiltInDataSource(ds DataSource) bool {
 	switch ds {
-	case Gorm, MongoDB, ElasticSearch:
+	case Gorm, MongoDB, ElasticSearch, RedisSearch:
 		return true
 	default:
 		return false
@@ -251,6 +284,23 @@ func (p *DBProxy) ElasticSearchClient() (*elastic.Client, error) {
 		return nil, ErrDataNotConfigured
 	}
 	client := provider.ElasticSearchClient()
+	if client == nil {
+		return nil, ErrDataNotConfigured
+	}
+	return client, nil
+}
+
+// RedisClient 返回 go-redis 客户端实例
+func (p *DBProxy) RedisClient() (redis.UniversalClient, error) {
+	adapter, err := p.adapterFor(RedisSearch)
+	if err != nil {
+		return nil, err
+	}
+	provider, ok := adapter.(redisClientProvider)
+	if !ok {
+		return nil, ErrDataNotConfigured
+	}
+	client := provider.RedisClient()
 	if client == nil {
 		return nil, ErrDataNotConfigured
 	}
