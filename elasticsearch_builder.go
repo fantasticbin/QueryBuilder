@@ -11,7 +11,14 @@ import (
 	"github.com/olivere/elastic/v7"
 )
 
-const esPITCloseTimeout = 3 * time.Second
+const (
+	esPITCloseTimeout = 3 * time.Second
+	// esMaxResultWindow 关闭分页时 QueryList 单次返回的最大条数
+	// 对应 Elasticsearch 索引默认的 index.max_result_window（from + size 上限 10000）
+	// 未显式设置 size 时 ES 默认只返回 10 条，因此关闭分页时显式设置为该上限，尽量与 Gorm/Mongo 返回全部数据的行为保持一致
+	// 数据量超过 10000 条时请使用 QueryCursor（PIT + search_after）进行全量遍历
+	esMaxResultWindow = 10000
+)
 
 // ElasticSearchBuilder ElasticSearch 专属查询构建器
 // 泛型参数:
@@ -307,6 +314,9 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 
 		if e.builder.needPagination {
 			searchService = searchService.From(int(e.builder.start)).Size(int(effectiveLimit(e.builder.limit)))
+		} else {
+			// 关闭分页时与 Gorm 一致忽略 start/limit，显式设置 size 避免 ES 默认只返回 10 条
+			searchService = searchService.Size(esMaxResultWindow)
 		}
 
 		searchResult, err := searchService.Do(ctx)
@@ -421,6 +431,8 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	if e.builder.needPagination {
 		result["from"] = e.builder.start
 		result["size"] = effectiveLimit(e.builder.limit)
+	} else {
+		result["size"] = esMaxResultWindow
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
@@ -454,6 +466,87 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortService(searchService *elastic.
 	}
 
 	return searchService
+}
+
+// cursorSortKeyCount 返回游标查询中显式声明的排序键数量
+// 与 buildCursorSortService 保持一致：游标字段 + 用户辅助排序，二者皆空时为默认的 _doc
+// PIT 查询下 ES 会在此之后自动追加隐式 _shard_doc tiebreaker，其 sort 值不计入该数量
+func (e *ElasticSearchBuilder[R]) cursorSortKeyCount() int {
+	n := len(e.builder.cursorFields) + len(e.sort)
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+// resolveCursorPosition 根据游标值数量决定续查定位方式
+//   - 游标值数量 >= 显式排序键数量（游标字段 + 辅助排序；内部续查时可能额外带隐式 _shard_doc）：
+//     与 sort 一一对齐，直接作为 search_after
+//   - 存在辅助排序且仅提供游标字段数量的值（如 SetCursorValue(lastID) 或 SetStart 转换的单字段游标）：
+//     search_after 要求与 sort 等长无法直接使用，转为"严格位于游标字段元组之后"的过滤条件，
+//     语义与 Gorm 行值比较 / Mongo $gt 复合条件一致，要求游标字段组合唯一；缺失游标字段的文档不会被返回
+//
+// 返回用于搜索的 query（count 仍使用原始 filter）与 search_after 值
+func (e *ElasticSearchBuilder[R]) resolveCursorPosition(filter elastic.Query, cursorValues []any) (elastic.Query, []any, error) {
+	if len(cursorValues) == 0 {
+		return filter, nil, nil
+	}
+	cursorFields := e.builder.getParsedCursorFields()
+	if len(e.sort) == 0 || len(cursorFields) == 0 || len(cursorValues) != len(cursorFields) {
+		return filter, cursorValues, nil
+	}
+
+	afterQuery, err := buildESCursorAfterQuery(cursorFields, cursorValues)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 使用 must 保留用户 filter 的相关性评分（辅助排序可能为 _score），游标条件放入 filter 上下文
+	return elastic.NewBoolQuery().Must(filter).Filter(afterQuery), nil, nil
+}
+
+// esPseudoSortFields 无法用于 range/term 过滤的 ES 排序伪字段
+var esPseudoSortFields = map[string]struct{}{"_shard_doc": {}, "_doc": {}, "_score": {}}
+
+// buildESCursorAfterQuery 构建"严格位于游标元组之后"的词典序过滤条件
+// 形如 (f0 > v0) OR (f0 = v0 AND f1 > v1) ...，降序字段使用 <
+func buildESCursorAfterQuery(fields []cursorSortField, values []any) (elastic.Query, error) {
+	clauses := make([]elastic.Query, 0, len(fields))
+	for i, field := range fields {
+		if _, pseudo := esPseudoSortFields[field.Field]; pseudo {
+			return nil, fmt.Errorf("%w: cursor field %q cannot be used as a filter; "+
+				"pass the full NextCursorValues (cursor fields + auxiliary sorts)", ErrCursorMismatch, field.Field)
+		}
+		rangeQuery := elastic.NewRangeQuery(field.Field)
+		if field.Asc {
+			rangeQuery = rangeQuery.Gt(values[i])
+		} else {
+			rangeQuery = rangeQuery.Lt(values[i])
+		}
+		if i == 0 {
+			clauses = append(clauses, rangeQuery)
+			continue
+		}
+		clause := elastic.NewBoolQuery()
+		for j := range i {
+			clause = clause.Filter(elastic.NewTermQuery(fields[j].Field, values[j]))
+		}
+		clauses = append(clauses, clause.Filter(rangeQuery))
+	}
+	if len(clauses) == 1 {
+		return clauses[0], nil
+	}
+	return elastic.NewBoolQuery().Should(clauses...).MinimumNumberShouldMatch(1), nil
+}
+
+// trimImplicitTiebreaker 裁剪 sort values 中 ES PIT 自动追加的隐式 _shard_doc tiebreaker
+// 使 QueryPage / QueryPageWithPIT 返回的 NextCursorValues 与显式声明的排序键一一对应，
+// 可直接通过 SetCursorValue 传回续查。若用户已显式声明 _shard_doc，ES 不会再追加，此处为 no-op
+// 注意：裁剪后续页仅依赖显式排序键定位，排序键组合须唯一（如业务时间 + 唯一 ID），否则同值记录可能被跳过
+func trimImplicitTiebreaker(values []any, keyCount int) []any {
+	if keyCount <= 0 || len(values) <= keyCount {
+		return values
+	}
+	return values[:keyCount]
 }
 
 // buildCursorSortSources 为游标查询构建排序条件的 Source 列表（用于 Explain）
@@ -592,8 +685,14 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 		querySize = batchSize + 1
 	}
 
+	// 解析游标定位方式：完整 sort values 走 search_after；辅助排序存在且仅给出游标字段值时转为过滤条件
+	searchQuery, searchAfter, err := e.resolveCursorPosition(filter, cursorValues)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
+
 	searchService := client.Search().
-		Query(filter).
+		Query(searchQuery).
 		Size(querySize)
 
 	usePIT := forcePIT || !e.builder.needPagination
@@ -634,9 +733,9 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 	// 构建排序
 	searchService = e.buildCursorSortService(searchService)
 
-	// 设置 search_after（仅在非首次查询时）
-	if len(cursorValues) > 0 {
-		searchService = searchService.SearchAfter(cursorValues...)
+	// 设置 search_after（仅在非首次查询且游标值与排序键对齐时）
+	if len(searchAfter) > 0 {
+		searchService = searchService.SearchAfter(searchAfter...)
 	}
 
 	var searchResult *elastic.SearchResult
@@ -695,6 +794,12 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 				nextCursorValues[i] = v
 			}
 		}
+	}
+
+	// 单页 API（QueryPage / QueryPageWithPIT）返回给调用方的游标需可直接 SetCursorValue 传回，
+	// 因此裁剪隐式 tiebreaker；QueryCursor 全量遍历在内部续查，保留完整 sort values 以保证同值记录不丢失
+	if forcePIT {
+		nextCursorValues = trimImplicitTiebreaker(nextCursorValues, e.cursorSortKeyCount())
 	}
 
 	if forcePIT && !hasMore && *pitID != "" {

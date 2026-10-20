@@ -434,17 +434,30 @@ func (b *builder[B, R]) prepareAndValidate() error {
 	return nil
 }
 
-// validateInitialCursorValues 校验解析后的初始游标值与游标字段数量一致
+// cursorSortKeyCounter 由游标续查值可包含辅助排序值的构建器实现（目前仅 ElasticSearch）
+// ES 的 search_after 要求游标值与完整 sort（游标字段 + 辅助排序）一一对应，NextCursorValues 也按此返回；
+// Gorm 辅助排序为不透明的 Scope、Mongo 仅从游标字段提取 NextCursorValues，因此不实现该接口，保持严格校验
+type cursorSortKeyCounter interface {
+	cursorSortKeyCount() int
+}
+
+// validateInitialCursorValues 校验解析后的初始游标值数量
+// 默认要求与游标字段数量一致；实现 cursorSortKeyCounter 的构建器额外接受与显式排序键数量一致的值
 // start 自动转为单字段游标时也会参与校验
 func (b *builder[B, R]) validateInitialCursorValues() error {
 	initialCursorValues := resolveInitialCursorValues(b.cursorValues, b.start)
 	if len(initialCursorValues) == 0 {
 		return nil
 	}
-	if len(initialCursorValues) != len(b.cursorFields) {
-		return ErrCursorMismatch
+	if len(initialCursorValues) == len(b.cursorFields) {
+		return nil
 	}
-	return nil
+	if counter, ok := any(b.selfRef).(cursorSortKeyCounter); ok {
+		if keyCount := counter.cursorSortKeyCount(); keyCount > len(b.cursorFields) && len(initialCursorValues) == keyCount {
+			return nil
+		}
+	}
+	return ErrCursorMismatch
 }
 
 // getParsedCursorFields 返回解析后的游标字段缓存

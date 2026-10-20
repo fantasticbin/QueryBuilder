@@ -526,3 +526,27 @@ func TestGormBuilderQueryPageProjectionIncludesCursorFields(t *testing.T) {
 	})
 	assertSQLContains(t, query, "SELECT name,id")
 }
+
+func TestGormBuilderQueryPageWithAuxSortCursorRoundTrip(t *testing.T) {
+	rows := []*GormTestEntity{
+		{ID: 1, Name: "Alice", CreatedAt: 100, Status: "active"},
+		{ID: 2, Name: "Bob", CreatedAt: 200, Status: "active"},
+	}
+	db, state := newGormTestDB(t, rows, 0)
+	b := NewGormBuilder[GormTestEntity](NewDBProxy(db, nil, nil)).
+		SetSort(func(db *gorm.DB) *gorm.DB { return db.Order("name ASC") })
+	b.SetCursorField("id").SetLimit(1).SetNeedTotal(false)
+
+	page, err := b.QueryPage(context.Background())
+	qbtest.AssertNoError(t, err)
+	// Gorm 的游标值只来自游标字段，辅助排序不会追加额外值
+	qbtest.AssertCursorPageResult(t, page, rows[:1], 1, true, []any{uint32(1)})
+
+	b.SetCursorValue(page.NextCursorValues...)
+	_, err = b.QueryPage(context.Background())
+	qbtest.AssertNoError(t, err)
+	query := assertAnyRecordedSQL(t, state, func(query gormRecordedQuery) bool {
+		return strings.Contains(query.SQL, "WHERE id > ?")
+	})
+	assertSQLContains(t, query, "ORDER BY id ASC,name ASC")
+}
