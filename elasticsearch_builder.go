@@ -11,7 +11,14 @@ import (
 	"github.com/olivere/elastic/v7"
 )
 
-const esPITCloseTimeout = 3 * time.Second
+const (
+	esPITCloseTimeout = 3 * time.Second
+	// esMaxResultWindow 关闭分页时 QueryList 单次返回的最大条数
+	// 对应 Elasticsearch 索引默认的 index.max_result_window（from + size 上限 10000）
+	// 未显式设置 size 时 ES 默认只返回 10 条，因此关闭分页时显式设置为该上限，尽量与 Gorm/Mongo 返回全部数据的行为保持一致
+	// 数据量超过 10000 条时请使用 QueryCursor（PIT + search_after）进行全量遍历
+	esMaxResultWindow = 10000
+)
 
 // ElasticSearchBuilder ElasticSearch 专属查询构建器
 // 泛型参数:
@@ -307,6 +314,9 @@ func (e *ElasticSearchBuilder[R]) doQuery(ctx context.Context) (list []*R, total
 
 		if e.builder.needPagination {
 			searchService = searchService.From(int(e.builder.start)).Size(int(effectiveLimit(e.builder.limit)))
+		} else {
+			// 关闭分页时与 Gorm 一致忽略 start/limit，显式设置 size 避免 ES 默认只返回 10 条
+			searchService = searchService.Size(esMaxResultWindow)
 		}
 
 		searchResult, err := searchService.Do(ctx)
@@ -421,6 +431,8 @@ func (e *ElasticSearchBuilder[R]) Explain(ctx context.Context) (string, error) {
 	if e.builder.needPagination {
 		result["from"] = e.builder.start
 		result["size"] = effectiveLimit(e.builder.limit)
+	} else {
+		result["size"] = esMaxResultWindow
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
@@ -454,6 +466,28 @@ func (e *ElasticSearchBuilder[R]) buildCursorSortService(searchService *elastic.
 	}
 
 	return searchService
+}
+
+// cursorSortKeyCount 返回游标查询中显式声明的排序键数量
+// 与 buildCursorSortService 保持一致：游标字段 + 用户辅助排序，二者皆空时为默认的 _doc
+// PIT 查询下 ES 会在此之后自动追加隐式 _shard_doc tiebreaker，其 sort 值不计入该数量
+func (e *ElasticSearchBuilder[R]) cursorSortKeyCount() int {
+	n := len(e.builder.cursorFields) + len(e.sort)
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+// trimImplicitTiebreaker 裁剪 sort values 中 ES PIT 自动追加的隐式 _shard_doc tiebreaker
+// 使 QueryPage / QueryPageWithPIT 返回的 NextCursorValues 与显式声明的排序键一一对应，
+// 可直接通过 SetCursorValue 传回续查。若用户已显式声明 _shard_doc，ES 不会再追加，此处为 no-op
+// 注意：裁剪后续页仅依赖显式排序键定位，排序键组合须唯一（如业务时间 + 唯一 ID），否则同值记录可能被跳过
+func trimImplicitTiebreaker(values []any, keyCount int) []any {
+	if keyCount <= 0 || len(values) <= keyCount {
+		return values
+	}
+	return values[:keyCount]
 }
 
 // buildCursorSortSources 为游标查询构建排序条件的 Source 列表（用于 Explain）
@@ -695,6 +729,12 @@ func (e *ElasticSearchBuilder[R]) doElasticCursorQuery(
 				nextCursorValues[i] = v
 			}
 		}
+	}
+
+	// 单页 API（QueryPage / QueryPageWithPIT）返回给调用方的游标需可直接 SetCursorValue 传回，
+	// 因此裁剪隐式 tiebreaker；QueryCursor 全量遍历在内部续查，保留完整 sort values 以保证同值记录不丢失
+	if forcePIT {
+		nextCursorValues = trimImplicitTiebreaker(nextCursorValues, e.cursorSortKeyCount())
 	}
 
 	if forcePIT && !hasMore && *pitID != "" {

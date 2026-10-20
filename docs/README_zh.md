@@ -1337,6 +1337,7 @@ if err != nil {
 
 - PIT 存在保活窗口；若 PIT 过期/无效，建议从第一页重启并重新申请 PIT。
 - 建议使用稳定排序键（如业务时间 + 唯一 ID），确保 `search_after` 顺序可预期。
+- Elasticsearch 会在 PIT 查询的 sort values 末尾追加隐式 `_shard_doc` tiebreaker。`QueryPage` / `QueryPageWithPIT` 会将其裁剪，使 `NextCursorValues` 与声明的排序键一一对应，可直接通过 `SetCursorValue(...)` 传回续查。这要求游标字段组合唯一；否则请显式加入 `_shard_doc`（如 `SetCursorField("created_at", "_shard_doc")`，仅限同一 PIT 内续查），此时不会被裁剪。`QueryCursor` 内部续查保留完整 sort values。
 - `HasMore` 基于 `limit+1` 探测，可作为翻页提示；业务上仍应以返回的 cursor/token 为准。
 - `QueryPageWithPIT` 会经过中间件管道，并由 `ObservabilityMiddleware` 记录为 `querybuilder.ElasticSearch.pit_cursor`；内置缓存中间件会自动旁路 PIT 页。
 
@@ -1560,7 +1561,7 @@ statement, err := query.Explain(ctx)
 | `SetLimit(limit)` | 设置每页数据条数（最大值：5000） |
 | `SetNeedTotal(bool)` | 设置是否需要查询总数 |
 | `SetTotalLimit(limit)` | 设置总数统计上限，`0` 表示精确统计 |
-| `SetNeedPagination(bool)` | 设置是否需要分页 |
+| `SetNeedPagination(bool)` | 设置是否需要分页（ElasticSearch `QueryList` 关闭分页时最多返回 10000 条，即默认 `index.max_result_window`；更大数据量的全量遍历请使用 `QueryCursor`） |
 | `SetFields(fields...)` | 设置指定字段 |
 | `SetBeforeQueryHook(hook)` | 设置查询前置钩子 |
 | `SetAfterQueryHook(hook)` | 设置查询后置钩子 |

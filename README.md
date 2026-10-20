@@ -1340,6 +1340,7 @@ Integration recommendations:
 
 - PIT has a keep-alive window; if PIT is expired/invalid, restart from first page and issue a new PIT.
 - Keep a stable sort key (for example: business timestamp + unique id) to make `search_after` deterministic.
+- Elasticsearch appends an implicit `_shard_doc` tie-breaker to PIT sort values. `QueryPage` / `QueryPageWithPIT` trim it so `NextCursorValues` matches your declared sort keys and can be passed straight back via `SetCursorValue(...)`. This requires the cursor field combination to be unique; otherwise include `_shard_doc` explicitly (e.g. `SetCursorField("created_at", "_shard_doc")`, same PIT only), which is kept as-is. `QueryCursor` keeps the full sort values internally.
 - `HasMore` is computed via `limit+1` probing; use it as a paging hint and still rely on returned cursor/token as source of truth.
 - `QueryPageWithPIT` goes through the middleware pipeline and is reported by `ObservabilityMiddleware` as `querybuilder.ElasticSearch.pit_cursor`; the built-in cache middleware bypasses PIT pages automatically.
 
@@ -1563,7 +1564,7 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 | `SetLimit(limit)` | Set page size (max: 5000) |
 | `SetNeedTotal(bool)` | Toggle total count query |
 | `SetTotalLimit(limit)` | Cap total counting; `0` keeps exact counting |
-| `SetNeedPagination(bool)` | Toggle pagination |
+| `SetNeedPagination(bool)` | Toggle pagination (ElasticSearch `QueryList` with pagination disabled returns at most 10000 hits — the default `index.max_result_window`; use `QueryCursor` for larger full scans) |
 | `SetFields(fields...)` | Set field selection |
 | `SetBeforeQueryHook(hook)` | Set pre-query hook |
 | `SetAfterQueryHook(hook)` | Set post-query hook |
