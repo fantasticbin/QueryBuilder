@@ -1338,6 +1338,7 @@ if err != nil {
 - PIT 存在保活窗口；若 PIT 过期/无效，建议从第一页重启并重新申请 PIT。
 - 建议使用稳定排序键（如业务时间 + 唯一 ID），确保 `search_after` 顺序可预期。
 - Elasticsearch 会在 PIT 查询的 sort values 末尾追加隐式 `_shard_doc` tiebreaker。`QueryPage` / `QueryPageWithPIT` 会将其裁剪，使 `NextCursorValues` 与声明的排序键一一对应，可直接通过 `SetCursorValue(...)` 传回续查。这要求游标字段组合唯一；否则请显式加入 `_shard_doc`（如 `SetCursorField("created_at", "_shard_doc")`，仅限同一 PIT 内续查），此时不会被裁剪。`QueryCursor` 内部续查保留完整 sort values。
+- ElasticSearch 游标模式下设置了辅助 `SetSort(...)` 时，`NextCursorValues` 按显式排序键（游标字段在前、辅助排序在后）逐一返回，可原样通过 `SetCursorValue(...)` 传回，并作为 `search_after` 发送。也可以只传游标字段值（如 `SetCursorValue(lastID)` 或 `SetStart(n)`）：由于 `search_after` 必须与完整 sort 对齐，此时 QueryBuilder 改用"严格位于游标元组之后"的范围过滤续查（语义与 Gorm/Mongo 一致），要求游标字段唯一、会排除缺少游标字段的文档，且不支持 `_shard_doc` / `_doc` / `_score` 作为游标字段。其他数量的游标值返回 `ErrCursorMismatch`。Gorm 与 Mongo 的游标值只包含游标字段，保持严格数量校验。
 - `HasMore` 基于 `limit+1` 探测，可作为翻页提示；业务上仍应以返回的 cursor/token 为准。
 - `QueryPageWithPIT` 会经过中间件管道，并由 `ObservabilityMiddleware` 记录为 `querybuilder.ElasticSearch.pit_cursor`；内置缓存中间件会自动旁路 PIT 页。
 

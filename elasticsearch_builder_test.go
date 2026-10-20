@@ -598,3 +598,159 @@ func TestElasticSearchBuilderQueryCursorKeepsFullSortValuesInternally(t *testing
 		t.Fatalf("expected full sort values in internal search_after, got %v", got)
 	}
 }
+
+func TestElasticSearchBuilderCursorValuesWithAuxSortRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	fake, client := newFakeESServer(t, 5)
+	data := NewDBProxyWithAdapters(NewElasticSearchAdapter(client))
+	newB := func() *ElasticSearchBuilder[ElasticTestEntity] {
+		b := NewElasticSearchBuilder[ElasticTestEntity](data, "idx").SetSort(elastic.NewFieldSort("age").Asc())
+		b.SetCursorField("id").SetLimit(2)
+		return b
+	}
+
+	page1, err := newB().QueryPageWithPIT(ctx)
+	qbtest.AssertNoError(t, err)
+	if !reflect.DeepEqual(page1.NextCursorValues, []any{float64(2), float64(2)}) {
+		t.Fatalf("expected cursor field + aux sort values [2 2], got %v", page1.NextCursorValues)
+	}
+
+	next := newB()
+	next.SetPITID(page1.PitID).SetCursorValue(page1.NextCursorValues...)
+	page2, err := next.QueryPageWithPIT(ctx)
+	qbtest.AssertNoError(t, err)
+	body := fake.lastSearch()
+	if !reflect.DeepEqual(body["search_after"], []any{float64(2), float64(2)}) {
+		t.Fatalf("expected search_after aligned with full sort, got %v", body["search_after"])
+	}
+	if len(page2.Items) != 2 || page2.Items[0].ID != 3 {
+		t.Fatalf("expected page 2 to start at id 3, got %+v", page2.Items)
+	}
+
+	// 同一 builder 的 QueryPage 续页
+	b := newB()
+	var all []uint32
+	for range 5 {
+		page, err := b.QueryPage(ctx)
+		qbtest.AssertNoError(t, err)
+		for _, it := range page.Items {
+			all = append(all, it.ID)
+		}
+		if !page.HasMore {
+			break
+		}
+		b.SetCursorValue(page.NextCursorValues...)
+	}
+	if !reflect.DeepEqual(all, []uint32{1, 2, 3, 4, 5}) {
+		t.Fatalf("expected ids [1 2 3 4 5], got %v", all)
+	}
+}
+
+func TestElasticSearchBuilderCursorFieldOnlyValuesWithAuxSortUseFilter(t *testing.T) {
+	ctx := context.Background()
+	fake, client := newFakeESServer(t, 5)
+	b := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxyWithAdapters(NewElasticSearchAdapter(client)), "idx").
+		SetSort(elastic.NewFieldSort("age").Desc())
+	b.SetCursorField("id").SetCursorValue(3).SetLimit(2)
+
+	_, err := b.QueryPage(ctx)
+	qbtest.AssertNoError(t, err)
+	body := fake.lastSearch()
+	if _, ok := body["search_after"]; ok {
+		t.Fatalf("expected no search_after when only cursor field values are given with aux sort, got %v", body["search_after"])
+	}
+	query, _ := json.Marshal(body["query"])
+	for _, fragment := range []string{`"must":{"match_all":{}}`, `"range":{"id":{"from":3,"include_lower":false`} {
+		if !strings.Contains(string(query), fragment) {
+			t.Fatalf("expected query %s to contain %s", query, fragment)
+		}
+	}
+
+	// SetStart 转换的单字段游标同样走过滤条件
+	b2 := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxyWithAdapters(NewElasticSearchAdapter(client)), "idx").
+		SetSort(elastic.NewFieldSort("age").Desc())
+	b2.SetCursorField("id").SetStart(4).SetLimit(2)
+	_, err = b2.QueryPage(ctx)
+	qbtest.AssertNoError(t, err)
+	if _, ok := fake.lastSearch()["search_after"]; ok {
+		t.Fatal("expected start-as-cursor with aux sort to use filter instead of search_after")
+	}
+}
+
+func TestBuildESCursorAfterQuery(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields []string
+		values []any
+		want   string
+	}{
+		{
+			name:   "单字段升序",
+			fields: []string{"id"},
+			values: []any{3},
+			want:   `{"range":{"id":{"from":3,"include_lower":false,"include_upper":true,"to":null}}}`,
+		},
+		{
+			name:   "混合方向多字段",
+			fields: []string{"-created_at", "id"},
+			values: []any{"t", 7},
+			want: `{"bool":{"minimum_should_match":"1","should":[` +
+				`{"range":{"created_at":{"from":null,"include_lower":true,"include_upper":false,"to":"t"}}},` +
+				`{"bool":{"filter":[{"term":{"created_at":"t"}},{"range":{"id":{"from":7,"include_lower":false,"include_upper":true,"to":null}}}]}}]}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q, err := buildESCursorAfterQuery(parseCursorSortFields(tt.fields), tt.values)
+			qbtest.AssertNoError(t, err)
+			src, err := q.Source()
+			qbtest.AssertNoError(t, err)
+			got, _ := json.Marshal(src)
+			if string(got) != tt.want {
+				t.Fatalf("expected %s\n got %s", tt.want, got)
+			}
+		})
+	}
+
+	_, err := buildESCursorAfterQuery(parseCursorSortFields([]string{"_shard_doc"}), []any{1})
+	if !errors.Is(err, ErrCursorMismatch) {
+		t.Fatalf("expected ErrCursorMismatch for pseudo sort field, got %v", err)
+	}
+}
+
+func TestElasticSearchBuilderCursorValueCountValidation(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		auxSort []elastic.Sorter
+		fields  []string
+		values  []any
+		wantErr bool
+	}{
+		{name: "无辅助排序-游标字段数量", fields: []string{"id"}, values: []any{1}},
+		{name: "无辅助排序-多出一个值被拒绝", fields: []string{"id"}, values: []any{1, 2}, wantErr: true},
+		{name: "辅助排序-游标字段数量", auxSort: []elastic.Sorter{elastic.NewFieldSort("age")}, fields: []string{"id"}, values: []any{1}},
+		{name: "辅助排序-完整排序键数量", auxSort: []elastic.Sorter{elastic.NewFieldSort("age")}, fields: []string{"id"}, values: []any{1, 2}},
+		{name: "辅助排序-超出排序键数量被拒绝", auxSort: []elastic.Sorter{elastic.NewFieldSort("age")}, fields: []string{"id"}, values: []any{1, 2, 3}, wantErr: true},
+		{name: "辅助排序-介于两者之间被拒绝", auxSort: []elastic.Sorter{elastic.NewFieldSort("age"), elastic.NewFieldSort("name")}, fields: []string{"id"}, values: []any{1, 2}, wantErr: true},
+		{name: "伪字段仅给游标值且有辅助排序被拒绝", auxSort: []elastic.Sorter{elastic.NewFieldSort("age")}, fields: []string{"_shard_doc"}, values: []any{1}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, client := newFakeESServer(t, 5)
+			b := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxyWithAdapters(NewElasticSearchAdapter(client)), "idx")
+			if len(tt.auxSort) > 0 {
+				b.SetSort(tt.auxSort...)
+			}
+			b.SetCursorField(tt.fields...).SetCursorValue(tt.values...).SetLimit(2)
+			_, err := b.QueryPage(ctx)
+			if tt.wantErr {
+				if !errors.Is(err, ErrCursorMismatch) {
+					t.Fatalf("expected ErrCursorMismatch, got %v", err)
+				}
+				return
+			}
+			qbtest.AssertNoError(t, err)
+		})
+	}
+}

@@ -422,11 +422,18 @@ func TestESIntegration(t *testing.T) {
 		}
 	})
 	t.Run("Err/context_canceled", func(t *testing.T) {
+		// 使用独立 client：olivere/elastic 可能在并发请求被取消时将连接标记为不可用，
+		// 此时返回 ErrNoClient 而非 context.Canceled，且会影响共享 client 的后续用例
+		client, err := elastic.NewClient(elastic.SetURL(os.Getenv("ES_URL")), elastic.SetSniff(false), elastic.SetHealthcheck(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := builder.NewDBProxyWithAdapters(builder.NewElasticSearchAdapter(client))
 		cctx, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err := env.b().QueryList(cctx)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("want context.Canceled got %v", err)
+		_, err = builder.NewElasticSearchBuilder[esDoc](data, env.index).QueryList(cctx)
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, elastic.ErrNoClient) {
+			t.Fatalf("want context.Canceled (or ErrNoClient) got %v", err)
 		}
 	})
 
@@ -809,6 +816,148 @@ func TestESIntegration(t *testing.T) {
 			pitID, cursor = res.PitID, res.NextCursorValues
 		}
 		assertIDs(t, all, idRange(1, 25))
+	})
+	// ---------------- 游标字段 + 辅助排序 ----------------
+	orderBy := func(less func(a, b esDoc) bool) []int {
+		exp := slices.Clone(env.docs)
+		sort.SliceStable(exp, func(i, j int) bool { return less(exp[i], exp[j]) })
+		out := make([]int, 0, len(exp))
+		for _, d := range exp {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+	t.Run("AuxSort/QueryPage_roundtrip_nonunique_cursor", func(t *testing.T) {
+		// 游标字段 status 不唯一，辅助排序 id 使完整 sort values 唯一，可原样传回续查
+		b := env.b().SetSort(elastic.NewFieldSort("id").Asc())
+		b.SetCursorField("status").SetLimit(6)
+		var all []*esDoc
+		for page := 0; page < 10; page++ {
+			res, err := b.QueryPage(ctx)
+			if err != nil {
+				t.Fatalf("page %d: %v", page, err)
+			}
+			all = append(all, res.Items...)
+			if !res.HasMore {
+				break
+			}
+			if len(res.NextCursorValues) != 2 {
+				t.Fatalf("expected cursor+aux values, got %v", res.NextCursorValues)
+			}
+			b.SetCursorValue(res.NextCursorValues...)
+		}
+		assertIDs(t, all, orderBy(func(a, b esDoc) bool {
+			if a.Status != b.Status {
+				return a.Status < b.Status
+			}
+			return a.ID < b.ID
+		}))
+	})
+	t.Run("AuxSort/QueryPageWithPIT_ListAPI_roundtrip", func(t *testing.T) {
+		l := builder.NewList[esDoc]().SetDataSource(builder.ElasticSearch).
+			SetScope(builder.NewElasticSearchScope[esDoc](nil, elastic.NewFieldSort("id").Desc()))
+		var all []*esDoc
+		pitID := ""
+		var cursor []any
+		for page := 0; page < 10; page++ {
+			opts := []builder.QueryOption{builder.WithData(env.data), builder.WithESIndex(env.index),
+				builder.WithCursorField("city"), builder.WithLimit(4)}
+			if pitID != "" {
+				opts = append(opts, builder.WithPITID(pitID), builder.WithCursorValue(cursor...))
+			}
+			res, err := l.QueryPageWithPIT(ctx, opts...)
+			if err != nil {
+				t.Fatalf("page %d: %v", page, err)
+			}
+			all = append(all, res.Items...)
+			if !res.HasMore {
+				break
+			}
+			pitID, cursor = res.PitID, res.NextCursorValues
+		}
+		assertIDs(t, all, orderBy(func(a, b esDoc) bool {
+			if a.City != b.City {
+				return a.City < b.City
+			}
+			return a.ID > b.ID
+		}))
+	})
+	t.Run("AuxSort/QueryPage_cross_request_new_builder", func(t *testing.T) {
+		var all []*esDoc
+		var cursor []any
+		for page := 0; page < 10; page++ {
+			b := env.b().SetSort(elastic.NewFieldSort("name").Asc())
+			b.SetCursorField("-age").SetLimit(10)
+			if cursor != nil {
+				b.SetCursorValue(cursor...)
+			}
+			res, err := b.QueryPage(ctx)
+			if err != nil {
+				t.Fatalf("page %d: %v", page, err)
+			}
+			all = append(all, res.Items...)
+			if !res.HasMore {
+				break
+			}
+			cursor = res.NextCursorValues
+		}
+		want := idRange(1, 25)
+		slices.Reverse(want)
+		assertIDs(t, all, want)
+	})
+	t.Run("AuxSort/cursor_field_only_value_uses_filter", func(t *testing.T) {
+		b := env.b().SetSort(elastic.NewFieldSort("age").Desc())
+		b.SetCursorField("id").SetCursorValue(20).SetLimit(10)
+		res, err := b.QueryPage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertIDs(t, res.Items, idRange(21, 25))
+
+		b2 := env.b().SetSort(elastic.NewFieldSort("age").Desc())
+		b2.SetCursorField("id").SetStart(22).SetLimit(10)
+		res2, err := b2.QueryPage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertIDs(t, res2.Items, idRange(23, 25))
+	})
+	t.Run("AuxSort/cursor_field_only_multi_field_mixed_direction", func(t *testing.T) {
+		// 从 (city=shanghai, id=13) 之后开始：city 升序、id 降序，辅助排序 age
+		b := env.b().SetSort(elastic.NewFieldSort("age").Asc())
+		b.SetCursorField("city", "-id").SetCursorValue("shanghai", 13).SetLimit(100)
+		res, err := b.QueryPage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := orderBy(func(a, b esDoc) bool {
+			if a.City != b.City {
+				return a.City < b.City
+			}
+			return a.ID > b.ID
+		})
+		idx := slices.Index(want, 13)
+		assertIDs(t, res.Items, want[idx+1:])
+	})
+	t.Run("AuxSort/QueryCursor_full_traversal_from_cursor_value", func(t *testing.T) {
+		var got []*esDoc
+		b := env.b().SetSort(elastic.NewFieldSort("name").Asc())
+		b.SetCursorField("id").SetCursorValue(10).SetLimit(4).SetNeedPagination(false)
+		for d, err := range b.QueryCursor(ctx) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, d)
+		}
+		assertIDs(t, got, idRange(11, 25))
+	})
+	t.Run("AuxSort/wrong_value_count_rejected", func(t *testing.T) {
+		b := env.b().SetSort(elastic.NewFieldSort("age").Asc())
+		b.SetCursorField("id").SetCursorValue(1, 2, 3)
+		_, err := b.QueryPage(ctx)
+		if !errors.Is(err, builder.ErrCursorMismatch) {
+			t.Fatalf("want ErrCursorMismatch got %v", err)
+		}
 	})
 	t.Run("Explain_cursor_mode", func(t *testing.T) {
 		dsl, err := env.b().SetCursorField("-created_at", "id").SetLimit(3).Explain(ctx)
