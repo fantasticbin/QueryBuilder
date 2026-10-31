@@ -149,6 +149,29 @@ func (m *MongoBuilder[R]) GetQueryMeta() core.QueryMeta {
 // cleanupCursorQuery 清理 MongoDB 游标查询资源
 func (m *MongoBuilder[R]) cleanupCursorQuery(_ *core.CursorPageResult[R], _ error) {}
 
+// buildListFindOptions 构建 QueryList / doQuery 使用的 Find 选项。
+// 仅在配置了排序时调用 SetSort：向驱动传入 nil bson.D 会导致编码失败（WriteNull）。
+func (m *MongoBuilder[R]) buildListFindOptions() *options.FindOptionsBuilder {
+	findOpt := options.Find()
+	if m.sort != nil {
+		findOpt.SetSort(m.sort)
+	}
+
+	// 应用字段投影
+	if len(m.builder.fields) > 0 {
+		projection := bson.D{}
+		for _, f := range m.builder.fields {
+			projection = append(projection, bson.E{Key: f, Value: 1})
+		}
+		findOpt.SetProjection(projection)
+	}
+
+	if m.builder.needPagination {
+		findOpt.SetSkip(int64(m.builder.start)).SetLimit(int64(effectiveLimit(m.builder.limit)))
+	}
+	return findOpt
+}
+
 // doQuery 执行实际的 MongoDB 查询逻辑
 func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, err error) {
 	collection, err := m.builder.data.MongoCollection()
@@ -163,20 +186,7 @@ func (m *MongoBuilder[R]) doQuery(ctx context.Context) (list []*R, total int64, 
 
 	// 并行执行数据查询和总数统计操作，任一失败时取消同组任务
 	if err = util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
-		findOpt := options.Find().SetSort(m.sort)
-
-		// 应用字段投影
-		if len(m.builder.fields) > 0 {
-			projection := bson.D{}
-			for _, f := range m.builder.fields {
-				projection = append(projection, bson.E{Key: f, Value: 1})
-			}
-			findOpt.SetProjection(projection)
-		}
-
-		if m.builder.needPagination {
-			findOpt.SetSkip(int64(m.builder.start)).SetLimit(int64(effectiveLimit(m.builder.limit)))
-		}
+		findOpt := m.buildListFindOptions()
 
 		cursor, err := collection.Find(ctx, filter, findOpt)
 		if err != nil {
