@@ -8,6 +8,7 @@ import (
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	qbtest "github.com/fantasticbin/QueryBuilder/v2/test"
 	"github.com/olivere/elastic/v7"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"gorm.io/gorm"
 )
@@ -493,5 +494,28 @@ func TestValidateData_LimitExceeded_QueryCursor_Mongo(t *testing.T) {
 			t.Errorf("expected ErrLimitExceeded, got: %v", err)
 		}
 		break
+	}
+}
+
+func TestValidateData_CursorWithAuxSortExtraValue_GormStrict(t *testing.T) {
+	// Gorm 的 NextCursorValues 只包含游标字段值，辅助排序为不透明 Scope，因此多出的值仍应被拒绝
+	g := NewGormBuilder[ValidateTestEntity](NewDBProxy(&gorm.DB{}, nil, nil)).
+		SetSort(func(db *gorm.DB) *gorm.DB { return db.Order("name ASC") })
+	g.SetCursorField("id").SetCursorValue(uint32(1), "Alice")
+
+	_, err := g.QueryPage(context.Background())
+	if !errors.Is(err, ErrCursorMismatch) {
+		t.Fatalf("expected ErrCursorMismatch, got: %v", err)
+	}
+}
+
+func TestValidateData_CursorWithAuxSortExtraValue_MongoStrict(t *testing.T) {
+	m := NewMongoBuilder[ValidateTestEntity](NewDBProxy(nil, &mongo.Collection{}, nil)).
+		SetSort(bson.D{{Key: "name", Value: 1}})
+	m.SetCursorField("id").SetCursorValue(uint32(1), "Alice")
+
+	_, err := m.QueryPage(context.Background())
+	if !errors.Is(err, ErrCursorMismatch) {
+		t.Fatalf("expected ErrCursorMismatch, got: %v", err)
 	}
 }
