@@ -234,13 +234,17 @@ func elasticBaseMetric(metric Metric) elastic.Aggregation {
 }
 
 // elasticSumDistinctMetric 构建基于 scripted_metric 的去重求和聚合：
-// map 阶段按字段值去重收集，combine / reduce 阶段累加去重后的数值
+// map 阶段把字段值统一转换为 double，并以其字符串形式作为去重键（值保存 double），
+// 因为分片 combine 结果需跨节点序列化，Painless map 的数值键会触发 ClassCastException；
+// 统一按 double 归一化后，整型 1 与浮点 1.0 视为同一值，-0.0 归一化为 0.0；
+// 超过 2^53 的整数会按 double 精度去重与求和。
+// combine 返回 String -> Double 的 map，reduce 阶段按键合并各分片结果后求和；无值时返回 0
 func elasticSumDistinctMetric(metric Metric) elastic.Aggregation {
 	return elastic.NewScriptedMetricAggregation().
-		InitScript(elastic.NewScript("state.values = [:]")).
-		MapScript(elastic.NewScript("if (doc.containsKey(params.field) && !doc[params.field].empty) { def value = doc[params.field].value; state.values[value] = true; }")).
+		InitScript(elastic.NewScript("state.values = new HashMap()")).
+		MapScript(elastic.NewScript("if (doc.containsKey(params.field) && !doc[params.field].empty) { double value = ((Number) doc[params.field].value).doubleValue() + 0.0d; state.values.put(Double.toString(value), value); }")).
 		CombineScript(elastic.NewScript("return state.values")).
-		ReduceScript(elastic.NewScript("double sum = 0; def values = [:]; for (state in states) { if (state == null) { continue; } for (entry in state.entrySet()) { def value = entry.getKey(); if (value != null && !values.containsKey(value)) { values[value] = true; sum += value; } } } return sum")).
+		ReduceScript(elastic.NewScript("Map values = new HashMap(); for (state in states) { if (state != null) { values.putAll(state); } } double sum = 0; for (value in values.values()) { sum += ((Number) value).doubleValue(); } return sum")).
 		Params(map[string]any{"field": metric.Field})
 }
 
