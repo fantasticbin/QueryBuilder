@@ -180,7 +180,7 @@ func TestMongoBuilderExplainAdvancedSpec(t *testing.T) {
 func TestMongoExistsAlignsWithIsNotNull(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[mongoSummary](nil)
+	builder := NewMongoBuilder[mongoSummary](core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{})))
 	exists := builder.buildConditionMatch(Condition{Field: "paid_at", Op: Exists})
 	notNull := builder.buildConditionMatch(Condition{Field: "paid_at", Op: IsNotNull})
 	if exists[0].Key != "paid_at" {
@@ -236,7 +236,7 @@ func TestMongoLikeAndNotLikeSharePresentAndToString(t *testing.T) {
 func TestMongoConditionNotEqualExcludesMissingAndNull(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[mongoSummary](nil)
+	builder := NewMongoBuilder[mongoSummary](core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{})))
 	match := builder.buildConditionMatch(Condition{Field: "status", Op: Ne, Value: "paid"})
 	if len(match) != 1 || match[0].Key != "$and" {
 		t.Fatalf("expected $and condition, got %#v", match)
@@ -261,7 +261,7 @@ func TestMongoConditionNotEqualExcludesMissingAndNull(t *testing.T) {
 func TestMongoHavingNotEqualExcludesMissingAndNull(t *testing.T) {
 	t.Parallel()
 
-	builder := NewMongoBuilder[mongoSummary](nil)
+	builder := NewMongoBuilder[mongoSummary](core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{})))
 	match := builder.buildHavingClause(Having{Alias: "paid_amount", Op: Ne, Value: 100})
 	if len(match) != 1 || match[0].Key != "$and" {
 		t.Fatalf("expected $and having condition, got %#v", match)
@@ -497,4 +497,33 @@ func mongoTestPipelineHasStage(pipeline []any, stageKey string) bool {
 		}
 	}
 	return false
+}
+
+func TestMongoBuilderSortAppendsGroupKeyTieBreaker(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[mongoSummary](core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{})))
+	builder.GroupBy("region", "region").
+		GroupBy("channel", "channel").
+		Count("total").
+		OrderByDesc("total").
+		SetLimit(10)
+
+	pipeline := builder.appendHavingSortAndPagination(nil)
+	if len(pipeline) == 0 || pipeline[0][0].Key != "$sort" {
+		t.Fatalf("expected $sort stage first, got %#v", pipeline)
+	}
+	got, ok := pipeline[0][0].Value.(bson.D)
+	if !ok {
+		t.Fatalf("unexpected $sort value: %#v", pipeline[0][0].Value)
+	}
+	want := bson.D{{Key: "total", Value: -1}, {Key: "region", Value: 1}, {Key: "channel", Value: 1}}
+	if len(got) != len(want) {
+		t.Fatalf("$sort = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i].Key != want[i].Key || got[i].Value != want[i].Value {
+			t.Fatalf("$sort = %v, want %v", got, want)
+		}
+	}
 }

@@ -674,3 +674,43 @@ func TestBuilderSpecChainPaginationMeta(t *testing.T) {
 		t.Fatalf("scalar aggregates should reset pagination: %+v", got)
 	}
 }
+
+func TestEffectiveOrdersAppendsGroupKeyTieBreaker(t *testing.T) {
+	t.Parallel()
+
+	spec := Spec{
+		Groups: []Group{{Field: "region", Alias: "region", Descending: true}, {Field: "channel", Alias: "channel"}},
+		Orders: []Order{{Alias: "total", Descending: true}, {Alias: "channel", Descending: true}},
+	}
+	got := effectiveOrders(spec)
+	want := []Order{{Alias: "total", Descending: true}, {Alias: "channel", Descending: true}, {Alias: "region", Descending: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("effectiveOrders() = %#v, want %#v", got, want)
+	}
+	if len(spec.Orders) != 2 {
+		t.Fatalf("effectiveOrders must not mutate spec.Orders, got %#v", spec.Orders)
+	}
+
+	spec.Orders = nil
+	got = effectiveOrders(spec)
+	want = []Order{{Alias: "region", Descending: true}, {Alias: "channel"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("default effectiveOrders() = %#v, want %#v", got, want)
+	}
+}
+
+func TestNewResultRowInitializesMaps(t *testing.T) {
+	t.Parallel()
+
+	type namedMap map[string]any
+	if row := newResultRow[map[string]any](); *row == nil {
+		t.Fatal("expected initialized map[string]any row")
+	}
+	if row := newResultRow[namedMap](); *row == nil {
+		t.Fatal("expected initialized named map row")
+	}
+	type summary struct{ Total int64 }
+	if row := newResultRow[summary](); row == nil || row.Total != 0 {
+		t.Fatalf("expected zero struct row, got %#v", row)
+	}
+}
