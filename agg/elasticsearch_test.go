@@ -3,6 +3,7 @@ package agg
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -600,5 +601,25 @@ func TestElasticSumDistinctScriptUsesStringKeys(t *testing.T) {
 	}
 	if strings.Contains(script, "state.values[value]") {
 		t.Fatalf("script must not use numeric map keys: %s", script)
+	}
+}
+
+func TestElasticSortRowValuesBreaksTiesByGroupKeys(t *testing.T) {
+	t.Parallel()
+
+	builder := NewElasticSearchBuilder[elasticSummary](nil, "orders")
+	builder.GroupByDesc("region", "region").
+		Count("total").
+		OrderByDesc("total")
+	rows := []map[string]any{
+		{"region": "west", "total": float64(1)},
+		{"region": "north", "total": float64(2)},
+		{"region": "east", "total": float64(2)},
+	}
+	builder.sortElasticRowValues(rows)
+	got := []any{rows[0]["region"], rows[1]["region"], rows[2]["region"]}
+	want := []any{"north", "east", "west"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sorted regions = %v, want %v", got, want)
 	}
 }
