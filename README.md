@@ -1547,6 +1547,11 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
 - Grouped queries support offset pagination with `Start + Limit`; grouped page size defaults to 100 and `Limit` cannot exceed 5000
 - A query without `Groups` returns one summary row, ignores pagination, and reports `Total=1`
 - Records with a null or missing group field are excluded; null metric values are ignored
+- Empty sums differ across backends; use a pointer field such as `*float64` to observe this, and if you need to tell "no data" apart from a real zero, add a `Count` (or `CountIf`) metric and check it for `0`:
+  - Elasticsearch: `Sum`, `SumIf`, `SumDistinct`, and `SumDistinctIf` return `0` when no documents match or all values are null or missing
+  - GORM: `SUM` returns `nil` (SQL `NULL`) when no rows match or all values are `NULL`. `SumIf` returns `0` when a group has rows but none satisfy the condition. Distinct sums return `nil` when there are no values
+  - MongoDB: a query without `Groups` that matches no documents returns `nil` metrics; otherwise `$sum` returns `0` for a group whose values are all null or missing, and distinct sums return `0`
+  - `Avg`, `Min`, and `Max` return `nil` on every backend when there are no values
 - Distinct is currently supported only for `Count` and `Sum`
 - HAVING currently filters metric aliases only and accepts numeric comparison values; grouped cursor pagination is not supported yet
 - Field predicates are intentionally structured and validated; arbitrary raw SQL, MongoDB, or Elasticsearch expressions are not accepted
