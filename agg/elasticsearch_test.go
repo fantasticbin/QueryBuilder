@@ -45,7 +45,8 @@ func TestElasticSearchBuilderExplain(t *testing.T) {
 		`"customer.id"`,
 		`"sum"`,
 		`"scripted_metric"`,
-		`state.values = [:]`,
+		`state.values = new HashMap()`,
+		`Double.toString(value)`,
 		`containsKey`,
 		`"params"`,
 		`"status"`,
@@ -579,5 +580,25 @@ func TestElasticSearchBuilderDecodeResultTotalLimitCapsNotBoundsPage(t *testing.
 	}
 	if result.Total != 2 {
 		t.Fatalf("expected capped Total 2, got %d", result.Total)
+	}
+}
+
+func TestElasticSumDistinctScriptUsesStringKeys(t *testing.T) {
+	source, err := elasticSumDistinctMetric(Metric{Func: Sum, Field: "amount", Alias: "unique", Distinct: true}).Source()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(encoded)
+	for _, fragment := range []string{"doubleValue() + 0.0d", "state.values.put(Double.toString(value), value)", "values.putAll(state)", "values.values()"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("expected script to contain %q: %s", fragment, script)
+		}
+	}
+	if strings.Contains(script, "state.values[value]") {
+		t.Fatalf("script must not use numeric map keys: %s", script)
 	}
 }
