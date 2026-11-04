@@ -1544,6 +1544,11 @@ statement, err := query.Explain(ctx)
 - 分组查询支持 `Start + Limit` 偏移分页；分组页大小默认 100，`Limit` 最大为 5000
 - 没有配置 `Groups` 时返回一行汇总结果，分页不生效，并返回 `Total=1`
 - 分组字段为空或不存在的记录不会进入统计，指标字段为空时会被忽略
+- 空求和在不同数据源上的结果不一致；结果字段需用 `*float64` 等指针类型才能观察到差异。如需区分"无数据"和真实的 0，请同时添加 `Count`（或 `CountIf`）指标并判断它是否为 `0`：
+  - Elasticsearch：没有匹配文档或指标值全部为空或缺失时，`Sum`、`SumIf`、`SumDistinct`、`SumDistinctIf` 返回 `0`
+  - GORM：没有匹配行或值全部为 `NULL` 时 `SUM` 返回 `nil`（SQL `NULL`）；分组内有行但都不满足条件时 `SumIf` 返回 `0`；去重求和没有值时返回 `nil`
+  - MongoDB：没有 `Groups` 且没有匹配文档时，指标为 `nil`；其他情况下，若分组内的值全部为空或缺失，`$sum` 返回 `0`，去重求和也返回 `0`
+  - 没有值时，`Avg`、`Min`、`Max` 在所有数据源上都返回 `nil`
 - 目前只有 `Count` 和 `Sum` 支持 distinct
 - HAVING 当前只支持按指标别名过滤，且比较值需为数值；分组游标分页暂不支持
 - 字段谓词会经过结构化校验，不支持直接传入任意 SQL、MongoDB 或 Elasticsearch 原始表达式
