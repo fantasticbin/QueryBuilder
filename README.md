@@ -1470,6 +1470,8 @@ Time buckets are available with `GroupByDate` or `GroupByDateWithTimeZone` when 
 query.GroupByDateWithTimeZone("created_at", "created_day", agg.TimeIntervalDay, "Asia/Shanghai")
 ```
 
+Date buckets decode into `time.Time` on every backend. On MySQL, time-zone conversion uses `CONVERT_TZ(field, '+00:00', tz)`, so stored values are assumed to be UTC; named zones such as `Asia/Shanghai` require the MySQL time zone tables to be loaded (`mysql_tzinfo_to_sql`), otherwise use a fixed offset such as `+08:00`. Week buckets follow ISO 8601 (weeks start on Monday, and the week-year can differ from the calendar year near January 1).
+
 #### Switching Data Sources
 
 Builders start with an empty `Spec` so the common path is fluent configuration. When a `Spec` is built elsewhere, it can still be reused with `SetSpec`:
@@ -1552,6 +1554,9 @@ For distinct counts and sums, GORM emits `COUNT(DISTINCT field)` or `SUM(DISTINC
   - GORM: `SUM` returns `nil` (SQL `NULL`) when no rows match or all values are `NULL`. `SumIf` returns `0` when a group has rows but none satisfy the condition. Distinct sums return `nil` when there are no values
   - MongoDB: a query without `Groups` that matches no documents returns `nil` metrics; otherwise `$sum` returns `0` for a group whose values are all null or missing, and distinct sums return `0`
   - `Avg`, `Min`, and `Max` return `nil` on every backend when there are no values
+- On MySQL, `AVG` over integer columns returns a `DECIMAL` with limited scale (4 extra digits by default), so averages can differ slightly from other backends in the last decimal places
+- When explicit orders are set, the group keys that are not already ordered are appended (in their declared direction) as tie-breakers, so pagination over grouped results is deterministic
+- Map result types (for example `map[string]any`) are supported on every backend; a query without `Groups` that matches no data returns an initialized empty map
 - Distinct is currently supported only for `Count` and `Sum`
 - HAVING currently filters metric aliases only and accepts numeric comparison values; grouped cursor pagination is not supported yet
 - Field predicates are intentionally structured and validated; arbitrary raw SQL, MongoDB, or Elasticsearch expressions are not accepted

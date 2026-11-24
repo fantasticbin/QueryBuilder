@@ -576,8 +576,9 @@ func (b *ElasticSearchBuilder[A]) sortElasticRowValues(rows []map[string]any) {
 	if len(b.spec.Orders) == 0 {
 		return
 	}
+	orders := effectiveOrders(b.spec)
 	sort.SliceStable(rows, func(i, j int) bool {
-		for _, order := range b.spec.Orders {
+		for _, order := range orders {
 			comparison := elasticCompareValues(rows[i][order.Alias], rows[j][order.Alias])
 			if comparison == 0 {
 				continue

@@ -505,10 +505,19 @@ func supportsDistinct(fn Func) bool {
 	return slices.Contains([]Func{Count, Sum}, fn)
 }
 
-// effectiveOrders 返回显式排序；未设置时保持按分组字段排序的兼容行为
+// effectiveOrders 返回分组结果的完整排序规则
+// 未设置显式排序时按分组字段排序；设置显式排序时在其后按分组声明的方向追加尚未出现的分组字段，
+// 保证排序值相同的分组在分页时顺序确定，不会重复或遗漏
 func effectiveOrders(spec Spec) []Order {
 	if len(spec.Orders) > 0 {
-		return spec.Orders
+		orders := make([]Order, 0, len(spec.Orders)+len(spec.Groups))
+		orders = append(orders, spec.Orders...)
+		for _, group := range spec.Groups {
+			if !slices.ContainsFunc(spec.Orders, func(order Order) bool { return order.Alias == group.Alias }) {
+				orders = append(orders, Order{Alias: group.Alias, Descending: group.Descending})
+			}
+		}
+		return orders
 	}
 	orders := make([]Order, 0, len(spec.Groups))
 	for _, group := range spec.Groups {
@@ -518,6 +527,20 @@ func effectiveOrders(spec Spec) []Order {
 		})
 	}
 	return orders
+}
+
+// newResultRow 创建零值结果行；当结果类型为 map 时返回已初始化的空 map，避免调用方写入 nil map
+func newResultRow[A any]() *A {
+	row := new(A)
+	if value := reflect.ValueOf(row).Elem(); value.Kind() == reflect.Map {
+		value.Set(reflect.MakeMap(value.Type()))
+	}
+	return row
+}
+
+// isMapResult 判断结果行类型是否为 map
+func isMapResult[A any]() bool {
+	return reflect.TypeFor[A]().Kind() == reflect.Map
 }
 
 // validateField 校验字段是否为安全的点分标识符

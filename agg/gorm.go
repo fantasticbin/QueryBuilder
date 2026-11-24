@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
@@ -69,13 +70,12 @@ func (b *GormBuilder[M, A]) Query(ctx context.Context) (*Result[A], error) {
 		}
 
 		if len(b.spec.Groups) == 0 {
-			rows := make([]*A, 0)
-			query := b.buildQuery(db.WithContext(ctx))
-			if err := query.Scan(&rows).Error; err != nil {
+			rows, err := scanGormRows[A](b.buildQuery(db.WithContext(ctx)))
+			if err != nil {
 				return nil, fmt.Errorf("executing gorm aggregate query: %w", err)
 			}
 			if len(rows) == 0 {
-				rows = append(rows, new(A))
+				rows = append(rows, newResultRow[A]())
 			}
 			return &Result[A]{Rows: rows, Total: 1}, nil
 		}
@@ -83,10 +83,11 @@ func (b *GormBuilder[M, A]) Query(ctx context.Context) (*Result[A], error) {
 		rows := make([]*A, 0)
 		var total int64
 		if err := util.WaitAndGoWithContext(ctx, func(ctx context.Context) error {
-			query := b.buildQueryWithOptions(db.WithContext(ctx), true, true)
-			if err := query.Scan(&rows).Error; err != nil {
+			scanned, err := scanGormRows[A](b.buildQueryWithOptions(db.WithContext(ctx), true, true))
+			if err != nil {
 				return fmt.Errorf("executing gorm aggregate query: %w", err)
 			}
+			rows = scanned
 			return nil
 		}, func(ctx context.Context) error {
 			if !b.needTotal {
@@ -361,6 +362,41 @@ func gormGroupExpression(db *gorm.DB, group Group) string {
 	return gormDateGroupExpression(db, group)
 }
 
+// scanGormRows 将查询结果解码为结果行；GORM 无法直接扫描 []*map，map 结果先扫描为 []map[string]any 再转换
+func scanGormRows[A any](query *gorm.DB) ([]*A, error) {
+	if !isMapResult[A]() {
+		rows := make([]*A, 0)
+		if err := query.Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	maps := make([]map[string]any, 0)
+	if err := query.Scan(&maps).Error; err != nil {
+		return nil, err
+	}
+	rowType := reflect.TypeFor[A]()
+	rows := make([]*A, 0, len(maps))
+	for _, values := range maps {
+		row := newResultRow[A]()
+		target := reflect.ValueOf(row).Elem()
+		for key, value := range values {
+			item := reflect.ValueOf(value)
+			if !item.IsValid() {
+				item = reflect.Zero(rowType.Elem())
+			} else if !item.Type().AssignableTo(rowType.Elem()) {
+				if !item.Type().ConvertibleTo(rowType.Elem()) {
+					return nil, fmt.Errorf("cannot assign column %q of type %s to %s", key, item.Type(), rowType.Elem())
+				}
+				item = item.Convert(rowType.Elem())
+			}
+			target.SetMapIndex(reflect.ValueOf(key).Convert(rowType.Key()), item)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
 // gormDateGroupExpression 构建时间桶分组表达式
 func gormDateGroupExpression(db *gorm.DB, group Group) string {
 	field := quoteGormIdentifier(db, group.Field)
@@ -368,7 +404,8 @@ func gormDateGroupExpression(db *gorm.DB, group Group) string {
 	switch dialect {
 	case "mysql":
 		if group.TimeZone != "" {
-			field = "CONVERT_TZ(" + field + ", @@session.time_zone, " + quoteSQLString(group.TimeZone) + ")"
+			// DATETIME 不携带时区，按 UTC 存储解释，避免结果随会话 time_zone 变化；命名时区需要 MySQL 已加载时区表
+			field = "CONVERT_TZ(" + field + ", '+00:00', " + quoteSQLString(group.TimeZone) + ")"
 		}
 		return gormMySQLDateGroupExpression(field, group.Interval)
 	case "sqlite", "sqlite3":
@@ -388,24 +425,28 @@ func gormDateGroupExpression(db *gorm.DB, group Group) string {
 
 // gormMySQLDateGroupExpression 构建 MySQL 方言的时间桶分组表达式
 func gormMySQLDateGroupExpression(field string, interval TimeInterval) string {
+	var expression string
 	switch interval {
 	case TimeIntervalMinute:
-		return "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:%i:00')"
+		expression = "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:%i:00')"
 	case TimeIntervalHour:
-		return "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:00:00')"
+		expression = "DATE_FORMAT(" + field + ", '%Y-%m-%d %H:00:00')"
 	case TimeIntervalDay:
-		return "DATE_FORMAT(" + field + ", '%Y-%m-%d 00:00:00')"
+		expression = "DATE_FORMAT(" + field + ", '%Y-%m-%d 00:00:00')"
 	case TimeIntervalWeek:
-		return "STR_TO_DATE(CONCAT(YEARWEEK(" + field + ", 3), ' Monday'), '%X%V %W')"
+		// YEARWEEK 模式 3 为 ISO 周（周一开始），需配合 ISO 格式 %x%v 解析
+		expression = "STR_TO_DATE(CONCAT(YEARWEEK(" + field + ", 3), ' Monday'), '%x%v %W')"
 	case TimeIntervalMonth:
-		return "DATE_FORMAT(" + field + ", '%Y-%m-01 00:00:00')"
+		expression = "DATE_FORMAT(" + field + ", '%Y-%m-01 00:00:00')"
 	case TimeIntervalQuarter:
-		return "MAKEDATE(YEAR(" + field + "), 1) + INTERVAL (QUARTER(" + field + ") - 1) QUARTER"
+		expression = "MAKEDATE(YEAR(" + field + "), 1) + INTERVAL (QUARTER(" + field + ") - 1) QUARTER"
 	case TimeIntervalYear:
-		return "DATE_FORMAT(" + field + ", '%Y-01-01 00:00:00')"
+		expression = "DATE_FORMAT(" + field + ", '%Y-01-01 00:00:00')"
 	default:
 		return field
 	}
+	// 统一返回 DATETIME，可直接解码为 time.Time，与 PostgreSQL DATE_TRUNC 行为一致
+	return "CAST(" + expression + " AS DATETIME)"
 }
 
 // gormSQLiteDateGroupExpression 构建 SQLite 方言的时间桶分组表达式

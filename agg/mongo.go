@@ -74,7 +74,7 @@ func (b *MongoBuilder[A]) Query(ctx context.Context) (*Result[A], error) {
 				return nil, err
 			}
 			if len(rows) == 0 {
-				rows = append(rows, new(A))
+				rows = append(rows, newResultRow[A]())
 			}
 			return &Result[A]{Rows: rows, Total: 1}, nil
 		}
