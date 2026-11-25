@@ -362,6 +362,8 @@ func gormGroupExpression(db *gorm.DB, group Group) string {
 	return gormDateGroupExpression(db, group)
 }
 
+var stringReflectType = reflect.TypeFor[string]()
+
 // scanGormRows 将查询结果解码为结果行；GORM 无法直接扫描 []*map，map 结果先扫描为 []map[string]any 再转换
 func scanGormRows[A any](query *gorm.DB) ([]*A, error) {
 	if !isMapResult[A]() {
@@ -371,11 +373,14 @@ func scanGormRows[A any](query *gorm.DB) ([]*A, error) {
 		}
 		return rows, nil
 	}
+	rowType := reflect.TypeFor[A]()
+	if err := validateMapResultType(rowType); err != nil {
+		return nil, err
+	}
 	maps := make([]map[string]any, 0)
 	if err := query.Scan(&maps).Error; err != nil {
 		return nil, err
 	}
-	rowType := reflect.TypeFor[A]()
 	rows := make([]*A, 0, len(maps))
 	for _, values := range maps {
 		row := newResultRow[A]()
@@ -385,16 +390,54 @@ func scanGormRows[A any](query *gorm.DB) ([]*A, error) {
 			if !item.IsValid() {
 				item = reflect.Zero(rowType.Elem())
 			} else if !item.Type().AssignableTo(rowType.Elem()) {
-				if !item.Type().ConvertibleTo(rowType.Elem()) {
+				if !canConvertMapColumnValue(item.Type(), rowType.Elem()) {
 					return nil, fmt.Errorf("cannot assign column %q of type %s to %s", key, item.Type(), rowType.Elem())
 				}
 				item = item.Convert(rowType.Elem())
 			}
-			target.SetMapIndex(reflect.ValueOf(key).Convert(rowType.Key()), item)
+			keyValue := reflect.ValueOf(key)
+			if rowType.Key() != stringReflectType {
+				keyValue = keyValue.Convert(rowType.Key())
+			}
+			target.SetMapIndex(keyValue, item)
 		}
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// validateMapResultType 校验 map 结果行的键类型是否可以接收字符串列名
+func validateMapResultType(rowType reflect.Type) error {
+	if rowType.Key().Kind() == reflect.String || stringReflectType.AssignableTo(rowType.Key()) {
+		return nil
+	}
+	return fmt.Errorf("unsupported map key type %s for aggregate result", rowType.Key())
+}
+
+// canConvertMapColumnValue 判断列值类型能否安全转换为目标 map 值类型，
+// 拒绝 Go reflect 中整数转 string（按 Unicode 码点编码导致静默数据损坏）和 slice 转定长数组（长度不足时 panic）
+func canConvertMapColumnValue(src, dst reflect.Type) bool {
+	if !src.ConvertibleTo(dst) {
+		return false
+	}
+	if isIntegerKind(src.Kind()) && dst.Kind() == reflect.String {
+		return false
+	}
+	if src.Kind() == reflect.Slice && (dst.Kind() == reflect.Array || (dst.Kind() == reflect.Pointer && dst.Elem().Kind() == reflect.Array)) {
+		return false
+	}
+	return true
+}
+
+// isIntegerKind 判断 reflect.Kind 是否为整数类型
+func isIntegerKind(kind reflect.Kind) bool {
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return true
+	default:
+		return false
+	}
 }
 
 // gormDateGroupExpression 构建时间桶分组表达式

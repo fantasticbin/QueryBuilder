@@ -714,3 +714,65 @@ func TestNewResultRowInitializesMaps(t *testing.T) {
 		t.Fatalf("expected zero struct row, got %#v", row)
 	}
 }
+
+func TestNormalizeSpecCanonicalizesAliasReferences(t *testing.T) {
+	t.Parallel()
+
+	spec := normalizeSpec(Spec{
+		Groups:  []Group{{Field: "region", Alias: "Region"}, {Field: "channel", Alias: "Channel"}},
+		Metrics: []Metric{{Func: Count, Alias: "TotalCount"}},
+		Orders:  []Order{{Alias: "totalcount", Descending: true}, {Alias: "REGION", Descending: true}},
+		Havings: []Having{{Alias: "TOTALCOUNT", Op: Gte, Value: 2}},
+	})
+	if err := validateSpec(spec); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	wantOrders := []Order{{Alias: "TotalCount", Descending: true}, {Alias: "Region", Descending: true}}
+	if !reflect.DeepEqual(spec.Orders, wantOrders) {
+		t.Fatalf("canonical orders = %#v, want %#v", spec.Orders, wantOrders)
+	}
+	wantHavings := []Having{{Alias: "TotalCount", Op: Gte, Value: 2}}
+	if !reflect.DeepEqual(spec.Havings, wantHavings) {
+		t.Fatalf("canonical havings = %#v, want %#v", spec.Havings, wantHavings)
+	}
+	wantEffective := []Order{
+		{Alias: "TotalCount", Descending: true},
+		{Alias: "Region", Descending: true},
+		{Alias: "Channel"},
+	}
+	if got := effectiveOrders(spec); !reflect.DeepEqual(got, wantEffective) {
+		t.Fatalf("effectiveOrders() = %#v, want %#v", got, wantEffective)
+	}
+
+	dupOrderSpec := normalizeSpec(Spec{
+		Groups:  []Group{{Field: "region", Alias: "Region"}},
+		Metrics: []Metric{{Func: Count, Alias: "Total"}},
+		Orders:  []Order{{Alias: "region"}, {Alias: "REGION", Descending: true}},
+	})
+	if err := validateSpec(dupOrderSpec); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("expected duplicate order alias error, got %v", err)
+	}
+
+	havingGroupSpec := normalizeSpec(Spec{
+		Groups:  []Group{{Field: "region", Alias: "Region"}},
+		Metrics: []Metric{{Func: Count, Alias: "Total"}},
+		Havings: []Having{{Alias: "region", Op: Eq, Value: 1}},
+	})
+	if err := validateSpec(havingGroupSpec); !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("expected having group alias error, got %v", err)
+	}
+}
+
+func TestEffectiveOrdersDeduplicatesGroupKeysCaseInsensitively(t *testing.T) {
+	t.Parallel()
+
+	spec := Spec{
+		Groups: []Group{{Field: "region", Alias: "Region"}, {Field: "channel", Alias: "Channel", Descending: true}},
+		Orders: []Order{{Alias: "region", Descending: true}},
+	}
+	got := effectiveOrders(spec)
+	want := []Order{{Alias: "region", Descending: true}, {Alias: "Channel", Descending: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("effectiveOrders() = %#v, want %#v", got, want)
+	}
+}

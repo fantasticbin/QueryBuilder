@@ -301,10 +301,13 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 		})
 	case Between:
 		start, end, _ := conditionRangeValues(condition.Value)
-		return bson.D{{Key: "$expr", Value: bson.D{{Key: "$and", Value: bson.A{
-			bson.D{{Key: "$gte", Value: bson.A{"$" + condition.Field, start}}},
-			bson.D{{Key: "$lte", Value: bson.A{"$" + condition.Field, end}}},
-		}}}}}
+		return mergeMongoClauses(bson.A{
+			mongoFieldExistsAndNotNull(condition.Field),
+			bson.D{{Key: "$expr", Value: bson.D{{Key: "$and", Value: bson.A{
+				bson.D{{Key: "$gte", Value: bson.A{"$" + condition.Field, start}}},
+				bson.D{{Key: "$lte", Value: bson.A{"$" + condition.Field, end}}},
+			}}}}},
+		})
 	case Exists, IsNotNull:
 		return mongoFieldExistsAndNotNull(condition.Field)
 	case NotExists, IsNull:
@@ -322,9 +325,10 @@ func (b *MongoBuilder[A]) buildConditionMatch(condition Condition) bson.D {
 	}
 
 	// 其余算术比较操作符（Eq/Ne/Gt/Gte/Lt/Lte）落入默认分支，
-	// 统一通过 mongoConditionExpression + mongoOperator 转换为 $expr 比较表达式。
+	// 统一通过 mongoConditionExpression + mongoOperator 转换为 $expr 比较表达式；
+	// 其中 Ne/Gt/Gte/Lt/Lte 需排除 missing/null，避免 BSON 跨类型全序（missing < null < number）误匹配
 	expression := bson.D{{Key: "$expr", Value: mongoConditionExpression(condition)}}
-	if condition.Op != Ne {
+	if condition.Op == Eq {
 		return expression
 	}
 	return mergeMongoClauses(bson.A{
@@ -347,8 +351,10 @@ func mongoConditionExpr(condition Condition) any {
 			bson.D{{Key: "$not", Value: bson.D{{Key: "$in", Value: bson.A{field, bson.A(values)}}}}},
 		}}}
 	case Between:
+		// 与 SQL/ES 一致：缺失或 null 字段不满足 BETWEEN，避免 BSON 跨类型排序误判
 		start, end, _ := conditionRangeValues(condition.Value)
 		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
 			bson.D{{Key: "$gte", Value: bson.A{field, start}}},
 			bson.D{{Key: "$lte", Value: bson.A{field, end}}},
 		}}}
@@ -372,6 +378,12 @@ func mongoConditionExpr(condition Condition) any {
 		return bson.D{{Key: "$and", Value: bson.A{
 			mongoFieldPresentExpr(condition.Field),
 			bson.D{{Key: "$ne", Value: bson.A{field, condition.Value}}},
+		}}}
+	case Gt, Gte, Lt, Lte:
+		// BSON 聚合表达式中 missing < null < number，范围比较必须先要求字段存在且非 null
+		return bson.D{{Key: "$and", Value: bson.A{
+			mongoFieldPresentExpr(condition.Field),
+			mongoConditionExpression(condition),
 		}}}
 	default:
 		return mongoConditionExpression(condition)

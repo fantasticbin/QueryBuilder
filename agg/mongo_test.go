@@ -527,3 +527,42 @@ func TestMongoBuilderSortAppendsGroupKeyTieBreaker(t *testing.T) {
 		}
 	}
 }
+
+func TestMongoRangeConditionsExcludeMissingAndNull(t *testing.T) {
+	t.Parallel()
+
+	builder := NewMongoBuilder[mongoSummary](core.NewDBProxyWithAdapters(core.NewMongoAdapter(&mongo.Collection{})))
+	cases := []Condition{
+		{Field: "score", Op: Lt, Value: 60},
+		{Field: "score", Op: Lte, Value: 60},
+		{Field: "score", Op: Gt, Value: 60},
+		{Field: "score", Op: Gte, Value: 60},
+		{Field: "score", Op: Between, Value: Range{Start: 10, End: 60}},
+	}
+	for _, cond := range cases {
+		expr := mongoConditionExpr(cond)
+		exprDoc, ok := expr.(bson.D)
+		if !ok || len(exprDoc) != 1 || exprDoc[0].Key != "$and" {
+			t.Fatalf("%s: expected $and guarding present field, got %#v", cond.Op, expr)
+		}
+		encodedExpr, err := bson.MarshalExtJSON(exprDoc, true, false)
+		if err != nil {
+			t.Fatalf("%s: encode expr: %v", cond.Op, err)
+		}
+		if !strings.Contains(string(encodedExpr), `"missing"`) || !strings.Contains(string(encodedExpr), `null`) {
+			t.Fatalf("%s: expected mongoFieldPresentExpr in $cond, got %s", cond.Op, encodedExpr)
+		}
+
+		matchDoc := builder.buildConditionMatch(cond)
+		if len(matchDoc) != 1 || matchDoc[0].Key != "$and" {
+			t.Fatalf("%s: expected $and in buildConditionMatch, got %#v", cond.Op, matchDoc)
+		}
+		encodedMatch, err := bson.MarshalExtJSON(matchDoc, true, false)
+		if err != nil {
+			t.Fatalf("%s: encode match: %v", cond.Op, err)
+		}
+		if !strings.Contains(string(encodedMatch), `"$exists":true`) {
+			t.Fatalf("%s: expected $exists guard in buildConditionMatch, got %s", cond.Op, encodedMatch)
+		}
+	}
+}

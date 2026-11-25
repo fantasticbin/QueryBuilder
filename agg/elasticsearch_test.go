@@ -3,6 +3,8 @@ package agg
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -594,13 +596,227 @@ func TestElasticSumDistinctScriptUsesStringKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(encoded)
-	for _, fragment := range []string{"doubleValue() + 0.0d", "state.values.put(Double.toString(value), value)", "values.putAll(state)", "values.values()"} {
+	for _, fragment := range []string{"for (def item : doc[params.field])", "doubleValue() + 0.0d", "state.values.put(Double.toString(value), value)", "values.putAll(state)", "values.values()"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("expected script to contain %q: %s", fragment, script)
 		}
 	}
 	if strings.Contains(script, "state.values[value]") {
 		t.Fatalf("script must not use numeric map keys: %s", script)
+	}
+}
+
+func TestElasticMixedCaseOrderAndHavingAfterPrepare(t *testing.T) {
+	t.Parallel()
+
+	type mixedSummary struct {
+		Region     string `json:"Region"`
+		TotalCount int64  `json:"TotalCount"`
+	}
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+	builder := NewElasticSearchBuilder[mixedSummary](data, "orders")
+	builder.GroupBy("region.keyword", "Region").
+		Count("TotalCount").
+		Having("totalcount >= ?", 2).
+		OrderByDesc("TOTALCOUNT").
+		OrderByDesc("region")
+
+	if err := builder.prepareElasticSearch(); err != nil {
+		t.Fatalf("prepareElasticSearch unexpected error: %v", err)
+	}
+	root := json.RawMessage(`{
+		"doc_count": 7,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"Region": "east"}, "doc_count": 2},
+				{"key": {"Region": "west"}, "doc_count": 1},
+				{"key": {"Region": "north"}, "doc_count": 2},
+				{"key": {"Region": "south"}, "doc_count": 4}
+			]
+		}
+	}`)
+	result, err := builder.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("decodeResult unexpected error: %v", err)
+	}
+	want := []mixedSummary{
+		{Region: "south", TotalCount: 4},
+		{Region: "north", TotalCount: 2},
+		{Region: "east", TotalCount: 2},
+	}
+	if len(result.Rows) != len(want) {
+		t.Fatalf("got %d rows, want %d: %#v", len(result.Rows), len(want), result.Rows)
+	}
+	for i := range want {
+		if *result.Rows[i] != want[i] {
+			t.Fatalf("row %d = %+v, want %+v", i, *result.Rows[i], want[i])
+		}
+	}
+}
+
+func TestElasticSearchBuilderHavingOnSumDistinctSkipsBucketSelector(t *testing.T) {
+	t.Parallel()
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(&elastic.Client{}))
+
+	// 仅 SumDistinct HAVING：不应挂载 bucket_selector，仍由客户端过滤
+	onlyDistinct := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	onlyDistinct.GroupBy("region.keyword", "region").
+		SumDistinct("amount", "unique_amount_sum").
+		Having("unique_amount_sum >= ?", 30).
+		SetNeedTotal(false)
+
+	if onlyDistinct.shouldAttachHavingPipeline() {
+		t.Fatal("SumDistinct HAVING must not attach bucket_selector")
+	}
+	if !onlyDistinct.needsElasticClientPostProcessing() {
+		t.Fatal("SumDistinct HAVING must still trigger client post-processing")
+	}
+	explanation, err := onlyDistinct.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("Explain unexpected error: %v", err)
+	}
+	if strings.Contains(explanation, `"bucket_selector"`) {
+		t.Fatalf("SumDistinct HAVING explanation must not contain bucket_selector: %s", explanation)
+	}
+	root := json.RawMessage(`{
+		"doc_count": 5,
+		"_querybuilder_groups": {
+			"buckets": [
+				{"key": {"region": "east"}, "doc_count": 3, "unique_amount_sum": {"value": 40.0}},
+				{"key": {"region": "west"}, "doc_count": 2, "unique_amount_sum": {"value": 15.0}}
+			]
+		}
+	}`)
+	result, err := onlyDistinct.decodeResult(&elastic.SearchResult{
+		Aggregations: elastic.Aggregations{elasticRootAggregation: root},
+	})
+	if err != nil {
+		t.Fatalf("decodeResult unexpected error: %v", err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0].Region != "east" {
+		t.Fatalf("expected only east after client HAVING filter, got %#v", result.Rows)
+	}
+
+	// 混合 Count + SumDistinct HAVING：仅对 Count 下推 bucket_selector，不引用 unique_amount_sum
+	mixed := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	mixed.GroupBy("region.keyword", "region").
+		Count("total").
+		SumDistinct("amount", "unique_amount_sum").
+		Having("total >= ?", 2).
+		Having("unique_amount_sum >= ?", 30)
+
+	if !mixed.shouldAttachHavingPipeline() {
+		t.Fatal("mixed HAVING should still attach bucket_selector for supported metrics")
+	}
+	mixedExplanation, err := mixed.Explain(context.Background())
+	if err != nil {
+		t.Fatalf("mixed Explain unexpected error: %v", err)
+	}
+	if !strings.Contains(mixedExplanation, `"bucket_selector"`) || !strings.Contains(mixedExplanation, `"_count"`) {
+		t.Fatalf("expected bucket_selector on _count, got %s", mixedExplanation)
+	}
+	if strings.Contains(mixedExplanation, `"value": "unique_amount_sum"`) {
+		t.Fatalf("bucket_selector must not reference scripted_metric unique_amount_sum: %s", mixedExplanation)
+	}
+}
+
+func TestElasticCompositeHasMore(t *testing.T) {
+	t.Parallel()
+
+	after1 := map[string]any{"region": "east"}
+	after2 := map[string]any{"region": "west"}
+
+	if !elasticCompositeHasMore(nil, after1) {
+		t.Fatal("non-empty after_key should continue paging even when page buckets are empty after HAVING")
+	}
+	if !elasticCompositeHasMore(after1, after2) {
+		t.Fatal("advancing after_key should continue paging")
+	}
+	if elasticCompositeHasMore(after1, nil) || elasticCompositeHasMore(after1, map[string]any{}) {
+		t.Fatal("empty after_key must stop paging")
+	}
+	if elasticCompositeHasMore(after1, map[string]any{"region": "east"}) {
+		t.Fatal("unchanged after_key must stop paging to prevent infinite loop")
+	}
+}
+
+type aggRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f aggRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestElasticSearchBuilderQueryCompositeContinuesPastEmptyFilteredPage(t *testing.T) {
+	t.Parallel()
+
+	pageCalls := 0
+	httpClient := &http.Client{
+		Transport: aggRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			pageCalls++
+			var body string
+			switch pageCalls {
+			case 1:
+				// 第一页所有桶均被 bucket_selector 过滤，buckets 为空但 after_key 非空
+				body = `{
+					"aggregations": {
+						"_querybuilder_aggregate": {
+							"doc_count": 10,
+							"_querybuilder_groups": {
+								"after_key": {"region": "east"},
+								"buckets": []
+							}
+						}
+					}
+				}`
+			case 2:
+				// 第二页包含满足 HAVING 的分组，无 after_key
+				body = `{
+					"aggregations": {
+						"_querybuilder_aggregate": {
+							"doc_count": 10,
+							"_querybuilder_groups": {
+								"buckets": [
+									{"key": {"region": "west"}, "doc_count": 5}
+								]
+							}
+						}
+					}
+				}`
+			default:
+				t.Fatalf("unexpected extra search call #%d", pageCalls)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		}),
+	}
+	client, err := elastic.NewSimpleClient(
+		elastic.SetURL("http://es.local"),
+		elastic.SetHttpClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("create simple elastic client: %v", err)
+	}
+
+	data := core.NewDBProxyWithAdapters(core.NewElasticSearchAdapter(client))
+	builder := NewElasticSearchBuilder[elasticSummary](data, "orders")
+	builder.GroupBy("region.keyword", "region").
+		Count("total").
+		Having("total >= ?", 5).
+		SetLimit(10)
+
+	result, err := builder.Query(context.Background())
+	if err != nil {
+		t.Fatalf("Query unexpected error: %v", err)
+	}
+	if pageCalls != 2 {
+		t.Fatalf("expected 2 composite page calls, got %d", pageCalls)
+	}
+	if len(result.Rows) != 1 || result.Rows[0].Region != "west" || result.Rows[0].Total != 5 || result.Total != 1 {
+		t.Fatalf("unexpected query result: rows=%#v total=%d", result.Rows, result.Total)
 	}
 }
 

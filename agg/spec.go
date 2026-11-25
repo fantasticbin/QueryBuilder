@@ -387,7 +387,8 @@ func hasUnaryNullAlias(spec Spec) bool {
 	})
 }
 
-// normalizeSpec 复制并规范化聚合查询配置，为分组查询补充默认 limit
+// normalizeSpec 复制并规范化聚合查询配置，为分组查询补充默认 limit，
+// 并将 Orders/Havings 中的别名引用对齐为 Groups/Metrics 声明时的原始大小写
 func normalizeSpec(spec Spec) Spec {
 	normalized := spec.Clone()
 	if len(normalized.Groups) == 0 {
@@ -396,7 +397,43 @@ func normalizeSpec(spec Spec) Spec {
 	} else if normalized.Limit == 0 {
 		normalized.Limit = defaultLimit
 	}
+	canonicalizeAliasReferences(&normalized)
 	return normalized
+}
+
+// canonicalizeAliasReferences 将 Orders 和 Havings 中的别名引用规范化为声明时的大小写，
+// 保证大小写不敏感校验通过的 Spec 在 PostgreSQL/MongoDB/Elasticsearch 执行期均能准确匹配别名
+func canonicalizeAliasReferences(spec *Spec) {
+	if len(spec.Orders) == 0 && len(spec.Havings) == 0 {
+		return
+	}
+	allAliases := make(map[string]string, len(spec.Groups)+len(spec.Metrics))
+	for _, group := range spec.Groups {
+		key := strings.ToLower(group.Alias)
+		if _, exists := allAliases[key]; !exists {
+			allAliases[key] = group.Alias
+		}
+	}
+	metricAliases := make(map[string]string, len(spec.Metrics))
+	for _, metric := range spec.Metrics {
+		key := strings.ToLower(metric.Alias)
+		if _, exists := allAliases[key]; !exists {
+			allAliases[key] = metric.Alias
+		}
+		if _, exists := metricAliases[key]; !exists {
+			metricAliases[key] = metric.Alias
+		}
+	}
+	for i := range spec.Orders {
+		if canonical, ok := allAliases[strings.ToLower(spec.Orders[i].Alias)]; ok {
+			spec.Orders[i].Alias = canonical
+		}
+	}
+	for i := range spec.Havings {
+		if canonical, ok := metricAliases[strings.ToLower(spec.Havings[i].Alias)]; ok {
+			spec.Havings[i].Alias = canonical
+		}
+	}
 }
 
 // validateSpec 校验聚合函数、字段、别名和结果数量上限
@@ -513,7 +550,7 @@ func effectiveOrders(spec Spec) []Order {
 		orders := make([]Order, 0, len(spec.Orders)+len(spec.Groups))
 		orders = append(orders, spec.Orders...)
 		for _, group := range spec.Groups {
-			if !slices.ContainsFunc(spec.Orders, func(order Order) bool { return order.Alias == group.Alias }) {
+			if !slices.ContainsFunc(spec.Orders, func(order Order) bool { return strings.EqualFold(order.Alias, group.Alias) }) {
 				orders = append(orders, Order{Alias: group.Alias, Descending: group.Descending})
 			}
 		}

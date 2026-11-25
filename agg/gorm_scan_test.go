@@ -190,3 +190,86 @@ func TestGormBuilderMySQLDateGroupExpressions(t *testing.T) {
 		}
 	}
 }
+
+func TestGormBuilderQueryRejectsUnsupportedMapKeyType(t *testing.T) {
+	data := openFakeRowsGorm(t, []string{"region", "total"}, [][]driver.Value{{"east", int64(3)}})
+	builder := NewGormBuilder[gormOrder, map[int]any](data)
+	builder.GroupBy("region", "region").Count("total").SetNeedTotal(false)
+
+	if _, err := builder.Query(context.Background()); err == nil || !strings.Contains(err.Error(), "unsupported map key type") {
+		t.Fatalf("expected unsupported map key type error, got %v", err)
+	}
+}
+
+func TestGormBuilderQueryAllowsNamedAndAnyMapKeyTypes(t *testing.T) {
+	type customKey string
+	data := openFakeRowsGorm(t, []string{"region", "total"}, [][]driver.Value{{"east", int64(3)}})
+
+	namedBuilder := NewGormBuilder[gormOrder, map[customKey]any](data)
+	namedBuilder.GroupBy("region", "region").Count("total").SetNeedTotal(false)
+	namedResult, err := namedBuilder.Query(context.Background())
+	if err != nil {
+		t.Fatalf("named string key map unexpected error: %v", err)
+	}
+	if got := *namedResult.Rows[0]; got["region"] != "east" || got["total"] != int64(3) {
+		t.Fatalf("unexpected named key map row: %#v", got)
+	}
+
+	anyBuilder := NewGormBuilder[gormOrder, map[any]any](data)
+	anyBuilder.GroupBy("region", "region").Count("total").SetNeedTotal(false)
+	anyResult, err := anyBuilder.Query(context.Background())
+	if err != nil {
+		t.Fatalf("any key map unexpected error: %v", err)
+	}
+	if got := *anyResult.Rows[0]; got["region"] != "east" || got["total"] != int64(3) {
+		t.Fatalf("unexpected any key map row: %#v", got)
+	}
+}
+
+func TestGormBuilderQueryRejectsUnsafeMapValueConversions(t *testing.T) {
+	t.Run("rejects integer to string unicode codepoint conversion", func(t *testing.T) {
+		data := openFakeRowsGorm(t, []string{"total"}, [][]driver.Value{{int64(65)}})
+		builder := NewGormBuilder[gormOrder, map[string]string](data)
+		builder.Count("total")
+
+		if _, err := builder.Query(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot assign column") {
+			t.Fatalf("expected error rejecting int64->string conversion, got %v", err)
+		}
+	})
+
+	t.Run("rejects slice to fixed array conversion", func(t *testing.T) {
+		data := openFakeRowsGorm(t, []string{"region"}, [][]driver.Value{{[]byte("ab")}})
+		builder := NewGormBuilder[gormOrder, map[string][4]byte](data)
+		builder.GroupBy("region", "region").Count("total").SetNeedTotal(false)
+
+		if _, err := builder.Query(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot assign column") {
+			t.Fatalf("expected error rejecting []byte->[4]byte conversion, got %v", err)
+		}
+	})
+
+	t.Run("allows safe numeric conversion", func(t *testing.T) {
+		numData := openFakeRowsGorm(t, []string{"total"}, [][]driver.Value{{int64(3)}})
+		numBuilder := NewGormBuilder[gormOrder, map[string]float64](numData)
+		numBuilder.Count("total")
+		numRes, err := numBuilder.Query(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error for int64->float64: %v", err)
+		}
+		if got := (*numRes.Rows[0])["total"]; got != 3.0 {
+			t.Fatalf("expected 3.0, got %v", got)
+		}
+	})
+
+	t.Run("allows bytes to string conversion", func(t *testing.T) {
+		bytesData := openFakeRowsGorm(t, []string{"region"}, [][]driver.Value{{[]byte("east")}})
+		bytesBuilder := NewGormBuilder[gormOrder, map[string]string](bytesData)
+		bytesBuilder.GroupBy("region", "region").Count("total").SetNeedTotal(false)
+		bytesRes, err := bytesBuilder.Query(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error for []byte->string: %v", err)
+		}
+		if got := (*bytesRes.Rows[0])["region"]; got != "east" {
+			t.Fatalf("expected east, got %q", got)
+		}
+	})
+}

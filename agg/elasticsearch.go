@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -193,6 +195,9 @@ func (b *ElasticSearchBuilder[A]) buildAggregationWithOptions(options elasticAgg
 	}
 	if options.includePipeline {
 		for i, having := range b.spec.Havings {
+			if !b.elasticHavingSupportsBucketSelector(having) {
+				continue
+			}
 			buckets = buckets.SubAggregation(elasticHavingAggregationName(i), b.elasticHavingAggregation(having))
 		}
 	}
@@ -234,7 +239,7 @@ func elasticBaseMetric(metric Metric) elastic.Aggregation {
 }
 
 // elasticSumDistinctMetric 构建基于 scripted_metric 的去重求和聚合：
-// map 阶段把字段值统一转换为 double，并以其字符串形式作为去重键（值保存 double），
+// map 阶段遍历字段的全部值（兼容单值与多值数值字段），统一转换为 double 并以其字符串形式作为去重键（值保存 double），
 // 因为分片 combine 结果需跨节点序列化，Painless map 的数值键会触发 ClassCastException；
 // 统一按 double 归一化后，整型 1 与浮点 1.0 视为同一值，-0.0 归一化为 0.0；
 // 超过 2^53 的整数会按 double 精度去重与求和。
@@ -242,7 +247,7 @@ func elasticBaseMetric(metric Metric) elastic.Aggregation {
 func elasticSumDistinctMetric(metric Metric) elastic.Aggregation {
 	return elastic.NewScriptedMetricAggregation().
 		InitScript(elastic.NewScript("state.values = new HashMap()")).
-		MapScript(elastic.NewScript("if (doc.containsKey(params.field) && !doc[params.field].empty) { double value = ((Number) doc[params.field].value).doubleValue() + 0.0d; state.values.put(Double.toString(value), value); }")).
+		MapScript(elastic.NewScript("if (doc.containsKey(params.field) && !doc[params.field].empty) { for (def item : doc[params.field]) { double value = ((Number) item).doubleValue() + 0.0d; state.values.put(Double.toString(value), value); } }")).
 		CombineScript(elastic.NewScript("return state.values")).
 		ReduceScript(elastic.NewScript("Map values = new HashMap(); for (state in states) { if (state != null) { values.putAll(state); } } double sum = 0; for (value in values.values()) { sum += ((Number) value).doubleValue(); } return sum")).
 		Params(map[string]any{"field": metric.Field})
@@ -380,9 +385,20 @@ func (b *ElasticSearchBuilder[A]) needsElasticCompleteCompositeScan() bool {
 	return b.needsElasticFullClientPostProcessing() || b.needsElasticExactTotalScan()
 }
 
+// elasticHavingSupportsBucketSelector 判断指定 HAVING 引用的指标是否支持下推为 ES bucket_selector。
+// Elasticsearch 的 buckets_path 仅支持单值数值指标，不支持 scripted_metric（SumDistinct），
+// 对应 HAVING 留待客户端 filterElasticRowValues 过滤，避免触发服务端 AggregationExecutionException。
+func (b *ElasticSearchBuilder[A]) elasticHavingSupportsBucketSelector(having Having) bool {
+	metric, ok := b.metricByAlias(having.Alias)
+	if !ok {
+		return false
+	}
+	return !isDistinctSum(metric)
+}
+
 // shouldAttachHavingPipeline 在 composite 页上挂 bucket_selector，减少未通过 HAVING 的 bucket 传输
 func (b *ElasticSearchBuilder[A]) shouldAttachHavingPipeline() bool {
-	return len(b.spec.Havings) > 0
+	return slices.ContainsFunc(b.spec.Havings, b.elasticHavingSupportsBucketSelector)
 }
 
 // elasticPipelineNames 返回 Explain 展示的 composite 页上挂载的 pipeline 聚合名称
@@ -504,8 +520,17 @@ func (b *ElasticSearchBuilder[A]) fetchElasticCompositeRowValues(
 	if err != nil {
 		return nil, nil, false, err
 	}
-	hasMore := len(buckets.Buckets) > 0 && len(buckets.AfterKey) > 0
+	// 当 bucket_selector 将整页桶全部过滤掉时，ES 仍会返回空的 buckets 与非空的 after_key，
+	// 因此必须以 after_key 是否存在且有推进来判断后续页，避免提前终止遍历
+	hasMore := elasticCompositeHasMore(after, buckets.AfterKey)
 	return values, buckets.AfterKey, hasMore, nil
+}
+
+// elasticCompositeHasMore 判断 composite 聚合是否还有下一页。
+// 即使当前页所有桶都被 bucket_selector 过滤掉（buckets 为空），只要 ES 返回了新的非空 after_key，
+// 就仍需继续翻页；若 after_key 为空或未推进，则终止遍历防止死循环。
+func elasticCompositeHasMore(prevAfter, nextAfter map[string]any) bool {
+	return len(nextAfter) > 0 && !reflect.DeepEqual(prevAfter, nextAfter)
 }
 
 // shouldCountElasticTotal 判断是否仍需增加 bounded total 计数
