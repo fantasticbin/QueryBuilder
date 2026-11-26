@@ -4,10 +4,18 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 	"sync"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 )
+
+// builderFactoryKey 按（数据源, 实体类型）组合索引自定义构建器工厂，
+// 避免同一自定义数据源注册多个实体类型时互相覆盖
+type builderFactoryKey struct {
+	dataSource core.DataSource
+	resultType reflect.Type
+}
 
 // builderFactory 将任意结果类型的构造函数收成统一存储形态
 type builderFactory func(data *core.DBProxy) any
@@ -17,23 +25,31 @@ var customBuilderFactories sync.Map
 // RegisterBuilder 为非内置数据源注册查询构建器工厂
 // 自定义源需要同时 RegisterAdapter（提供客户端）和 RegisterBuilder（提供 Querier），NewBuilder 才能真正执行查询
 // 对 Gorm / MongoDB / ElasticSearch 调用会 panic，避免覆盖内置实现
-// factory 为 nil 时删除该数据源已注册的工厂，便于测试复位
+// factory 为 nil 时删除该数据源及当前实体类型 R 已注册的工厂，便于测试复位
 func RegisterBuilder[R any](ds core.DataSource, factory func(*core.DBProxy) Querier[R]) {
 	if isBuiltInQueryDataSource(ds) {
 		panic("builder: RegisterBuilder cannot override a built-in data source")
 	}
+	key := builderFactoryKey{
+		dataSource: ds,
+		resultType: reflect.TypeFor[R](),
+	}
 	if factory == nil {
-		customBuilderFactories.Delete(ds)
+		customBuilderFactories.Delete(key)
 		return
 	}
-	customBuilderFactories.Store(ds, builderFactory(func(data *core.DBProxy) any {
+	customBuilderFactories.Store(key, builderFactory(func(data *core.DBProxy) any {
 		return factory(data)
 	}))
 }
 
 // lookupCustomBuilder 查找并实例化自定义数据源的构建器
 func lookupCustomBuilder[R any](ds core.DataSource, data *core.DBProxy) (Querier[R], bool) {
-	value, ok := customBuilderFactories.Load(ds)
+	key := builderFactoryKey{
+		dataSource: ds,
+		resultType: reflect.TypeFor[R](),
+	}
+	value, ok := customBuilderFactories.Load(key)
 	if !ok {
 		return nil, false
 	}

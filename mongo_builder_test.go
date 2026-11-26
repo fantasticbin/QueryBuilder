@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	qbtest "github.com/fantasticbin/QueryBuilder/v2/test"
@@ -227,5 +228,46 @@ func TestMongoBuilderListFindOptionsProjectionAndPagination(t *testing.T) {
 	opts = resolveMongoFindOptions(b.buildListFindOptions())
 	if opts.Skip != nil || opts.Limit != nil {
 		t.Fatalf("expected no skip/limit when pagination disabled, got skip=%v limit=%v", opts.Skip, opts.Limit)
+	}
+}
+
+func TestExtractMongoCursorValuesSupportsNestedDottedPathsAndCopiedBuffer(t *testing.T) {
+	oid := bson.NewObjectID()
+	createdAt := bson.NewDateTimeFromTime(time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC))
+	doc := bson.D{
+		{Key: "_id", Value: oid},
+		{Key: "meta", Value: bson.D{
+			{Key: "created_at", Value: createdAt},
+			{Key: "rank", Value: int32(42)},
+		}},
+	}
+	wireBuf, err := bson.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal bson doc: %v", err)
+	}
+
+	// 模拟 MongoDB 游标循环中深拷贝 cursor.Current，再覆盖底层 wire 缓冲区
+	var lastRaw bson.Raw
+	lastRaw = append(lastRaw[:0], wireBuf...)
+	for i := range wireBuf {
+		wireBuf[i] = 0xff
+	}
+
+	fields := parseCursorSortFields([]string{"-meta.created_at", "meta.rank", "_id"})
+	got, err := extractMongoCursorValues(lastRaw, fields)
+	if err != nil {
+		t.Fatalf("extractMongoCursorValues unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 cursor values, got %#v", got)
+	}
+	if gotDT, ok := got[0].(bson.DateTime); !ok || gotDT != createdAt {
+		t.Fatalf("expected bson.DateTime(%v), got %T(%v)", createdAt, got[0], got[0])
+	}
+	if gotRank, ok := got[1].(int32); !ok || gotRank != 42 {
+		t.Fatalf("expected int32(42), got %T(%v)", got[1], got[1])
+	}
+	if gotOID, ok := got[2].(bson.ObjectID); !ok || gotOID != oid {
+		t.Fatalf("expected bson.ObjectID(%v), got %T(%v)", oid, got[2], got[2])
 	}
 }

@@ -43,3 +43,39 @@ func TestRegisterBuilderBuiltInPanics(t *testing.T) {
 		return NewGormBuilder[TestEntity](data)
 	})
 }
+
+func TestRegisterBuilderSupportsMultipleEntityTypesForSameDataSource(t *testing.T) {
+	type otherCustomEntity struct {
+		Code string
+	}
+	t.Cleanup(func() {
+		RegisterBuilder[TestEntity](testCustomDataSource, nil)
+		RegisterBuilder[otherCustomEntity](testCustomDataSource, nil)
+	})
+
+	RegisterBuilder[TestEntity](testCustomDataSource, func(data *core.DBProxy) Querier[TestEntity] {
+		return NewGormBuilder[TestEntity](data)
+	})
+	RegisterBuilder[otherCustomEntity](testCustomDataSource, func(data *core.DBProxy) Querier[otherCustomEntity] {
+		return NewMongoBuilder[otherCustomEntity](data)
+	})
+
+	q1 := NewBuilder[TestEntity](testCustomDataSource, NewDBProxyWithAdapters())
+	if _, ok := q1.(*GormBuilder[TestEntity]); !ok {
+		t.Fatalf("expected GormBuilder for TestEntity, got %T", q1)
+	}
+	q2 := NewBuilder[otherCustomEntity](testCustomDataSource, NewDBProxyWithAdapters())
+	if _, ok := q2.(*MongoBuilder[otherCustomEntity]); !ok {
+		t.Fatalf("expected MongoBuilder for otherCustomEntity, got %T", q2)
+	}
+
+	// 删除一个实体类型的注册不应影响同一数据源下的其他实体类型
+	RegisterBuilder[TestEntity](testCustomDataSource, nil)
+	if _, err := NewBuilder[TestEntity](testCustomDataSource, NewDBProxyWithAdapters()).QueryList(context.Background()); !errors.Is(err, ErrDataSourceInvalid) {
+		t.Fatalf("expected ErrDataSourceInvalid after unregistering TestEntity, got %v", err)
+	}
+	q2After := NewBuilder[otherCustomEntity](testCustomDataSource, NewDBProxyWithAdapters())
+	if _, ok := q2After.(*MongoBuilder[otherCustomEntity]); !ok {
+		t.Fatalf("expected otherCustomEntity factory to remain registered, got %T", q2After)
+	}
+}

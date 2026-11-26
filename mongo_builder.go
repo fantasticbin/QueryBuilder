@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/fantasticbin/QueryBuilder/v2/core"
 	"github.com/fantasticbin/QueryBuilder/v2/util"
@@ -430,7 +431,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 			_ = cursor.Close(ctx)
 		}(cursor, ctx)
 
-		// 逐条遍历 cursor，保留前 batchSize 条的最后一条原始 BSON 用于提取游标值
+		// 逐条遍历 cursor，深拷贝前 batchSize 条的最后一条原始 BSON（cursor.Current 缓冲区会在下次 Next/Close 时失效）
 		for cursor.Next(ctx) {
 			var item R
 			if err := cursor.Decode(&item); err != nil {
@@ -438,7 +439,7 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 			}
 			list = append(list, &item)
 			if len(list) <= batchSize {
-				lastRaw = cursor.Current
+				lastRaw = append(lastRaw[:0], cursor.Current...)
 			}
 		}
 		return cursor.Err()
@@ -467,19 +468,29 @@ func (m *MongoBuilder[R]) doCursorQuery(ctx context.Context, cursorValues []any,
 		list = list[:batchSize]
 	}
 
-	// 从（截断后的）最后一条文档的原始 BSON 中提取游标值（零反射）
-	nextCursorValues := make([]any, 0, len(m.builder.cursorFields))
-	for _, cursorField := range m.builder.getParsedCursorFields() {
-		rawVal, err := lastRaw.LookupErr(cursorField.Field)
-		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q not found in document: %w", cursorField.Field, err)
-		}
-		var val any
-		if err := rawVal.Unmarshal(&val); err != nil {
-			return nil, nil, 0, false, fmt.Errorf("cursor field %q unmarshal failed: %w", cursorField.Field, err)
-		}
-		nextCursorValues = append(nextCursorValues, val)
+	// 从（截断后的）最后一条文档的原始 BSON 中提取游标值（零反射，支持点分嵌套路径）
+	nextCursorValues, err := extractMongoCursorValues(lastRaw, m.builder.getParsedCursorFields())
+	if err != nil {
+		return nil, nil, 0, false, err
 	}
 
 	return list, nextCursorValues, total, hasMore, nil
+}
+
+// extractMongoCursorValues 从原始 BSON 文档按游标字段提取下一页游标值；
+// 点分路径（如 "meta.created_at"）按 "." 拆分为多段路径交给 LookupErr 查找。
+func extractMongoCursorValues(raw bson.Raw, fields []cursorSortField) ([]any, error) {
+	nextCursorValues := make([]any, 0, len(fields))
+	for _, cursorField := range fields {
+		rawVal, err := raw.LookupErr(strings.Split(cursorField.Field, ".")...)
+		if err != nil {
+			return nil, fmt.Errorf("cursor field %q not found in document: %w", cursorField.Field, err)
+		}
+		var val any
+		if err := rawVal.Unmarshal(&val); err != nil {
+			return nil, fmt.Errorf("cursor field %q unmarshal failed: %w", cursorField.Field, err)
+		}
+		nextCursorValues = append(nextCursorValues, val)
+	}
+	return nextCursorValues, nil
 }
