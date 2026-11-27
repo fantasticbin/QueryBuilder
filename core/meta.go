@@ -22,7 +22,8 @@ type QueryMeta struct {
 	DataSource     DataSource // 数据源类型
 	NeedTotal      bool       // 是否需要查询总数
 	NeedPagination bool       // 是否需要分页
-	IsCursorQuery  bool       // 是否为游标查询模式
+	IsCursorQuery  bool       // 是否为游标查询模式（QueryCursor / QueryPage / QueryPageWithPIT）
+	IsPageQuery    bool       // 是否为单批次分页查询模式（QueryPage / QueryPageWithPIT，探测 HasMore）
 	IsPITQuery     bool       // 是否为 Elasticsearch PIT + search_after 查询模式
 }
 
@@ -30,6 +31,9 @@ type QueryMeta struct {
 func (m QueryMeta) QueryMode() string {
 	if m.IsPITQuery {
 		return "pit_cursor"
+	}
+	if m.IsPageQuery {
+		return "cursor_page"
 	}
 	if m.IsCursorQuery {
 		return "cursor"

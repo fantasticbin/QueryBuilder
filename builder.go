@@ -186,6 +186,7 @@ type cursorConfig struct {
 	cursorValues          []any             // 游标初始值（外部传入，用于断点续查/App分页场景）
 	cursorValueOverlay    []any             // QueryCursor 当前批次游标，仅影响 GetQueryMeta
 	isCursorQuery         bool              // 是否为游标查询模式
+	isPageQuery           bool              // 是否为单批次分页查询模式（QueryPage / QueryPageWithPIT）
 	isPITQuery            bool              // 是否为 Elasticsearch PIT + search_after 查询模式
 	cursorValueOverlaySet bool              // 是否已设置当前批次游标覆盖
 	cursorFieldsAuto      bool              // 游标字段是否由 ensureDefaultCursorField 自动注入
@@ -281,6 +282,7 @@ func (b *builder[B, R]) GetQueryMeta() core.QueryMeta {
 		TotalLimit:     b.totalLimit,
 		NeedPagination: b.needPagination,
 		IsCursorQuery:  b.isCursorQuery,
+		IsPageQuery:    b.isPageQuery,
 		IsPITQuery:     b.isPITQuery,
 		StartTime:      b.startTime,
 	}
@@ -330,7 +332,7 @@ func (b *builder[B, R]) clearCursorValueOverlay() {
 
 // QueryList 执行查询列表操作，封装列表查询的通用生命周期
 func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], error) {
-	b.beginQueryMode(false)
+	b.beginQueryMode(false, false)
 	if err := b.prepareAndValidate(); err != nil {
 		return nil, err
 	}
@@ -350,7 +352,7 @@ func (b *builder[B, R]) QueryList(ctx context.Context) (*core.ListResult[R], err
 
 // QueryCursor 执行游标分页查询，返回迭代器（实现 Querier 接口）
 func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
-	b.beginQueryMode(true)
+	b.beginQueryMode(true, false)
 	if err := b.prepareAndValidate(); err != nil {
 		b.finishCursorQuery()
 		return func(yield func(*R, error) bool) {
@@ -380,7 +382,7 @@ func (b *builder[B, R]) QueryCursor(ctx context.Context) iter.Seq2[*R, error] {
 
 // QueryPage 执行单批次游标分页查询，返回结构化的分页结果（实现 Querier 接口）
 func (b *builder[B, R]) QueryPage(ctx context.Context) (*core.CursorPageResult[R], error) {
-	b.beginQueryMode(true)
+	b.beginQueryMode(true, true)
 	defer b.finishCursorQuery()
 	if err := b.prepareAndValidate(); err != nil {
 		return nil, err
@@ -597,14 +599,16 @@ func (b *builder[B, R]) SetCursorValue(values ...any) B {
 	return b.selfRef
 }
 
-// beginQueryMode 标记当前执行入口是否为游标查询
-func (b *builder[B, R]) beginQueryMode(isCursorQuery bool) {
+// beginQueryMode 标记当前执行入口是否为游标查询及是否为单批次分页查询
+func (b *builder[B, R]) beginQueryMode(isCursorQuery, isPageQuery bool) {
 	b.isCursorQuery = isCursorQuery
+	b.isPageQuery = isPageQuery
 }
 
 // finishCursorQuery 结束游标查询模式，避免复用 builder 时污染后续普通查询
 func (b *builder[B, R]) finishCursorQuery() {
 	b.isCursorQuery = false
+	b.isPageQuery = false
 	b.clearCursorValueOverlay()
 	if b.cursorFieldsAuto {
 		b.cursorFields = nil

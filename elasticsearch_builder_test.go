@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -277,6 +278,103 @@ func TestElasticSearchBuilderCleanupCursorQueryKeepsPITWhenHasMore(t *testing.T)
 	es.cleanupCursorQuery(nil, nil)
 	if es.cursorPitID != "" {
 		t.Fatalf("expected QueryCursor cleanup (nil result) to close PIT, got %q", es.cursorPitID)
+	}
+}
+
+func TestElasticSearchBuilderCloseAndSetESIndexReleasePIT(t *testing.T) {
+	var _ io.Closer = (*ElasticSearchBuilder[ElasticTestEntity])(nil)
+
+	var closedIDs []string
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodDelete && r.URL.Path == "/_pit" {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				closedIDs = append(closedIDs, string(bodyBytes))
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"succeeded":true,"num_freed":1}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	client, err := elastic.NewSimpleClient(
+		elastic.SetURL("http://es.local"),
+		elastic.SetHttpClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("create simple elastic client: %v", err)
+	}
+
+	es := NewElasticSearchBuilder[ElasticTestEntity](NewDBProxyWithAdapters(NewElasticSearchAdapter(client)), "idx1")
+	es.cursorPitID = "pit-open"
+	if err := es.Close(); err != nil {
+		t.Fatalf("Close unexpected error: %v", err)
+	}
+	if es.cursorPitID != "" {
+		t.Fatalf("expected Close to clear cursorPitID, got %q", es.cursorPitID)
+	}
+	// 幂等重复关闭不应再发请求
+	if err := es.Close(); err != nil {
+		t.Fatalf("second Close unexpected error: %v", err)
+	}
+
+	// 切换索引时释放旧索引 PIT
+	es.cursorPitID = "pit-idx1"
+	es.SetESIndex("idx2")
+	if es.cursorPitID != "" {
+		t.Fatalf("expected SetESIndex to clear stale cursorPitID, got %q", es.cursorPitID)
+	}
+	if len(closedIDs) != 2 || !strings.Contains(closedIDs[0], `"pit-open"`) || !strings.Contains(closedIDs[1], `"pit-idx1"`) {
+		t.Fatalf("expected two DELETE /_pit calls for pit-open and pit-idx1, got %v", closedIDs)
+	}
+}
+
+func TestQueryMetaDistinguishesQueryCursorAndQueryPage(t *testing.T) {
+	ctx := context.Background()
+	data := NewDBProxyWithAdapters(NewElasticSearchAdapter(&elastic.Client{}))
+
+	var pageMeta core.QueryMeta
+	bPage := NewElasticSearchBuilder[ElasticTestEntity](data, "idx")
+	bPage.SetCursorField("id").Use(func(
+		ctx context.Context,
+		b Querier[ElasticTestEntity],
+		next func(context.Context) (core.Result[ElasticTestEntity], error),
+	) (core.Result[ElasticTestEntity], error) {
+		pageMeta = b.GetQueryMeta()
+		return &core.CursorPageResult[ElasticTestEntity]{Items: []*ElasticTestEntity{{ID: 1}}, HasMore: true, NextCursorValues: []any{1}}, nil
+	})
+	if _, err := bPage.QueryPage(ctx); err != nil {
+		t.Fatalf("QueryPage unexpected error: %v", err)
+	}
+	if !pageMeta.IsCursorQuery || !pageMeta.IsPageQuery || pageMeta.QueryMode() != "cursor_page" {
+		t.Fatalf("unexpected QueryPage meta: %+v mode=%s", pageMeta, pageMeta.QueryMode())
+	}
+	if after := bPage.GetQueryMeta(); after.IsCursorQuery || after.IsPageQuery {
+		t.Fatalf("expected QueryPage to restore flags after completion: %+v", after)
+	}
+
+	var cursorMeta core.QueryMeta
+	bCursor := NewElasticSearchBuilder[ElasticTestEntity](data, "idx")
+	bCursor.SetCursorField("id").Use(func(
+		ctx context.Context,
+		b Querier[ElasticTestEntity],
+		next func(context.Context) (core.Result[ElasticTestEntity], error),
+	) (core.Result[ElasticTestEntity], error) {
+		cursorMeta = b.GetQueryMeta()
+		return &core.CursorPageResult[ElasticTestEntity]{Items: []*ElasticTestEntity{{ID: 1}}}, nil
+	})
+	for _, err := range bCursor.QueryCursor(ctx) {
+		if err != nil {
+			t.Fatalf("QueryCursor unexpected error: %v", err)
+		}
+	}
+	if !cursorMeta.IsCursorQuery || cursorMeta.IsPageQuery || cursorMeta.QueryMode() != "cursor" {
+		t.Fatalf("unexpected QueryCursor meta: %+v mode=%s", cursorMeta, cursorMeta.QueryMode())
 	}
 }
 

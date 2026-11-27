@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1363,5 +1367,136 @@ func TestListQueryPageWithPITRejectsCursorWithoutPITID(t *testing.T) {
 	)
 	if !errors.Is(err, ErrPITCursorWithoutPITID) {
 		t.Fatalf("expected ErrPITCursorWithoutPITID, got %v", err)
+	}
+}
+
+func TestListConcurrentQueryAndGetQueryMetaNoRace(t *testing.T) {
+	ctx := context.Background()
+	data := NewDBProxyWithAdapters(NewGormAdapter(&gorm.DB{}))
+	list := NewListWithData[TestEntity](Gorm, data)
+	list.Use(func(
+		ctx context.Context,
+		b Querier[TestEntity],
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
+		meta := b.GetQueryMeta()
+		if meta.IsPageQuery {
+			return &core.CursorPageResult[TestEntity]{
+				Items:            []*TestEntity{{ID: 1}},
+				Total:            1,
+				HasMore:          false,
+				NextCursorValues: nil,
+			}, nil
+		}
+		return &core.ListResult[TestEntity]{
+			Items: []*TestEntity{{ID: 1}},
+			Total: 1,
+		}, nil
+	})
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := range 20 {
+				limit := uint32((id+j)%10 + 1)
+				if j%2 == 0 {
+					if _, err := list.Query(ctx, WithLimit(limit), WithFields("id", "name")); err != nil {
+						t.Errorf("Query unexpected error: %v", err)
+						return
+					}
+				} else {
+					if _, err := list.QueryPage(ctx, WithLimit(limit), WithCursorField("id")); err != nil {
+						t.Errorf("QueryPage unexpected error: %v", err)
+						return
+					}
+				}
+				meta := list.GetQueryMeta()
+				// 校验返回的切片是副本，并发修改不影响内部快照
+				if len(meta.Fields) > 0 {
+					meta.Fields[0] = "mutated"
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestListQueryPageClosesEphemeralElasticSearchPIT(t *testing.T) {
+	ctx := context.Background()
+	var closedPITBody string
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodDelete && r.URL.Path == "/_pit" {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				closedPITBody = string(bodyBytes)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"succeeded":true,"num_freed":1}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}),
+	}
+	client, err := elastic.NewSimpleClient(
+		elastic.SetURL("http://es.local"),
+		elastic.SetHttpClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("create simple elastic client: %v", err)
+	}
+
+	list := NewList[TestEntity]()
+	list.SetDataSource(ElasticSearch)
+
+	var captured *ElasticSearchBuilder[TestEntity]
+	list.Use(func(
+		ctx context.Context,
+		b Querier[TestEntity],
+		next func(context.Context) (core.Result[TestEntity], error),
+	) (core.Result[TestEntity], error) {
+		es, ok := b.(*ElasticSearchBuilder[TestEntity])
+		if !ok {
+			t.Fatalf("expected *ElasticSearchBuilder, got %T", b)
+		}
+		// 模拟该次 QueryPage 打开了内部 PIT 且返回 HasMore=true
+		es.cursorPitID = "pit-ephemeral"
+		captured = es
+		return &core.CursorPageResult[TestEntity]{
+			Items:            []*TestEntity{{ID: 1}},
+			Total:            10,
+			HasMore:          true,
+			NextCursorValues: []any{1},
+		}, nil
+	})
+
+	page, err := list.QueryPage(ctx,
+		WithData(NewDBProxyWithAdapters(NewElasticSearchAdapter(client))),
+		WithESIndex("users"),
+		WithCursorField("id"),
+	)
+	if err != nil {
+		t.Fatalf("QueryPage unexpected error: %v", err)
+	}
+	if !page.HasMore {
+		t.Fatal("expected HasMore=true")
+	}
+	if captured == nil {
+		t.Fatal("expected middleware to capture ElasticSearchBuilder")
+	}
+	if captured.cursorPitID != "" {
+		t.Fatalf("expected List.QueryPage to close ephemeral PIT, got %q", captured.cursorPitID)
+	}
+	if !strings.Contains(closedPITBody, `"pit-ephemeral"`) {
+		t.Fatalf("expected DELETE /_pit request for pit-ephemeral, got %q", closedPITBody)
 	}
 }

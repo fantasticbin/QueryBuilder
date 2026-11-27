@@ -74,8 +74,13 @@ func (e *ElasticSearchBuilder[R]) Clone() *ElasticSearchBuilder[R] {
 }
 
 // SetESIndex 设置 Elasticsearch 索引名（仅 ElasticSearch 构建器专属方法）
+// 切换索引时若存在旧索引的内部 PIT，主动关闭以避免句柄泄漏
 // 返回 *ElasticSearchBuilder[R]，支持链式调用
 func (e *ElasticSearchBuilder[R]) SetESIndex(index string) *ElasticSearchBuilder[R] {
+	if e.index != index && e.cursorPitID != "" {
+		e.closePIT(e.cursorPitID)
+		e.cursorPitID = ""
+	}
 	e.index = index
 	return e
 }
@@ -200,10 +205,22 @@ func (e *ElasticSearchBuilder[R]) cleanupCursorQuery(result *core.CursorPageResu
 	e.cursorPitID = ""
 }
 
+// Close 主动关闭当前构建器在 QueryPage 期间保留的内部 PIT，
+// 适用于提前终止翻页、未走到 HasMore=false 时避免 PIT 句柄泄漏到 keep_alive 超时；
+// 幂等，多次调用安全，实现 io.Closer 接口。
+func (e *ElasticSearchBuilder[R]) Close() error {
+	if e == nil || e.cursorPitID == "" {
+		return nil
+	}
+	pitID := e.cursorPitID
+	e.cursorPitID = ""
+	return e.closePITWithErr(pitID)
+}
+
 // QueryPageWithPIT 执行基于 PIT + search_after 的单批次分页查询
 // 该方法仅关注 ES 对接语义：接收/返回 pitID 与 cursorValues，便于业务层自行封装分页协议
 func (e *ElasticSearchBuilder[R]) QueryPageWithPIT(ctx context.Context) (*core.ESPITPageResult[R], error) {
-	e.builder.beginQueryMode(true)
+	e.builder.beginQueryMode(true, true)
 	e.builder.isPITQuery = true
 	defer func() {
 		e.builder.isPITQuery = false
@@ -642,17 +659,23 @@ func (e *ElasticSearchBuilder[R]) pitKeepAliveString() string {
 
 // closePIT 关闭 Point-in-Time，释放 ES 资源
 func (e *ElasticSearchBuilder[R]) closePIT(pitID string) {
-	if pitID == "" {
-		return
+	_ = e.closePITWithErr(pitID)
+}
+
+// closePITWithErr 关闭 Point-in-Time 并返回 ES 关闭错误（未配置数据源或 pitID 为空时无操作）
+func (e *ElasticSearchBuilder[R]) closePITWithErr(pitID string) error {
+	if pitID == "" || e.builder.data == nil {
+		return nil
 	}
 	client, err := e.builder.data.ElasticSearchClient()
 	if err != nil {
-		return
+		return nil
 	}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), esPITCloseTimeout)
 	defer cancel()
-	_, _ = client.ClosePointInTime(pitID).Do(closeCtx)
+	_, err = client.ClosePointInTime(pitID).Do(closeCtx)
+	return err
 }
 
 // doElasticCursorQuery 执行 ElasticSearch 游标分页的单批次查询
